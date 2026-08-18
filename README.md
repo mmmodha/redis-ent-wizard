@@ -9,7 +9,7 @@ End-to-end on a laptop with Docker. Local mode has auth disabled — anyone who 
 ### You need
 
 1. **Docker Desktop** (or Docker Engine + Compose v2)
-2. A **GCP service account JSON** key for the project you will deploy into
+2. A **GCP service account JSON** key for the project you will deploy into (paste it in the UI — you do not have to copy it into the repo)
 3. An **SSH key** at `~/.ssh/google_compute_engine.pub` (create with `ssh-keygen -t rsa -f ~/.ssh/google_compute_engine` if you do not have one)
 4. A **Cloud DNS managed zone** in that project (the wizard lists them; Redis demo default is often `demo-clusters` / `demo.redislabs.com`)
 
@@ -29,15 +29,14 @@ For **GKE** add `roles/container.clusterAdmin`, and `roles/iam.serviceAccountUse
 ```bash
 git clone https://github.com/mmmodha/redis-ent-wizard.git
 cd redis-ent-wizard
-
-# Your key — never commit this file
-mkdir -p data/credentials
-cp /path/to/your-sa.json data/credentials/sa.json
-
 docker compose up --build
 ```
 
 Open **http://localhost:3000**
+
+You do **not** need to copy the SA JSON onto disk. Go to **Credentials → Add your JSON**, paste the key, **Save**, then **Verify**. The wizard’s credentials dropdown will list it.
+
+Optional alternative: `cp /path/to/your-sa.json data/credentials/sa.json` and skip the paste step (handy if you already keep keys in that folder).
 
 | Port | Service |
 | --- | --- |
@@ -48,7 +47,7 @@ No `.env` is required for a local test. `AUTH_DISABLED=true` is the Compose defa
 
 ### Smoke test in the UI
 
-1. **Credentials** — confirm your key is listed. Click **Verify**. VM should be ready before you create a cluster. Fix any failed checks with the `gcloud` snippets shown.
+1. **Credentials** — paste your SA JSON (or pick a file you dropped in `data/credentials/`). Click **Verify**. VM should be ready before you create a cluster. Fix any failed checks with the `gcloud` snippets shown.
 2. **Create** wizard:
    - Credentials: pick the JSON, project, region, **Created by** (your email)
    - Target: start with **VM** (smaller blast radius than GKE)
