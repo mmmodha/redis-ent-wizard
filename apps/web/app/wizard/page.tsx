@@ -14,12 +14,15 @@ import {
   listProjects,
   listRegions,
   runPreflight,
+  listReleases,
   type Credential,
   type DnsZoneInfo,
+  type GkeOperatorInfo,
   type MachineTypeInfo,
   type PreflightResult,
   type ProjectInfo,
   type RegionInfo,
+  type RsReleaseInfo,
 } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 
@@ -27,6 +30,50 @@ type Mode = "vm" | "gke";
 
 const steps = ["Credentials", "Target", "Sizing", "Validate"];
 const LOCAL_SSD_GIB = 375;
+const APP_DISK_GIB_OPTIONS = [0, 50, 100, 200, 500, 1000];
+const DEFAULT_RS_VERSION = "8.2.0-46";
+
+type ClusterDraft = {
+  name: string;
+  nodes: number;
+  machine_type: string;
+  rof_nvme_disks: number;
+  rs_version: string;
+  rec_nodes: number;
+};
+
+function blankCluster(machine = ""): ClusterDraft {
+  return {
+    name: "",
+    nodes: 3,
+    machine_type: machine,
+    rof_nvme_disks: 0,
+    rs_version: DEFAULT_RS_VERSION,
+    rec_nodes: 3,
+  };
+}
+
+function clusterSlug(raw: string): string {
+  return raw
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 20)
+    .replace(/-+$/g, "");
+}
+
+function previewClusterPrefix(instance: string, env: string, name: string, index: number): string {
+  const base = `${instance || "instance"}-${env || "default"}`;
+  const slug = clusterSlug(name);
+  if (slug) return `${base}-${slug}`;
+  return index <= 0 ? base : `${base}-c${index + 1}`;
+}
+
+function extraPortsLooksValid(value: string): boolean {
+  if (!value.trim()) return true;
+  return /^[\d\s,;\-]+$/.test(value);
+}
 
 export default function WizardPage() {
   const router = useRouter();
@@ -47,6 +94,8 @@ export default function WizardPage() {
   const [checking, setChecking] = useState(false);
 
   const [existingFolders, setExistingFolders] = useState<string[]>([]);
+  const [vmReleases, setVmReleases] = useState<RsReleaseInfo[]>([]);
+  const [gkeReleases, setGkeReleases] = useState<GkeOperatorInfo[]>([]);
 
   const [form, setForm] = useState({
     name: "",
@@ -61,15 +110,19 @@ export default function WizardPage() {
     clustersize: 3,
     machine_type: "",
     rof_nvme_disks: 0,
+    clusters: [blankCluster()] as ClusterDraft[],
     RS_admin: "admin@redis.io",
     app: 0,
     app_machine_types: [] as string[],
     memviz_enabled: false,
     app_expose_http: false,
     app_expose_https: false,
+    app_disk_gib: [] as number[],
+    app_extra_ports: "",
     gke_clustersize: 3,
     gke_machine_type: "",
     rec_nodes: 3,
+    operator_chart_version: "latest",
     dns_managed_zone: "",
     dns_zone_dns_name: "",
   });
@@ -103,6 +156,15 @@ export default function WizardPage() {
     listFolders()
       .then((list) => setExistingFolders(list.map((f) => f.folder).filter(Boolean)))
       .catch(() => setExistingFolders([]));
+    listReleases()
+      .then((r) => {
+        setVmReleases(r.vm);
+        setGkeReleases(r.gke);
+      })
+      .catch(() => {
+        setVmReleases([{ id: DEFAULT_RS_VERSION, label: "8.2.0-46 (default)", url: "" }]);
+        setGkeReleases([{ id: "latest", label: "Latest operator chart", chartVersion: "" }]);
+      });
   }, []);
 
   // Credentials -> projects
@@ -208,6 +270,15 @@ export default function WizardPage() {
               : list.some((m) => m.name === "e2-standard-8")
                 ? "e2-standard-8"
                 : list[0]?.name || "",
+          clusters: prev.clusters.map((c) => ({
+            ...c,
+            machine_type:
+              c.machine_type && list.some((m) => m.name === c.machine_type)
+                ? c.machine_type
+                : list.some((m) => m.name === "e2-standard-2")
+                  ? "e2-standard-2"
+                  : list[0]?.name || "",
+          })),
           app_machine_types: (() => {
             const fallback = list.some((m) => m.name === "n2-standard-8")
               ? "n2-standard-8"
@@ -241,16 +312,29 @@ export default function WizardPage() {
       region_zones: form.region_zones,
     };
     if (form.mode === "vm") {
+      const clusters = form.clusters;
+      const first = clusters[0] || blankCluster(form.machine_type);
       Object.assign(base, {
-        clustersize: Number(form.clustersize),
-        machine_type: form.machine_type,
-        rof_nvme_disks: Number(form.rof_nvme_disks),
+        clustersize: Number(first.nodes),
+        machine_type: first.machine_type,
+        rof_nvme_disks: Number(first.rof_nvme_disks),
+        rs_version: first.rs_version,
+        clusters: clusters.map((c) => ({
+          name: c.name.trim() || undefined,
+          nodes: Number(c.nodes),
+          machine_type: c.machine_type,
+          rof_nvme_disks: Number(c.rof_nvme_disks),
+          rs_version: c.rs_version,
+        })),
         RS_admin: form.RS_admin,
         app: Number(form.app),
         app_machine_types: form.app > 0 ? form.app_machine_types.slice(0, form.app) : undefined,
         memviz_enabled: form.app > 0 ? form.memviz_enabled : false,
         app_expose_http: form.app > 0 ? form.app_expose_http : false,
         app_expose_https: form.app > 0 ? form.app_expose_https : false,
+        app_disk_gib: form.app > 0 ? form.app_disk_gib.slice(0, form.app) : undefined,
+        app_extra_ports:
+          form.app > 0 && form.app_extra_ports.trim() ? form.app_extra_ports.trim() : undefined,
         dns_managed_zone: form.dns_managed_zone,
         dns_zone_dns_name: form.dns_zone_dns_name,
       });
@@ -258,7 +342,13 @@ export default function WizardPage() {
       Object.assign(base, {
         gke_clustersize: Number(form.gke_clustersize),
         gke_machine_type: form.gke_machine_type,
-        rec_nodes: Number(form.rec_nodes),
+        rec_nodes: Number(form.clusters[0]?.rec_nodes || form.rec_nodes),
+        operator_chart_version: form.operator_chart_version,
+        clusters: form.clusters.map((c) => ({
+          name: c.name.trim() || undefined,
+          rec_nodes: Number(c.rec_nodes),
+          nodes: Number(c.rec_nodes),
+        })),
       });
     }
     return base;
@@ -289,11 +379,24 @@ export default function WizardPage() {
       );
     }
     if (step === 2) {
-      if (form.mode === "gke") return Boolean(form.gke_machine_type);
-      if (!form.machine_type) return false;
+      const slugs = form.clusters.map((c) => clusterSlug(c.name));
+      const required = form.clusters.length > 1;
+      if (slugs.some((slug, i) => (required || form.clusters[i].name.trim()) && (!slug || !/^[a-z]/.test(slug) || slug === "app" || slug === "gke"))) {
+        return false;
+      }
+      const named = slugs.filter(Boolean);
+      if (required && named.length !== form.clusters.length) return false;
+      if (new Set(named).size !== named.length) return false;
+      if (form.mode === "gke") {
+        if (!form.gke_machine_type) return false;
+        if (form.clusters.some((c) => !c.rec_nodes)) return false;
+        return true;
+      }
+      if (form.clusters.some((c) => !c.machine_type)) return false;
       if (form.app > 0) {
         if (form.app_machine_types.length < form.app) return false;
         if (form.app_machine_types.slice(0, form.app).some((t) => !t)) return false;
+        if (!extraPortsLooksValid(form.app_extra_ports)) return false;
       }
       return true;
     }
@@ -314,15 +417,15 @@ export default function WizardPage() {
         value: `${form.region_name} [${form.region_zones.join(", ")}]`,
       });
       rows.push({
-        label: "Redis nodes",
-        value: `${form.clustersize} × ${form.machine_type}`,
-      });
-      rows.push({
-        label: "Local NVMe",
-        value:
-          form.rof_nvme_disks > 0
-            ? `${form.rof_nvme_disks} × ${LOCAL_SSD_GIB} GiB per node · Redis on Flash · ≈ ${form.clustersize * form.rof_nvme_disks * LOCAL_SSD_GIB} GiB total`
-            : "None — RAM only",
+        label: "Redis clusters",
+        value: form.clusters
+          .map(
+            (c, i) =>
+              `${c.name.trim() ? `${clusterSlug(c.name) || c.name} ` : form.clusters.length > 1 ? `C${i + 1} ` : ""}${c.nodes} × ${c.machine_type || "?"} · ${c.rs_version}${
+                c.rof_nvme_disks > 0 ? ` · ${c.rof_nvme_disks} NVMe` : ""
+              }`,
+          )
+          .join("; "),
       });
       rows.push({
         label: "App VMs",
@@ -332,9 +435,20 @@ export default function WizardPage() {
             : "None",
       });
       if (form.app > 0) {
+        const disks = form.app_disk_gib.slice(0, form.app);
+        const extraDisks = disks.filter((n) => n > 0);
+        rows.push({
+          label: "App extra disks",
+          value: extraDisks.length
+            ? disks
+                .map((n, i) => (n > 0 ? `VM${i + 1} +${n} GiB /data` : `VM${i + 1} boot only`))
+                .join("; ")
+            : "None — 30 GiB boot disk only",
+        });
         const ports = [
           form.app_expose_http ? "HTTP :80" : null,
           form.app_expose_https ? "HTTPS :443" : null,
+          form.app_extra_ports.trim() ? `TCP ${form.app_extra_ports.trim()}` : null,
         ].filter(Boolean);
         rows.push({
           label: "App web ports",
@@ -354,10 +468,24 @@ export default function WizardPage() {
         label: "GKE nodes",
         value: `${form.gke_clustersize} × ${form.gke_machine_type}`,
       });
-      rows.push({ label: "REC nodes", value: String(form.rec_nodes) });
+      rows.push({
+        label: "Operator",
+        value:
+          gkeReleases.find((r) => r.id === form.operator_chart_version)?.label ||
+          form.operator_chart_version,
+      });
+      rows.push({
+        label: "REC clusters",
+        value: form.clusters
+          .map((c, i) => {
+            const tag = c.name.trim() ? clusterSlug(c.name) || c.name : form.clusters.length > 1 ? `C${i + 1}` : "";
+            return `${tag ? `${tag} ` : ""}${c.rec_nodes} nodes`;
+          })
+          .join("; "),
+      });
     }
     return rows;
-  }, [form, credentials]);
+  }, [form, credentials, gkeReleases]);
 
   const runChecks = useCallback(async () => {
     setChecking(true);
@@ -393,6 +521,7 @@ export default function WizardPage() {
     <div>
       <div className="page-head">
         <div>
+          <p className="page-eyebrow">Wizard</p>
           <h2 className="page-title">Create instance</h2>
           <p className="page-sub">Validated against your GCP project before anything is created</p>
         </div>
@@ -573,57 +702,162 @@ export default function WizardPage() {
         {step === 2 && form.mode === "vm" && (
           <div className="grid grid-2">
             <label>
-              Cluster nodes
+              How many Redis clusters?
               <select
-                value={form.clustersize}
-                onChange={(e) => update("clustersize", Number(e.target.value))}
+                value={form.clusters.length}
+                onChange={(e) => {
+                  const next = Number(e.target.value);
+                  setForm((prev) => {
+                    const fallback = prev.clusters[0]?.machine_type || prev.machine_type;
+                    const clusters = Array.from({ length: next }, (_, i) =>
+                      prev.clusters[i] || { ...blankCluster(fallback), machine_type: fallback },
+                    );
+                    return { ...prev, clusters, clustersize: clusters[0].nodes, machine_type: clusters[0].machine_type };
+                  });
+                  setPreflightResult(null);
+                }}
               >
-                <option value={1}>1 — single node (testing)</option>
-                <option value={3}>3 — HA, rack aware</option>
-                <option value={5}>5 — HA, larger</option>
-                <option value={7}>7 — HA, largest</option>
-              </select>
-            </label>
-
-            <MachineTypePicker
-              label="Redis node machine type"
-              value={form.machine_type}
-              onChange={(v) => update("machine_type", v)}
-              machineTypes={machineTypes}
-              loading={loading.machines}
-              showNvmeHint
-              preferredFamilies={["e2", "n2", "n2d"]}
-              hint={`Pick a family first (e2, n2, …), then the size — types available in ${probeZone || "selected zone"}`}
-            />
-
-            <label>
-              Local NVMe disks per node
-              <select
-                value={form.rof_nvme_disks}
-                onChange={(e) => update("rof_nvme_disks", Number(e.target.value))}
-              >
-                <option value={0}>0 — RAM only (default)</option>
-                {[1, 2, 4, 8].map((n) => {
-                  const max =
-                    machineTypes.find((m) => m.name === form.machine_type)?.maxLocalSsds ?? 24;
-                  return (
-                    <option key={n} value={n} disabled={n > max}>
-                      {n} × {LOCAL_SSD_GIB} GiB Local SSD{n > max ? " (not supported)" : ""}
-                    </option>
-                  );
-                })}
+                <option value={1}>1 cluster</option>
+                <option value={2}>2 clusters</option>
+                <option value={3}>3 clusters</option>
               </select>
               <span className="hint">
-                {form.rof_nvme_disks > 0
-                  ? `Redis on Flash · ~${form.clustersize * form.rof_nvme_disks * LOCAL_SSD_GIB} GiB total flash across ${form.clustersize} node(s). Ephemeral with the VM.`
-                  : "Optional — attach GCP Local SSD NVMe for Redis on Flash"}
+                One VPC and DNS zone for the whole deployment. Each cluster can be a different size
+                and Redis version. Shared App VMs are below.
               </span>
-              {form.rof_nvme_disks > 0 ? (
-                <span className="chip" style={{ marginTop: 8, display: "inline-flex" }}>
-                  Redis on Flash enabled
-                </span>
-              ) : null}
             </label>
+            <div />
+
+            {form.clusters.map((cluster, i) => (
+              <div className="cluster-card" key={`redis-cluster-${i}`}>
+                <h3 className="companion-title">
+                  {cluster.name.trim()
+                    ? clusterSlug(cluster.name) || `Redis cluster ${i + 1}`
+                    : form.clusters.length > 1
+                      ? `Redis cluster ${i + 1}`
+                      : "Redis cluster"}
+                </h3>
+                <label>
+                  Cluster name
+                  <input
+                    value={cluster.name}
+                    onChange={(e) => {
+                      const name = e.target.value.slice(0, 40);
+                      setForm((prev) => ({
+                        ...prev,
+                        clusters: prev.clusters.map((c, idx) => (idx === i ? { ...c, name } : c)),
+                      }));
+                      setPreflightResult(null);
+                    }}
+                    placeholder={form.clusters.length > 1 ? i === 0 ? "cache" : "search" : "optional — cache"}
+                    required={form.clusters.length > 1}
+                  />
+                  <span className="hint">
+                    DNS and VMs: {previewClusterPrefix(form.name, form.env, cluster.name, i)}
+                    {form.clusters.length > 1 ? " · required, unique" : " · optional"}
+                  </span>
+                </label>
+                <label>
+                  Cluster nodes
+                  <select
+                    value={cluster.nodes}
+                    onChange={(e) => {
+                      const nodes = Number(e.target.value);
+                      setForm((prev) => {
+                        const clusters = prev.clusters.map((c, idx) => (idx === i ? { ...c, nodes } : c));
+                        return {
+                          ...prev,
+                          clusters,
+                          clustersize: clusters[0].nodes,
+                        };
+                      });
+                      setPreflightResult(null);
+                    }}
+                  >
+                    <option value={1}>1 — single node (testing)</option>
+                    <option value={3}>3 — HA, rack aware</option>
+                    <option value={5}>5 — HA, larger</option>
+                    <option value={7}>7 — HA, largest</option>
+                  </select>
+                </label>
+                <MachineTypePicker
+                  label="Redis node machine type"
+                  value={cluster.machine_type}
+                  onChange={(v) => {
+                    setForm((prev) => {
+                      const clusters = prev.clusters.map((c, idx) =>
+                        idx === i ? { ...c, machine_type: v } : c,
+                      );
+                      return {
+                        ...prev,
+                        clusters,
+                        machine_type: clusters[0].machine_type,
+                      };
+                    });
+                    setPreflightResult(null);
+                  }}
+                  machineTypes={machineTypes}
+                  loading={loading.machines}
+                  showNvmeHint
+                  preferredFamilies={["e2", "n2", "n2d"]}
+                  hint={`Types available in ${probeZone || "selected zone"}`}
+                />
+                <label>
+                  Redis Enterprise version
+                  <select
+                    value={cluster.rs_version}
+                    onChange={(e) => {
+                      const rs_version = e.target.value;
+                      setForm((prev) => ({
+                        ...prev,
+                        clusters: prev.clusters.map((c, idx) => (idx === i ? { ...c, rs_version } : c)),
+                      }));
+                      setPreflightResult(null);
+                    }}
+                  >
+                    {(vmReleases.length ? vmReleases : [{ id: DEFAULT_RS_VERSION, label: DEFAULT_RS_VERSION, url: "" }]).map(
+                      (r) => (
+                        <option key={r.id} value={r.id}>
+                          {r.label}
+                        </option>
+                      ),
+                    )}
+                  </select>
+                </label>
+                <label>
+                  Local NVMe disks per node
+                  <select
+                    value={cluster.rof_nvme_disks}
+                    onChange={(e) => {
+                      const rof_nvme_disks = Number(e.target.value);
+                      setForm((prev) => {
+                        const clusters = prev.clusters.map((c, idx) =>
+                          idx === i ? { ...c, rof_nvme_disks } : c,
+                        );
+                        return { ...prev, clusters, rof_nvme_disks: clusters[0].rof_nvme_disks };
+                      });
+                      setPreflightResult(null);
+                    }}
+                  >
+                    <option value={0}>0 — RAM only (default)</option>
+                    {[1, 2, 4, 8].map((n) => {
+                      const max =
+                        machineTypes.find((m) => m.name === cluster.machine_type)?.maxLocalSsds ?? 24;
+                      return (
+                        <option key={n} value={n} disabled={n > max}>
+                          {n} × {LOCAL_SSD_GIB} GiB Local SSD{n > max ? " (not supported)" : ""}
+                        </option>
+                      );
+                    })}
+                  </select>
+                  <span className="hint">
+                    {cluster.rof_nvme_disks > 0
+                      ? `Redis on Flash · ~${cluster.nodes * cluster.rof_nvme_disks * LOCAL_SSD_GIB} GiB flash on this cluster`
+                      : "Optional Local SSD NVMe for Redis on Flash"}
+                  </span>
+                </label>
+              </div>
+            ))}
 
             <label>
               Zones
@@ -717,13 +951,16 @@ export default function WizardPage() {
                           machineTypes[0]?.name ||
                           "";
                         const types = Array.from({ length: next }, (_, i) => prev.app_machine_types[i] || fallback);
+                        const disks = Array.from({ length: next }, (_, i) => prev.app_disk_gib[i] || 0);
                         return {
                           ...prev,
                           app: next,
                           app_machine_types: types,
+                          app_disk_gib: disks,
                           memviz_enabled: next > 0 ? prev.memviz_enabled : false,
                           app_expose_http: next > 0 ? prev.app_expose_http : false,
                           app_expose_https: next > 0 ? prev.app_expose_https : false,
+                          app_extra_ports: next > 0 ? prev.app_extra_ports : "",
                         };
                       });
                       setPreflightResult(null);
@@ -783,38 +1020,89 @@ export default function WizardPage() {
                 {form.app > 0 ? (
                   <div style={{ gridColumn: "1 / -1" }} className="app-vm-sizes">
                     <p className="hint" style={{ margin: "4px 0 8px" }}>
-                      Size each App VM independently — use a larger type for memtier / demos and
-                      smaller ones for light clients.
+                      Size each App VM independently — pick a larger type for memtier / demos and
+                      attach extra disk if the app needs space beyond the 30 GiB boot disk.
                     </p>
                     {Array.from({ length: form.app }, (_, i) => (
-                      <MachineTypePicker
-                        key={`app-vm-${i}`}
-                        label={
-                          i === 0
-                            ? `App VM 1 machine type${form.memviz_enabled ? " (Memviz host)" : ""}`
-                            : `App VM ${i + 1} machine type`
-                        }
-                        value={form.app_machine_types[i] || ""}
-                        onChange={(v) => {
-                          setForm((prev) => {
-                            const next = [...prev.app_machine_types];
-                            while (next.length < prev.app) next.push("");
-                            next[i] = v;
-                            return { ...prev, app_machine_types: next.slice(0, prev.app) };
-                          });
-                          setPreflightResult(null);
-                        }}
-                        machineTypes={machineTypes}
-                        loading={loading.machines}
-                        preferredFamilies={["n2", "e2", "n2d"]}
-                        hint={
-                          i === 0
-                            ? "Often the largest of the set if you run memtier or Memviz here"
-                            : "Can be smaller than App VM 1 to save cost"
-                        }
-                      />
+                      <div className="app-vm-card" key={`app-vm-${i}`}>
+                        <MachineTypePicker
+                          label={
+                            i === 0
+                              ? `App VM 1 machine type${form.memviz_enabled ? " (Memviz host)" : ""}`
+                              : `App VM ${i + 1} machine type`
+                          }
+                          value={form.app_machine_types[i] || ""}
+                          onChange={(v) => {
+                            setForm((prev) => {
+                              const next = [...prev.app_machine_types];
+                              while (next.length < prev.app) next.push("");
+                              next[i] = v;
+                              return { ...prev, app_machine_types: next.slice(0, prev.app) };
+                            });
+                            setPreflightResult(null);
+                          }}
+                          machineTypes={machineTypes}
+                          loading={loading.machines}
+                          preferredFamilies={["n2", "e2", "n2d"]}
+                          hint={
+                            i === 0
+                              ? "Often the largest of the set if you run memtier or Memviz here"
+                              : "Can be smaller than App VM 1 to save cost"
+                          }
+                        />
+                        <label>
+                          Additional storage
+                          <select
+                            value={form.app_disk_gib[i] || 0}
+                            onChange={(e) => {
+                              const gib = Number(e.target.value);
+                              setForm((prev) => {
+                                const next = [...prev.app_disk_gib];
+                                while (next.length < prev.app) next.push(0);
+                                next[i] = gib;
+                                return { ...prev, app_disk_gib: next.slice(0, prev.app) };
+                              });
+                              setPreflightResult(null);
+                            }}
+                          >
+                            {APP_DISK_GIB_OPTIONS.map((gib) => (
+                              <option key={gib} value={gib}>
+                                {gib === 0
+                                  ? "None — 30 GiB boot disk only"
+                                  : `${gib} GiB extra disk, mounted at /data`}
+                              </option>
+                            ))}
+                          </select>
+                          <span className="hint">
+                            Persistent pd-balanced disk, formatted ext4 and mounted at{" "}
+                            <code className="mono">/data</code>
+                          </span>
+                        </label>
+                      </div>
                     ))}
                   </div>
+                ) : null}
+
+                {form.app > 0 ? (
+                  <details className="app-advanced">
+                    <summary>Advanced: extra TCP ports</summary>
+                    <label>
+                      Additional TCP ports to open
+                      <input
+                        type="text"
+                        value={form.app_extra_ports}
+                        placeholder="8080, 9090, 3000-3002"
+                        onChange={(e) => update("app_extra_ports", e.target.value)}
+                      />
+                      <span className="hint">
+                        Comma-separated ports or ranges, opened from the internet on every App VM.
+                        SSH :22 is always open. Use the HTTP/HTTPS toggles for 80 and 443.
+                      </span>
+                      {!extraPortsLooksValid(form.app_extra_ports) ? (
+                        <span className="field-error">Use numbers, commas, and ranges like 3000-3002</span>
+                      ) : null}
+                    </label>
+                  </details>
                 ) : null}
               </div>
             </div>
@@ -824,17 +1112,127 @@ export default function WizardPage() {
         {step === 2 && form.mode === "gke" && (
           <div className="grid grid-2">
             <label>
+              How many Redis clusters?
+              <select
+                value={form.clusters.length}
+                onChange={(e) => {
+                  const next = Number(e.target.value);
+                  setForm((prev) => {
+                    const clusters = Array.from(
+                      { length: next },
+                      (_, i) => prev.clusters[i] || blankCluster(prev.gke_machine_type),
+                    );
+                    const sum = clusters.reduce((n, c) => n + c.rec_nodes, 0);
+                    return {
+                      ...prev,
+                      clusters,
+                      rec_nodes: clusters[0].rec_nodes,
+                      gke_clustersize: Math.max(prev.gke_clustersize, sum),
+                    };
+                  });
+                  setPreflightResult(null);
+                }}
+              >
+                <option value={1}>1 REC</option>
+                <option value={2}>2 RECs</option>
+                <option value={3}>3 RECs</option>
+              </select>
+              <span className="hint">
+                One GKE cluster and one operator. Each REC can have a different node count. Redis
+                version is the operator chart (shared).
+              </span>
+            </label>
+            <label>
+              Operator / Redis version
+              <select
+                value={form.operator_chart_version}
+                onChange={(e) => update("operator_chart_version", e.target.value)}
+              >
+                {(gkeReleases.length
+                  ? gkeReleases
+                  : [{ id: "latest", label: "Latest operator chart", chartVersion: "" }]
+                ).map((r) => (
+                  <option key={r.id} value={r.id}>
+                    {r.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            {form.clusters.map((cluster, i) => (
+              <div className="cluster-card" key={`rec-${i}`}>
+                <h3 className="companion-title">
+                  {cluster.name.trim()
+                    ? clusterSlug(cluster.name) || `REC ${i + 1}`
+                    : form.clusters.length > 1
+                      ? `REC ${i + 1}`
+                      : "Redis Enterprise cluster"}
+                </h3>
+                <label>
+                  Cluster name
+                  <input
+                    value={cluster.name}
+                    onChange={(e) => {
+                      const name = e.target.value.slice(0, 40);
+                      setForm((prev) => ({
+                        ...prev,
+                        clusters: prev.clusters.map((c, idx) => (idx === i ? { ...c, name } : c)),
+                      }));
+                      setPreflightResult(null);
+                    }}
+                    placeholder={form.clusters.length > 1 ? i === 0 ? "cache" : "search" : "optional — cache"}
+                    required={form.clusters.length > 1}
+                  />
+                  <span className="hint">
+                    REC: {previewClusterPrefix(form.name, form.env, cluster.name, i)}-rec
+                    {form.clusters.length > 1 ? " · required, unique" : " · optional"}
+                  </span>
+                </label>
+                <label>
+                  {form.clusters.length > 1 ? "REC nodes" : "REC nodes"}
+                  <select
+                    value={cluster.rec_nodes}
+                    onChange={(e) => {
+                      const rec_nodes = Number(e.target.value);
+                      setForm((prev) => {
+                        const clusters = prev.clusters.map((c, idx) =>
+                          idx === i ? { ...c, rec_nodes, nodes: rec_nodes } : c,
+                        );
+                        const sum = clusters.reduce((n, c) => n + c.rec_nodes, 0);
+                        return {
+                          ...prev,
+                          clusters,
+                          rec_nodes: clusters[0].rec_nodes,
+                          gke_clustersize: Math.max(prev.gke_clustersize, sum),
+                        };
+                      });
+                      setPreflightResult(null);
+                    }}
+                  >
+                    <option value={1}>1 — testing only</option>
+                    <option value={3}>3 — HA</option>
+                    <option value={5}>5 — HA, larger</option>
+                  </select>
+                </label>
+              </div>
+            ))}
+
+            <label>
               GKE nodes
               <select
                 value={form.gke_clustersize}
                 onChange={(e) => update("gke_clustersize", Number(e.target.value))}
               >
-                {[1, 3, 4, 5, 6, 7].map((n) => (
+                {[1, 3, 4, 5, 6, 7, 8, 9, 10].map((n) => (
                   <option key={n} value={n}>
                     {n} node{n > 1 ? "s" : ""}
                   </option>
                 ))}
               </select>
+              <span className="hint">
+                Needs at least as many GKE nodes as the largest REC (anti-affinity).{" "}
+                {form.clusters.reduce((n, c) => n + c.rec_nodes, 0)} REC pods planned.
+              </span>
             </label>
 
             <div style={{ gridColumn: "1 / -1" }}>
@@ -848,21 +1246,6 @@ export default function WizardPage() {
                 hint="e2-standard-8 or larger is recommended for REC pods"
               />
             </div>
-
-            <label>
-              REC nodes
-              <select
-                value={form.rec_nodes}
-                onChange={(e) => update("rec_nodes", Number(e.target.value))}
-              >
-                <option value={1}>1 — testing only</option>
-                <option value={3}>3 — HA</option>
-                <option value={5}>5 — HA, larger</option>
-              </select>
-              <span className="hint">
-                Needs at least as many GKE nodes as REC pods (anti-affinity)
-              </span>
-            </label>
           </div>
         )}
 

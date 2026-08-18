@@ -19,7 +19,7 @@ import {
 } from "./terraform.js";
 import { probeHealth } from "./health.js";
 import { writeInstanceWorkspace } from "./workspace.js";
-import { computeProgress } from "./progress.js";
+import { computeProgress, clusterNamesFromConfig } from "./progress.js";
 import { preflight } from "./preflight.js";
 import {
   GcpApiError,
@@ -43,7 +43,10 @@ import {
   uploadUserCredential,
 } from "./credentials-store.js";
 import { verifyCredentialFile, verifyCredentialJson } from "./credential-verify.js";
-import { normalizeAppMachineTypes } from "./app-web.js";
+import { normalizeAppDiskGib, normalizeAppMachineTypes, parseAppExtraPorts } from "./app-web.js";
+import { normalizeClusters } from "./clusters.js";
+import { buildAccessView } from "./access.js";
+import { GKE_OPERATOR_RELEASES, VM_RS_RELEASES, resolveGkeOperatorChart } from "./rs-releases.js";
 import { audit, listAudit } from "./audit.js";
 import { checkCreateQuota, getQuotaLimits, iamHint } from "./quotas.js";
 import { queueStats } from "./jobs.js";
@@ -79,10 +82,29 @@ const createSchema = z.object({
   memviz_port: z.number().optional(),
   app_expose_http: z.boolean().optional(),
   app_expose_https: z.boolean().optional(),
+  app_disk_gib: z.array(z.number().int()).max(5).optional(),
+  app_extra_ports: z.union([z.string(), z.array(z.number().int())]).optional(),
   rof_nvme_disks: z.number().int().min(0).max(24).optional(),
   gke_clustersize: z.number().int().min(1).max(10).optional(),
   gke_machine_type: z.string().optional(),
   rec_nodes: z.number().int().min(1).max(9).optional(),
+  operator_chart_version: z.string().optional(),
+  rs_version: z.string().optional(),
+  clusters: z
+    .array(
+      z.object({
+        name: z.string().max(40).optional(),
+        nodes: z.number().int().min(1).max(9).optional(),
+        machine_type: z.string().optional(),
+        rof_nvme_disks: z.number().int().min(0).max(24).optional(),
+        rs_version: z.string().optional(),
+        RS_release: z.string().optional(),
+        rec_nodes: z.number().int().min(1).max(9).optional(),
+      }),
+    )
+    .min(1)
+    .max(3)
+    .optional(),
   dns_managed_zone: z.string().optional(),
   dns_zone_dns_name: z.string().optional(),
   rs_private_subnet: z.string().optional(),
@@ -112,8 +134,16 @@ async function decorate(inst: InstanceRecord) {
     inst.mode,
     operationStartedAt(inst),
     inst.health,
+    { clusterNames: clusterNamesFromConfig(inst.config, inst.mode) },
   );
-  return { ...inst, busy: isBusy(inst.id), endpoints, progress };
+  const cfg = (inst.config || {}) as Record<string, unknown>;
+  const access = buildAccessView(endpoints, {
+    mode: inst.mode,
+    region: inst.region,
+    region_zones: Array.isArray(cfg.region_zones) ? (cfg.region_zones as string[]) : undefined,
+    machine_type: typeof cfg.machine_type === "string" ? cfg.machine_type : undefined,
+  });
+  return { ...inst, busy: isBusy(inst.id), endpoints, progress, access };
 }
 
 function gcpErrorReply(err: unknown): { status: number; body: { error: string; hint?: string } } {
@@ -279,6 +309,14 @@ app.get<{ Querystring: { credentialsFile?: string; project?: string } }>(
   },
 );
 
+app.get("/releases", async (req) => {
+  requireUser(req);
+  return {
+    vm: VM_RS_RELEASES,
+    gke: GKE_OPERATOR_RELEASES,
+  };
+});
+
 app.post("/preflight", async (req, reply) => {
   const user = requireUser(req);
   const parsed = preflightSchema.safeParse(req.body);
@@ -350,6 +388,7 @@ app.get<{ Params: { id: string } }>("/instances/:id/progress", async (req, reply
     inst.mode,
     operationStartedAt(inst),
     inst.health,
+    { clusterNames: clusterNamesFromConfig(inst.config, inst.mode) },
   );
 });
 
@@ -423,6 +462,7 @@ app.get<{ Params: { id: string }; Querystring: { access_token?: string } }>(
               current.mode,
               operationStartedAt(current),
               current.health,
+              { clusterNames: clusterNamesFromConfig(current.config, current.mode) },
             )
           : undefined,
       })}\n\n`,
@@ -490,12 +530,43 @@ app.post("/instances", async (req, reply) => {
       app_machine_types: input.app_machine_types,
       app_machine_type: input.app_machine_type,
     });
+    input.app_disk_gib = normalizeAppDiskGib({
+      app,
+      app_disk_gib: input.app_disk_gib,
+    });
+    try {
+      input.app_extra_ports = parseAppExtraPorts(input.app_extra_ports);
+    } catch (err) {
+      return reply.code(400).send({
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
     if (app === 0) {
       input.app_machine_type = undefined;
       input.memviz_enabled = false;
       input.app_expose_http = false;
       input.app_expose_https = false;
+      input.app_disk_gib = [];
+      input.app_extra_ports = [];
     }
+  }
+
+  try {
+    const clusters = normalizeClusters(input);
+    input.clusters = clusters;
+    input.clustersize = clusters[0].nodes;
+    input.machine_type = clusters[0].machine_type;
+    input.rof_nvme_disks = clusters[0].rof_nvme_disks;
+    input.RS_release = clusters[0].RS_release;
+    input.rs_version = clusters[0].rs_version;
+    if (input.mode === "gke") {
+      input.rec_nodes = clusters[0].rec_nodes;
+      input.operator_chart_version = resolveGkeOperatorChart(input.operator_chart_version);
+    }
+  } catch (err) {
+    return reply.code(400).send({
+      error: err instanceof Error ? err.message : String(err),
+    });
   }
 
   const workDir = instanceDir(id);
@@ -668,6 +739,81 @@ app.post<{ Params: { id: string } }>("/instances/:id/retry", async (req, reply) 
   }
 
   await audit(user, "instance.retry", "instance", inst.id);
+  await startApply(inst.id, user.sub);
+  return { ok: true, id: inst.id, status: "applying" };
+});
+
+app.post<{ Params: { id: string } }>("/instances/:id/recreate", async (req, reply) => {
+  const user = requireUser(req);
+  const inst = await getInstance(req.params.id);
+  if (!inst) return reply.code(404).send({ error: "not found" });
+  try {
+    assertCanMutate(user, inst);
+  } catch (err) {
+    return httpError(reply, err);
+  }
+  if (isBusy(inst.id)) return reply.code(409).send({ error: "instance is busy" });
+  if (inst.status !== "destroyed") {
+    return reply.code(409).send({
+      error: `Recreate is only available after destroy (status is "${inst.status}")`,
+    });
+  }
+
+  const config = inst.config as unknown as CreateInstanceInput;
+  if (!config?.name || !config?.mode) {
+    return reply.code(400).send({ error: "Saved configuration is missing name or mode" });
+  }
+  config.youremail = config.youremail || inst.ownerEmail;
+  config.project = config.project || inst.project;
+  config.credentialsFile = inst.credentialsId || inst.credentialsFile;
+
+  const quota = await checkCreateQuota(user, config);
+  if (!quota.ok) {
+    return reply.code(422).send({ error: "Quota exceeded", details: quota.errors });
+  }
+
+  let absPath: string;
+  try {
+    const resolved = await resolveOwnedCredentialsPath(
+      user,
+      inst.credentialsId || inst.credentialsFile,
+    );
+    absPath = resolved.absPath;
+    config.credentialsFile = absPath;
+  } catch (err) {
+    return httpError(reply, err);
+  }
+
+  try {
+    const result = await preflight(config, { allowExistingId: inst.id });
+    if (!result.ok) {
+      return reply.code(422).send({
+        error: "Preflight checks failed",
+        checks: result.checks.filter((c) => c.level === "fail"),
+      });
+    }
+  } catch (err) {
+    return reply.code(400).send({
+      error: `Preflight could not run: ${err instanceof Error ? err.message : String(err)}`,
+    });
+  }
+
+  try {
+    writeInstanceWorkspace(instanceDir(inst.id), inst.mode, config, absPath);
+  } catch (err) {
+    return reply.code(400).send({
+      error: `Could not regenerate workspace: ${err instanceof Error ? err.message : String(err)}`,
+    });
+  }
+
+  await upsertInstance({
+    ...inst,
+    config: config as unknown as Record<string, unknown>,
+    endpoints: {},
+    lastError: undefined,
+    updatedAt: new Date().toISOString(),
+  });
+  await audit(user, "instance.recreate", "instance", inst.id);
   await startApply(inst.id, user.sub);
   return { ok: true, id: inst.id, status: "applying" };
 });

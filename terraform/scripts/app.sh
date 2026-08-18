@@ -4,6 +4,7 @@ MEMVIZ_ENABLED="${memviz_enabled}"
 MEMVIZ_PORT="${memviz_port}"
 MEMVIZ_REPO_URL="${memviz_repo_url}"
 MEMVIZ_REPO_REF="${memviz_repo_ref}"
+EXTRA_DISK_GIB="${extra_disk_gib}"
 
 ## commons
 
@@ -64,6 +65,26 @@ chmod u+x scripts/*.sh
 # for "sudo su - ubuntu"
 chown -R ubuntu:ubuntu /home/ubuntu/install
 chown -R ubuntu:ubuntu /home/ubuntu/.local
+
+if [ "$EXTRA_DISK_GIB" -gt 0 ] 2>/dev/null; then
+  DEVICE=""
+  for _ in $(seq 1 30); do
+    if [ -e /dev/disk/by-id/google-app-data ]; then
+      DEVICE=/dev/disk/by-id/google-app-data
+      break
+    fi
+    sleep 2
+  done
+  if [ -n "$DEVICE" ]; then
+    if ! blkid "$DEVICE" >/dev/null 2>&1; then
+      mkfs.ext4 -F -L app-data "$DEVICE"
+    fi
+    mkdir -p /data
+    grep -qE '[[:space:]]/data[[:space:]]' /etc/fstab || echo "LABEL=app-data /data ext4 defaults,nofail 0 2" >> /etc/fstab
+    mount -a
+    chown ubuntu:ubuntu /data
+  fi
+fi
 
 if [ "$MEMVIZ_ENABLED" = "true" ]; then
   apt-get install -y curl ca-certificates gnupg git

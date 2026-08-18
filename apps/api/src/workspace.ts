@@ -1,6 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
-import { normalizeAppMachineTypes } from "./app-web.js";
+import { normalizeAppDiskGib, normalizeAppMachineTypes, parseAppExtraPorts } from "./app-web.js";
+import { clusterNamePrefix, normalizeClusters } from "./clusters.js";
+import { resolveGkeOperatorChart } from "./rs-releases.js";
 import type { CreateInstanceInput, DeploymentMode } from "./types.js";
 
 const terraformDir =
@@ -17,6 +19,12 @@ function tfValue(value: unknown): string {
   if (typeof value === "boolean") return value ? "true" : "false";
   if (typeof value === "number") return String(value);
   if (Array.isArray(value)) return `[${value.map(tfValue).join(", ")}]`;
+  if (value && typeof value === "object") {
+    const body = Object.entries(value as Record<string, unknown>)
+      .map(([k, v]) => `${k} = ${tfValue(v)}`)
+      .join(", ");
+    return `{ ${body} }`;
+  }
   throw new Error(`Unsupported tfvars value: ${typeof value}`);
 }
 
@@ -136,6 +144,7 @@ ${
   clustersize      = var.clustersize
   machine_type     = var.machine_type
   RS_release       = var.RS_release
+  clusters         = var.clusters
   RS_admin         = var.RS_admin
   app              = var.app
   app_machine_types = var.app_machine_types
@@ -143,15 +152,19 @@ ${
   memviz_port      = var.memviz_port
   app_expose_http  = var.app_expose_http
   app_expose_https = var.app_expose_https
+  app_disk_gib     = var.app_disk_gib
+  app_extra_ports  = var.app_extra_ports
   rof_nvme_disks   = var.rof_nvme_disks
   region_zones     = var.region_zones
   ssh_public_key   = var.ssh_public_key
 `
     : `
-  gke_clustersize  = var.gke_clustersize
-  gke_machine_type = var.gke_machine_type
-  rec_nodes        = var.rec_nodes
-  outputs_dir      = var.outputs_dir
+  gke_clustersize          = var.gke_clustersize
+  gke_machine_type         = var.gke_machine_type
+  rec_nodes                = var.rec_nodes
+  rec_specs                = var.rec_specs
+  operator_chart_version   = var.operator_chart_version
+  outputs_dir              = var.outputs_dir
 `
 }
 }
@@ -175,9 +188,14 @@ output "app_machine_types" { value = module.stack.app_machine_types }
 output "app_ips" { value = module.stack.app_ips }
 output "app_dns" { value = module.stack.app_dns }
 output "how_to_ssh_to_app" { value = module.stack.how_to_ssh_to_app }
+output "apps" { value = module.stack.apps }
 output "memviz_url" { value = module.stack.memviz_url }
 output "app_http_url" { value = module.stack.app_http_url }
 output "app_https_url" { value = module.stack.app_https_url }
+output "clusters" {
+  value     = module.stack.clusters
+  sensitive = true
+}
 output "deployment_mode" { value = module.stack.deployment_mode }
 `
     : `
@@ -185,6 +203,7 @@ output "how_to_kubectl" { value = module.stack.how_to_kubectl }
 output "gke_cluster_name" { value = module.stack.gke_cluster_name }
 output "gke_cluster_endpoint" { value = module.stack.gke_cluster_endpoint }
 output "rec_name" { value = module.stack.rec_name }
+output "rec_names" { value = module.stack.rec_names }
 output "rec_namespace" { value = module.stack.rec_namespace }
 output "k8s_outputs_file" { value = module.stack.k8s_outputs_file }
 output "deployment_mode" { value = module.stack.deployment_mode }
@@ -204,6 +223,15 @@ variable "region_name" { type = string }
 variable "clustersize" { type = number }
 variable "machine_type" { type = string }
 variable "RS_release" { type = string }
+variable "clusters" {
+  type = list(object({
+    name           = optional(string, "")
+    nodes          = number
+    machine_type   = string
+    rof_nvme_disks = number
+    RS_release     = string
+  }))
+}
 variable "RS_admin" { type = string }
 variable "app" { type = number }
 variable "app_machine_types" { type = list(string) }
@@ -211,6 +239,8 @@ variable "memviz_enabled" { type = bool }
 variable "memviz_port" { type = number }
 variable "app_expose_http" { type = bool }
 variable "app_expose_https" { type = bool }
+variable "app_disk_gib" { type = list(number) }
+variable "app_extra_ports" { type = list(number) }
 variable "rof_nvme_disks" { type = number }
 variable "dns_managed_zone" { type = string }
 variable "dns_zone_dns_name" { type = string }
@@ -229,6 +259,13 @@ variable "region_name" { type = string }
 variable "gke_clustersize" { type = number }
 variable "gke_machine_type" { type = string }
 variable "rec_nodes" { type = number }
+variable "rec_specs" {
+  type = list(object({
+    name  = string
+    nodes = number
+  }))
+}
+variable "operator_chart_version" { type = string }
 variable "dns_managed_zone" { type = string }
 variable "dns_zone_dns_name" { type = string }
 variable "rs_private_subnet" { type = string }
@@ -252,12 +289,19 @@ variable "outputs_dir" { type = string }
   };
 
   if (mode === "vm") {
+    const clusters = normalizeClusters(input);
+    const first = clusters[0];
     Object.assign(tfvars, {
-      clustersize: input.clustersize ?? 3,
-      machine_type: input.machine_type || "e2-standard-2",
-      RS_release:
-        input.RS_release ||
-        "https://s3.amazonaws.com/redis-enterprise-software-downloads/8.2.0/redislabs-8.2.0-46-jammy-amd64.tar",
+      clustersize: first.nodes,
+      machine_type: first.machine_type,
+      RS_release: first.RS_release,
+      clusters: clusters.map((c) => ({
+        name: c.name,
+        nodes: c.nodes,
+        machine_type: c.machine_type,
+        rof_nvme_disks: c.rof_nvme_disks,
+        RS_release: c.RS_release,
+      })),
       RS_admin: input.RS_admin || "admin@redis.io",
       app: input.app ?? 0,
       app_machine_types: normalizeAppMachineTypes({
@@ -269,15 +313,27 @@ variable "outputs_dir" { type = string }
       memviz_port: input.memviz_port ?? 3000,
       app_expose_http: (input.app ?? 0) > 0 && Boolean(input.app_expose_http),
       app_expose_https: (input.app ?? 0) > 0 && Boolean(input.app_expose_https),
-      rof_nvme_disks: input.rof_nvme_disks ?? 0,
+      app_disk_gib: normalizeAppDiskGib({
+        app: input.app ?? 0,
+        app_disk_gib: input.app_disk_gib,
+      }),
+      app_extra_ports: (input.app ?? 0) > 0 ? parseAppExtraPorts(input.app_extra_ports) : [],
+      rof_nvme_disks: first.rof_nvme_disks,
       region_zones: input.region_zones || ["b", "c", "d"],
       ssh_public_key: sshKey,
     });
   } else {
+    const clusters = normalizeClusters({ ...input, mode: "gke" });
+    const prefix = `${input.name}-${input.env || "default"}`;
     Object.assign(tfvars, {
       gke_clustersize: input.gke_clustersize ?? 3,
       gke_machine_type: input.gke_machine_type || "e2-standard-8",
-      rec_nodes: input.rec_nodes ?? 3,
+      rec_nodes: clusters[0].rec_nodes,
+      rec_specs: clusters.map((c, i) => ({
+        name: `${clusterNamePrefix(prefix, i, c.name)}-rec`,
+        nodes: c.rec_nodes,
+      })),
+      operator_chart_version: resolveGkeOperatorChart(input.operator_chart_version),
       outputs_dir: workDir,
     });
   }

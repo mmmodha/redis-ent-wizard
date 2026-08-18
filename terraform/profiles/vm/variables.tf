@@ -74,6 +74,18 @@ variable "app_expose_https" {
   default = false
 }
 
+variable "app_disk_gib" {
+  type        = list(number)
+  description = "Extra persistent disk GiB per App VM (0 = boot disk only)"
+  default     = []
+}
+
+variable "app_extra_ports" {
+  type        = list(number)
+  description = "Additional TCP ports to open on App VMs from the internet"
+  default     = []
+}
+
 variable "memviz_port" {
   type    = number
   default = 3000
@@ -116,4 +128,16 @@ variable "region_zones" {
 
 variable "ssh_public_key" {
   type = string
+}
+
+variable "clusters" {
+  type = list(object({
+    name           = optional(string, "")
+    nodes          = number
+    machine_type   = string
+    rof_nvme_disks = number
+    RS_release     = string
+  }))
+  description = "Redis clusters in this deployment. Empty falls back to the legacy single-cluster variables."
+  default     = []
 }

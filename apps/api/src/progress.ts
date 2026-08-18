@@ -1,4 +1,5 @@
 import type { ClusterHealth, DeploymentMode, InstanceStatus } from "./types.js";
+import { normalizeClusters } from "./clusters.js";
 
 export type StepState = "pending" | "active" | "done" | "failed";
 export type OperationKind = "apply" | "destroy";
@@ -32,8 +33,23 @@ export interface Progress {
   elapsedSeconds?: number;
 }
 
+export type ProgressContext = {
+  clusterNames?: string[];
+};
+
+export function clusterNamesFromConfig(
+  config: Record<string, unknown> | undefined,
+  mode: DeploymentMode,
+): string[] {
+  try {
+    return normalizeClusters({ ...(config || {}), mode }).map((c) => c.name);
+  } catch {
+    return [];
+  }
+}
+
 // Ordered so the UI reflects the rough order Terraform works through them.
-const SECTION_DEFS: { id: string; label: string; match: (addr: string) => boolean }[] = [
+const SHARED_SECTION_DEFS: { id: string; label: string; match: (addr: string) => boolean }[] = [
   {
     id: "network",
     label: "Network (VPC, subnets, firewall)",
@@ -75,34 +91,85 @@ function shortAddr(addr: string): string {
   return addr.replace(/^module\.stack\./, "");
 }
 
-function classify(addr: string): string {
-  return SECTION_DEFS.find((s) => s.match(addr))?.id ?? "other";
+function reVmIndex(addr: string): number | null {
+  const m = addr.match(/module\.re_vm\[(\d+)\]/);
+  return m ? Number(m[1]) : null;
 }
 
-function collectSections(text: string, failed: boolean): ResourceSection[] {
+function clusterSectionLabel(index: number, names?: string[]): string {
+  const name = names?.[index]?.trim();
+  return name ? `Redis cluster ${name}` : `Redis cluster ${index + 1}`;
+}
+
+function sectionDefsFor(
+  addrs: string[],
+  clusterNames?: string[],
+): { id: string; label: string; match: (addr: string) => boolean }[] {
+  const fromLog = [...new Set(addrs.map(reVmIndex).filter((i): i is number => i !== null))];
+  const namedCount = clusterNames?.length ?? 0;
+  const clusterCount = Math.max(fromLog.length ? Math.max(...fromLog) + 1 : 0, namedCount);
+  const multi = clusterCount > 1;
+  const clusterDefs = multi
+    ? Array.from({ length: clusterCount }, (_, i) => ({
+        id: `cluster-${i}`,
+        label: clusterSectionLabel(i, clusterNames),
+        match: (a: string) => reVmIndex(a) === i,
+      }))
+    : [];
+  const skipWhenSplit = new Set(multi ? ["credentials", "nodes", "dns"] : []);
+  return [
+    SHARED_SECTION_DEFS[0],
+    ...clusterDefs,
+    ...SHARED_SECTION_DEFS.slice(1).filter((d) => !skipWhenSplit.has(d.id)),
+  ];
+}
+
+function classify(
+  addr: string,
+  defs: { id: string; label: string; match: (addr: string) => boolean }[],
+): string {
+  return defs.find((s) => s.match(addr))?.id ?? "other";
+}
+
+function collectAddresses(text: string): { planned: string[]; completed: string[]; inFlight: string[] } {
+  return {
+    planned: [...text.matchAll(/^\s*# (\S+) will be (?:created|destroyed)/gm)].map((m) =>
+      shortAddr(m[1]),
+    ),
+    completed: [...text.matchAll(/^\s*(\S+): (?:Creation|Destruction) complete/gm)].map((m) =>
+      shortAddr(m[1]),
+    ),
+    inFlight: [...text.matchAll(/^\s*(\S+): (?:Still )?(?:Creating|Destroying)\.\.\./gm)].map((m) =>
+      shortAddr(m[1]),
+    ),
+  };
+}
+
+function collectSections(
+  text: string,
+  failed: boolean,
+  clusterNames?: string[],
+): ResourceSection[] {
   const totals = new Map<string, number>();
   const done = new Map<string, number>();
   const bump = (map: Map<string, number>, key: string) =>
     map.set(key, (map.get(key) ?? 0) + 1);
 
-  // Terraform enumerates every resource in the plan before acting on it.
-  const planned = text.matchAll(/^\s*# (\S+) will be (?:created|destroyed)/gm);
-  for (const m of planned) bump(totals, classify(shortAddr(m[1])));
+  const { planned, completed, inFlight } = collectAddresses(text);
+  const defs = sectionDefsFor([...planned, ...completed, ...inFlight], clusterNames);
 
-  const completed = text.matchAll(/^\s*(\S+): (?:Creation|Destruction) complete/gm);
-  for (const m of completed) bump(done, classify(shortAddr(m[1])));
+  for (const addr of planned) bump(totals, classify(addr, defs));
+  for (const addr of completed) bump(done, classify(addr, defs));
 
-  const inFlight = [...text.matchAll(/^\s*(\S+): (?:Still )?(?:Creating|Destroying)\.\.\./gm)];
-  const last = inFlight[inFlight.length - 1];
-  const activeAddr = last ? shortAddr(last[1]) : undefined;
-  const activeSection = activeAddr ? classify(activeAddr) : undefined;
+  const activeAddr = inFlight[inFlight.length - 1];
+  const activeSection = activeAddr ? classify(activeAddr, defs) : undefined;
 
   const ids = [...new Set([...totals.keys(), ...done.keys()])];
-  return SECTION_DEFS.concat([{ id: "other", label: "Other resources", match: () => false }])
+  return defs
+    .concat([{ id: "other", label: "Other resources", match: () => false }])
     .filter((def) => ids.includes(def.id))
     .map((def) => {
       const d = done.get(def.id) ?? 0;
-      // Without a plan enumeration, fall back to what has been observed.
       const total = Math.max(totals.get(def.id) ?? 0, d);
       const isActive = def.id === activeSection;
       let state: StepState;
@@ -377,6 +444,7 @@ export function computeProgress(
   mode: DeploymentMode,
   startedAt?: string,
   health?: ClusterHealth,
+  ctx?: ProgressContext,
 ): Progress {
   const op = lastOperation(stripAnsi(log));
   // A destroying/destroyed status is authoritative even before the marker lands.
@@ -399,7 +467,7 @@ export function computeProgress(
     : Math.max(0, Math.round((endedMs - startedMs) / 1000));
 
   const complete = core.percent >= 100;
-  const sections = collectSections(op.text, failed).map((s) =>
+  const sections = collectSections(op.text, failed, ctx?.clusterNames).map((s) =>
     complete ? { ...s, state: "done" as StepState, current: undefined } : s,
   );
 

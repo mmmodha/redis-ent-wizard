@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
+import { AccessPanel } from "@/components/AccessPanel";
 import { ProgressTracker } from "@/components/ProgressTracker";
 import { StatusBadge } from "@/components/StatusBadge";
 import {
@@ -12,79 +13,81 @@ import {
   getInstance,
   moveInstance,
   recheckHealth,
+  recreateInstance,
   retryInstance,
   type Instance,
   type Progress,
 } from "@/lib/api";
 
-const HIDDEN_OUTPUTS = new Set(["deployment_mode", "k8s_outputs_file"]);
-
-const NON_LINK_OUTPUTS = new Set([
-  "admin_username",
-  "admin_password",
-  "how_to_ssh",
-  "how_to_ssh_to_app",
-  "how_to_kubectl",
-  // App VMs serve memtier/memviz over plain HTTP, so memviz_url is the only safe link.
-  "app_names",
-  "app_machine_types",
-  "app_ips",
-  "app_dns",
-]);
-
-function toLink(raw: string): string | null {
-  const value = raw.trim().replace(/\.$/, "");
-  if (!value) return null;
-  if (/^https?:\/\//.test(value)) return value;
-  const isIpv4 = /^\d{1,3}(\.\d{1,3}){3}(:\d+)?$/.test(value);
-  const isHostname = /^[a-zA-Z][a-zA-Z0-9.-]*\.[a-zA-Z][a-zA-Z0-9.-]*(:\d+)?$/.test(value);
-  return isIpv4 || isHostname ? `https://${value}` : null;
+function asClusters(cfg: Record<string, unknown> | undefined): Array<Record<string, unknown>> {
+  if (Array.isArray(cfg?.clusters) && cfg.clusters.length) {
+    return cfg.clusters as Array<Record<string, unknown>>;
+  }
+  if (!cfg) return [];
+  if (cfg.mode === "gke") {
+    return [{ rec_nodes: cfg.rec_nodes ?? 3 }];
+  }
+  return [
+    {
+      nodes: cfg.clustersize ?? 3,
+      machine_type: cfg.machine_type,
+      rs_version: cfg.rs_version,
+      RS_release: cfg.RS_release,
+      rof_nvme_disks: cfg.rof_nvme_disks ?? 0,
+    },
+  ];
 }
 
-function EndpointRows({ endpoints }: { endpoints: Record<string, unknown> }) {
-  const entries = Object.entries(endpoints).filter(
-    ([k, v]) => !HIDDEN_OUTPUTS.has(k) && v !== "" && v !== null && v !== undefined,
-  );
-  if (!entries.length) return <div className="empty">Endpoints appear when apply completes.</div>;
-
-  return (
-    <div>
-      {entries.map(([key, value]) => {
-        const text = Array.isArray(value) ? value.join("\n") : String(value);
-        const urls = NON_LINK_OUTPUTS.has(key)
-          ? []
-          : (Array.isArray(value) ? value : [value])
-              .map(String)
-              .map(toLink)
-              .filter((v): v is string => v !== null);
-        return (
-          <div className="endpoint-row" key={key}>
-            <div className="mono">{key}</div>
-            <code>
-              {urls.length ? (
-                urls.map((u) => (
-                  <div key={u}>
-                    <a href={u} target="_blank" rel="noreferrer">
-                      {u}
-                    </a>
-                  </div>
-                ))
-              ) : (
-                text
-              )}
-            </code>
-            <button
-              className="btn"
-              type="button"
-              onClick={() => navigator.clipboard.writeText(text)}
-            >
-              Copy
-            </button>
-          </div>
-        );
-      })}
-    </div>
-  );
+function deploymentSummary(inst: Instance): { label: string; value: string }[] {
+  const cfg = (inst.config || {}) as Record<string, unknown>;
+  const clusters = asClusters(cfg);
+  const rows: { label: string; value: string }[] = [
+    { label: "GCP project", value: String(inst.project) },
+    { label: "Region", value: String(inst.region) },
+    { label: "Mode", value: inst.mode.toUpperCase() },
+  ];
+  clusters.forEach((c, i) => {
+    const label = String(c.name || "").trim()
+      ? String(c.name)
+      : clusters.length > 1
+        ? `Redis cluster ${i + 1}`
+        : "Redis cluster";
+    if (inst.mode === "gke") {
+      rows.push({ label, value: `${c.rec_nodes ?? c.nodes ?? "?"} REC nodes` });
+    } else {
+      const ver = String(c.rs_version || c.RS_release || "").replace(/.*redislabs-/, "").replace(/-jammy.*/, "");
+      rows.push({
+        label,
+        value: `${c.nodes ?? "?"} × ${c.machine_type || "?"} · ${ver || "default version"}${
+          Number(c.rof_nvme_disks) > 0 ? ` · ${c.rof_nvme_disks} NVMe` : ""
+        }`,
+      });
+    }
+  });
+  if (inst.mode === "gke" && cfg.operator_chart_version) {
+    rows.push({
+      label: "Operator",
+      value: String(cfg.operator_chart_version || "latest"),
+    });
+  }
+  const app = Number(cfg.app || 0);
+  if (app > 0) {
+    const types = Array.isArray(cfg.app_machine_types) ? (cfg.app_machine_types as string[]).join(", ") : "";
+    const ports = [
+      cfg.app_expose_http ? "HTTP :80" : null,
+      cfg.app_expose_https ? "HTTPS :443" : null,
+      Array.isArray(cfg.app_extra_ports) && (cfg.app_extra_ports as number[]).length
+        ? `TCP ${(cfg.app_extra_ports as number[]).join(",")}`
+        : typeof cfg.app_extra_ports === "string" && cfg.app_extra_ports
+          ? `TCP ${cfg.app_extra_ports}`
+          : null,
+    ].filter(Boolean);
+    rows.push({
+      label: "App VMs",
+      value: `${app}${types ? ` · ${types}` : ""}${ports.length ? ` · ${ports.join(" + ")}` : ""}`,
+    });
+  }
+  return rows;
 }
 
 export default function InstanceDetailPage() {
@@ -97,6 +100,8 @@ export default function InstanceDetailPage() {
   const [error, setError] = useState("");
   const [destroying, setDestroying] = useState(false);
   const [retrying, setRetrying] = useState(false);
+  const [recreating, setRecreating] = useState(false);
+  const [confirmRecreate, setConfirmRecreate] = useState(false);
   const [forgetting, setForgetting] = useState(false);
   const [checking, setChecking] = useState(false);
   const [showLog, setShowLog] = useState(false);
@@ -182,6 +187,21 @@ export default function InstanceDetailPage() {
     }
   }
 
+  async function onRecreate() {
+    setRecreating(true);
+    setError("");
+    setLog("");
+    setShowLog(true);
+    try {
+      await recreateInstance(id);
+      setConfirmRecreate(false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Recreate failed");
+    } finally {
+      setRecreating(false);
+    }
+  }
+
   async function onForget() {
     if (!confirm(`Remove ${id} from the registry? Cloud resources are not touched.`)) return;
     setForgetting(true);
@@ -231,8 +251,12 @@ export default function InstanceDetailPage() {
     if (!inst) return "Loading…";
     const parts = [inst.mode.toUpperCase(), inst.project, inst.region, inst.ownerEmail];
     if (inst.mode === "vm") {
-      const nvme = Number(inst.config?.rof_nvme_disks || 0);
-      if (nvme > 0) parts.push(`RoF ${nvme} NVMe/node`);
+      const clusters = asClusters(inst.config);
+      if (clusters.length > 1) {
+        parts.push(`${clusters.length} Redis clusters`);
+      }
+      const nvme = clusters.some((c) => Number(c.rof_nvme_disks) > 0);
+      if (nvme) parts.push("Redis on Flash");
       const appCount = Number(inst.config?.app || 0);
       if (appCount > 0) {
         const types = Array.isArray(inst.config?.app_machine_types)
@@ -243,7 +267,11 @@ export default function InstanceDetailPage() {
         const label = types.length
           ? types.join(", ")
           : String(inst.config?.app_machine_type || "");
-        parts.push(`${appCount} app VM${appCount > 1 ? "s" : ""}${label ? ` (${label})` : ""}`);
+        const disks = Array.isArray(inst.config?.app_disk_gib)
+          ? (inst.config.app_disk_gib as number[]).filter((n) => n > 0)
+          : [];
+        const diskNote = disks.length ? `, +${disks.join("/")} GiB disk` : "";
+        parts.push(`${appCount} app VM${appCount > 1 ? "s" : ""}${label ? ` (${label}${diskNote})` : diskNote}`);
       }
     }
     return parts.filter(Boolean).join(" · ");
@@ -253,6 +281,7 @@ export default function InstanceDetailPage() {
     <div>
       <div className="page-head">
         <div>
+          <p className="page-eyebrow">Instance</p>
           <h2 className="page-title mono">{id}</h2>
           <p className="page-sub">{subtitle}</p>
         </div>
@@ -333,6 +362,16 @@ export default function InstanceDetailPage() {
                 {destroying ? "Starting…" : "Destroy resources"}
               </button>
             ) : null}
+            {inst?.status === "destroyed" ? (
+              <button
+                className="btn btn-primary"
+                type="button"
+                disabled={recreating || !!inst?.busy}
+                onClick={() => setConfirmRecreate(true)}
+              >
+                Recreate
+              </button>
+            ) : null}
             {canForget ? (
               <button
                 className="btn"
@@ -347,6 +386,42 @@ export default function InstanceDetailPage() {
               {showLog ? "Hide Terraform log" : "Show Terraform log"}
             </button>
           </div>
+
+          {confirmRecreate && inst?.status === "destroyed" ? (
+            <div className="recreate-panel">
+              <h3 style={{ margin: "0 0 8px" }}>Recreate this deployment?</h3>
+              <p className="hint" style={{ margin: "0 0 12px" }}>
+                The same GCP project, region, Redis clusters, and App VMs will be provisioned
+                again. Existing DNS names stay the same.
+              </p>
+              <div className="summary-grid">
+                {deploymentSummary(inst).map((row) => (
+                  <div className="summary-row" key={row.label}>
+                    <div className="summary-label">{row.label}</div>
+                    <div className="summary-value">{row.value}</div>
+                  </div>
+                ))}
+              </div>
+              <div className="actions" style={{ marginTop: 16 }}>
+                <button
+                  className="btn btn-primary"
+                  type="button"
+                  disabled={recreating}
+                  onClick={onRecreate}
+                >
+                  {recreating ? "Recreating…" : "Recreate this deployment"}
+                </button>
+                <button
+                  className="btn"
+                  type="button"
+                  disabled={recreating}
+                  onClick={() => setConfirmRecreate(false)}
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          ) : null}
         </div>
 
         <div className="panel">
@@ -367,7 +442,21 @@ export default function InstanceDetailPage() {
                   </span>
                 </div>
               ) : null}
-              <EndpointRows endpoints={inst?.endpoints || {}} />
+              <AccessPanel
+                endpoints={inst?.endpoints || {}}
+                mode={inst?.mode || "vm"}
+                region={inst?.region || ""}
+                regionZones={
+                  Array.isArray(inst?.config?.region_zones)
+                    ? (inst.config.region_zones as string[])
+                    : undefined
+                }
+                machineType={
+                  typeof inst?.config?.machine_type === "string"
+                    ? inst.config.machine_type
+                    : undefined
+                }
+              />
             </>
           )}
         </div>

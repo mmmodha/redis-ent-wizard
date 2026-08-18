@@ -1,3 +1,5 @@
+import { RedisLogo } from "@/components/RedisLogo";
+
 export function Topbar({
   title,
   subtitle,
@@ -10,9 +12,7 @@ export function Topbar({
   return (
     <header className="topbar">
       <div className="brand">
-        <div className="brand-mark" aria-hidden>
-          R
-        </div>
+        <RedisLogo />
         <div>
           <h1>{title}</h1>
           {subtitle ? <p>{subtitle}</p> : null}

@@ -232,10 +232,24 @@ output "rs_cluster_dns" {
 output "rs_ui_dns" {
   value = [
     "https://node1.${var.name_prefix}.${var.dns_zone_dns_name}:8443",
-    "https://cluster.${var.name_prefix}.${var.dns_zone_dns_name}:8443",
   ]
 }
 
 output "rs_ui_ip" {
   value = "https://${google_compute_instance.node1.network_interface[0].access_config[0].nat_ip}:8443"
+}
+
+output "node_names" {
+  value = concat([google_compute_instance.node1.name], google_compute_instance.nodeX[*].name)
+}
+
+output "node_zones" {
+  value = concat([google_compute_instance.node1.zone], google_compute_instance.nodeX[*].zone)
+}
+
+output "how_to_ssh" {
+  value = concat(
+    ["gcloud compute ssh ${google_compute_instance.node1.name} --zone ${google_compute_instance.node1.zone}"],
+    [for n in google_compute_instance.nodeX : "gcloud compute ssh ${n.name} --zone ${n.zone}"],
+  )
 }

@@ -425,6 +425,20 @@ export async function networkExists(
   }
 }
 
+export async function dnsNameExists(
+  credentialsFile: string,
+  project: string,
+  managedZone: string,
+  fqdn: string,
+): Promise<boolean> {
+  const name = fqdn.endsWith(".") ? fqdn : `${fqdn}.`;
+  const data = await gcpGet<{ rrsets?: unknown[] }>(
+    credentialsFile,
+    `https://dns.googleapis.com/dns/v1/projects/${encodeURIComponent(project)}/managedZones/${encodeURIComponent(managedZone)}/rrsets?name=${encodeURIComponent(name)}`,
+  );
+  return (data.rrsets?.length ?? 0) > 0;
+}
+
 export async function gkeClusterExists(
   credentialsFile: string,
   project: string,

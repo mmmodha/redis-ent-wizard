@@ -8,6 +8,7 @@ export default function HomePage() {
     <div>
       <div className="page-head">
         <div>
+          <p className="page-eyebrow">Redis Enterprise</p>
           <h2 className="page-title">Instances</h2>
           <p className="page-sub">
             Group by folder or owner, select many, destroy or move in bulk.

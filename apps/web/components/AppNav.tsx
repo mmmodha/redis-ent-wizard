@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { RedisLogo } from "@/components/RedisLogo";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { useAuth } from "@/lib/auth";
 
@@ -19,11 +20,9 @@ export function AppNav() {
     <header className="appnav">
       <div className="appnav-top">
         <Link className="brand" href="/">
-          <span className="brand-mark" aria-hidden>
-            R
-          </span>
+          <RedisLogo />
           <span>
-            <span className="brand-title">Redis Enterprise Wizard</span>
+            <span className="brand-title">Enterprise Wizard</span>
             <span className="brand-sub">Provision and tear down clusters on GCP</span>
           </span>
         </Link>

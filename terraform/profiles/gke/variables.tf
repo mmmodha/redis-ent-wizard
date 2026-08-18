@@ -67,3 +67,11 @@ variable "operator_chart_version" {
   type    = string
   default = ""
 }
+
+variable "rec_specs" {
+  type = list(object({
+    name  = string
+    nodes = number
+  }))
+  default = []
+}

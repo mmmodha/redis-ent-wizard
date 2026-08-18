@@ -1,6 +1,7 @@
 import https from "node:https";
 import net from "node:net";
-import type { ClusterHealth, InstanceRecord } from "./types.js";
+import { normalizeClusters, totalClusterNodes } from "./clusters.js";
+import type { ClusterHealth, CreateInstanceInput, InstanceRecord } from "./types.js";
 
 const RE_API_PORT = 9443;
 const RE_UI_PORT = 8443;
@@ -60,52 +61,81 @@ function asStringArray(value: unknown): string[] {
 }
 
 function expectedNodes(record: InstanceRecord): number {
-  const cfg = record.config as Record<string, unknown> | undefined;
-  const raw = record.mode === "gke" ? cfg?.rec_nodes : cfg?.clustersize;
-  const n = Number(raw);
-  return Number.isFinite(n) && n > 0 ? n : asStringArray(record.endpoints?.nodes_ip).length || 1;
+  try {
+    const cfg = (record.config || {}) as unknown as CreateInstanceInput;
+    return totalClusterNodes(normalizeClusters({ ...cfg, mode: record.mode }));
+  } catch {
+    const cfg = record.config as Record<string, unknown> | undefined;
+    const raw = record.mode === "gke" ? cfg?.rec_nodes : cfg?.clustersize;
+    const n = Number(raw);
+    return Number.isFinite(n) && n > 0 ? n : asStringArray(record.endpoints?.nodes_ip).length || 1;
+  }
 }
 
-async function probeVm(record: InstanceRecord): Promise<ClusterHealth> {
-  const now = new Date().toISOString();
-  const ips = asStringArray(record.endpoints?.nodes_ip);
-  const nodesExpected = expectedNodes(record);
+type ProbeTarget = { ips: string[]; user: string; pass: string; expected: number; label: string };
+
+function vmTargets(record: InstanceRecord): ProbeTarget[] {
+  const user = String(record.endpoints?.admin_username ?? "");
+  const clusters = record.endpoints?.clusters;
+  if (Array.isArray(clusters) && clusters.length) {
+    return clusters.map((raw, i) => {
+      const c = raw as Record<string, unknown>;
+      return {
+        ips: asStringArray(c.nodes_ip),
+        user: String(c.admin_username ?? user),
+        pass: String(c.admin_password ?? record.endpoints?.admin_password ?? ""),
+        expected: Number(c.nodes) || asStringArray(c.nodes_ip).length || 1,
+        label: `cluster ${i + 1}`,
+      };
+    });
+  }
+  return [
+    {
+      ips: asStringArray(record.endpoints?.nodes_ip),
+      user,
+      pass: String(record.endpoints?.admin_password ?? ""),
+      expected: expectedNodes(record),
+      label: "cluster",
+    },
+  ];
+}
+
+async function probeOneVm(target: ProbeTarget, now: string): Promise<ClusterHealth> {
   const base: ClusterHealth = {
     state: "installing",
     nodesActive: 0,
-    nodesExpected,
+    nodesExpected: target.expected,
     uiReachable: false,
     checkedAt: now,
-    detail: "Waiting for Redis Enterprise to install on the nodes",
+    detail: `Waiting for Redis Enterprise to install on ${target.label}`,
   };
 
-  if (!ips.length) {
-    return { ...base, state: "unknown", detail: "No node IPs in Terraform outputs yet" };
+  if (!target.ips.length) {
+    return { ...base, state: "unknown", detail: `No node IPs for ${target.label} yet` };
   }
 
-  const user = String(record.endpoints?.admin_username ?? "");
-  const pass = String(record.endpoints?.admin_password ?? "");
-
-  // node1 is the node that runs `rladmin cluster create`, so it answers first.
-  const apiUp = await tcpOpen(ips[0], RE_API_PORT);
+  const apiUp = await tcpOpen(target.ips[0], RE_API_PORT);
   if (!apiUp) {
     return {
       ...base,
-      detail: `Installing Redis Enterprise software on ${nodesExpected} node(s) — this usually takes 5-10 minutes`,
+      detail: `Installing Redis Enterprise on ${target.label} (${target.expected} node(s))`,
     };
   }
 
-  if (!user || !pass) {
+  if (!target.user || !target.pass) {
     return {
       ...base,
       state: "unknown",
-      detail: "Cluster is up but admin credentials are not available to verify it",
+      detail: `${target.label} is up but admin credentials are not available`,
     };
   }
 
   let nodesActive = 0;
   try {
-    const res = await getJson(`https://${ips[0]}:${RE_API_PORT}/v1/nodes`, { user, pass });
+    const res = await getJson(`https://${target.ips[0]}:${RE_API_PORT}/v1/nodes`, {
+      user: target.user,
+      pass: target.pass,
+    });
     if (res.status === 200) {
       const nodes = JSON.parse(res.body) as { status?: string }[];
       nodesActive = nodes.filter((n) => n.status === "active").length;
@@ -113,47 +143,71 @@ async function probeVm(record: InstanceRecord): Promise<ClusterHealth> {
       return {
         ...base,
         state: "bootstrapping",
-        detail: "Cluster API is up but rejected the stored admin credentials",
+        detail: `${target.label} API rejected the stored admin credentials`,
       };
     } else {
-      return { ...base, state: "bootstrapping", detail: "Cluster is forming" };
+      return { ...base, state: "bootstrapping", detail: `${target.label} is forming` };
     }
   } catch {
-    return { ...base, state: "bootstrapping", detail: "Cluster API not answering yet" };
+    return { ...base, state: "bootstrapping", detail: `${target.label} API not answering yet` };
   }
 
-  const uiReachable = await tcpOpen(ips[0], RE_UI_PORT);
-
-  if (nodesActive >= nodesExpected && uiReachable) {
+  const uiReachable = await tcpOpen(target.ips[0], RE_UI_PORT);
+  if (nodesActive >= target.expected && uiReachable) {
     return {
       state: "ready",
       nodesActive,
-      nodesExpected,
+      nodesExpected: target.expected,
       uiReachable,
       checkedAt: now,
-      detail: `All ${nodesActive} nodes active`,
+      detail: `${target.label}: all ${nodesActive} nodes active`,
     };
   }
-
   return {
     state: "bootstrapping",
+    nodesActive,
+    nodesExpected: target.expected,
+    uiReachable,
+    checkedAt: now,
+    detail:
+      nodesActive < target.expected
+        ? `${target.label}: ${nodesActive} of ${target.expected} nodes have joined`
+        : `${target.label}: waiting for the management UI`,
+  };
+}
+
+async function probeVm(record: InstanceRecord): Promise<ClusterHealth> {
+  const now = new Date().toISOString();
+  const targets = vmTargets(record);
+  const results = await Promise.all(targets.map((t) => probeOneVm(t, now)));
+  const nodesActive = results.reduce((n, r) => n + r.nodesActive, 0);
+  const nodesExpected = results.reduce((n, r) => n + r.nodesExpected, 0) || expectedNodes(record);
+  const uiReachable = results.every((r) => r.uiReachable);
+  const allReady = results.every((r) => r.state === "ready");
+  const anyUnknown = results.some((r) => r.state === "unknown");
+  return {
+    state: allReady ? "ready" : anyUnknown && results.every((r) => r.state === "unknown") ? "unknown" : "bootstrapping",
     nodesActive,
     nodesExpected,
     uiReachable,
     checkedAt: now,
-    detail:
-      nodesActive < nodesExpected
-        ? `${nodesActive} of ${nodesExpected} nodes have joined the cluster`
-        : "Waiting for the management UI to answer",
+    detail: allReady
+      ? `All ${results.length} cluster(s) ready (${nodesActive} nodes)`
+      : results.map((r) => r.detail).join(" · "),
   };
 }
 
 async function probeGke(record: InstanceRecord): Promise<ClusterHealth> {
   const now = new Date().toISOString();
   const nodesExpected = expectedNodes(record);
-  const url = String(record.endpoints?.rec_ui_url ?? "");
+  const recs = Array.isArray(record.endpoints?.recs)
+    ? (record.endpoints?.recs as Record<string, unknown>[])
+    : [];
+  const urls = recs.length
+    ? recs.map((r) => String(r.ui || r.rec_ui_url || "")).filter(Boolean)
+    : [String(record.endpoints?.rec_ui_url ?? "")].filter(Boolean);
 
-  if (!url) {
+  if (!urls.length) {
     return {
       state: "bootstrapping",
       nodesActive: 0,
@@ -164,27 +218,28 @@ async function probeGke(record: InstanceRecord): Promise<ClusterHealth> {
     };
   }
 
-  try {
-    const res = await getJson(url);
-    const reachable = res.status > 0;
-    return {
-      state: reachable ? "ready" : "bootstrapping",
-      nodesActive: reachable ? nodesExpected : 0,
-      nodesExpected,
-      uiReachable: reachable,
-      checkedAt: now,
-      detail: reachable ? "REC UI is answering" : "REC UI not answering yet",
-    };
-  } catch {
-    return {
-      state: "bootstrapping",
-      nodesActive: 0,
-      nodesExpected,
-      uiReachable: false,
-      checkedAt: now,
-      detail: "REC UI not reachable yet — the load balancer may still be provisioning",
-    };
-  }
+  const results = await Promise.all(
+    urls.map(async (url, i) => {
+      try {
+        const res = await getJson(url);
+        return { ok: res.status > 0, label: recs[i]?.name ? String(recs[i].name) : `REC ${i + 1}` };
+      } catch {
+        return { ok: false, label: recs[i]?.name ? String(recs[i].name) : `REC ${i + 1}` };
+      }
+    }),
+  );
+  const readyCount = results.filter((r) => r.ok).length;
+  const reachable = readyCount === results.length;
+  return {
+    state: reachable ? "ready" : "bootstrapping",
+    nodesActive: reachable ? nodesExpected : 0,
+    nodesExpected,
+    uiReachable: reachable,
+    checkedAt: now,
+    detail: reachable
+      ? `${results.length} REC UI(s) answering`
+      : results.map((r) => `${r.label}: ${r.ok ? "up" : "waiting"}`).join(" · "),
+  };
 }
 
 export async function probeHealth(record: InstanceRecord): Promise<ClusterHealth> {

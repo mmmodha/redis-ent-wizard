@@ -59,6 +59,7 @@ export interface CreateInstanceInput {
   clustersize?: number;
   machine_type?: string;
   RS_release?: string;
+  rs_version?: string;
   RS_admin?: string;
   app?: number;
   /** One machine type per App VM (preferred). */
@@ -69,11 +70,27 @@ export interface CreateInstanceInput {
   memviz_port?: number;
   app_expose_http?: boolean;
   app_expose_https?: boolean;
+  /** Extra persistent disk GiB per App VM (0 = boot disk only). */
+  app_disk_gib?: number[];
+  /** Extra TCP ports to open on App VMs (string list or numbers). */
+  app_extra_ports?: number[] | string;
   rof_nvme_disks?: number;
+  /** One or more Redis clusters in this deployment. Legacy single-cluster fields still work. */
+  clusters?: Array<{
+    name?: string;
+    nodes?: number;
+    machine_type?: string;
+    rof_nvme_disks?: number;
+    rs_version?: string;
+    RS_release?: string;
+    rec_nodes?: number;
+  }>;
   // GKE
   gke_clustersize?: number;
   gke_machine_type?: string;
   rec_nodes?: number;
+  /** Helm chart version for redis-enterprise-operator. Empty = latest. */
+  operator_chart_version?: string;
   // shared
   dns_managed_zone?: string;
   dns_zone_dns_name?: string;

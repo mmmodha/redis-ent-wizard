@@ -187,9 +187,25 @@ export async function destroyInstance(id: string): Promise<void> {
   );
 }
 
+export type RsReleaseInfo = { id: string; label: string; url: string };
+export type GkeOperatorInfo = { id: string; label: string; chartVersion: string };
+
+export async function listReleases(): Promise<{ vm: RsReleaseInfo[]; gke: GkeOperatorInfo[] }> {
+  return jsonOrThrow(await fetch(`${apiBase()}/releases`, { cache: "no-store", headers: authHeaders() }));
+}
+
 export async function retryInstance(id: string): Promise<void> {
   await jsonOrThrow(
     await fetch(`${apiBase()}/instances/${encodeURIComponent(id)}/retry`, {
+      method: "POST",
+      headers: authHeaders(),
+    }),
+  );
+}
+
+export async function recreateInstance(id: string): Promise<void> {
+  await jsonOrThrow(
+    await fetch(`${apiBase()}/instances/${encodeURIComponent(id)}/recreate`, {
       method: "POST",
       headers: authHeaders(),
     }),

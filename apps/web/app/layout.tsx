@@ -6,6 +6,9 @@ import { Providers } from "@/components/Providers";
 export const metadata: Metadata = {
   title: "Redis Enterprise Wizard",
   description: "Terraform Redis Enterprise clusters on GCP VMs or GKE",
+  icons: {
+    icon: [{ url: "/favicon.svg", type: "image/svg+xml" }],
+  },
 };
 
 // Runs before first paint so the stored theme does not flash the wrong palette.

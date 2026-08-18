@@ -4,6 +4,7 @@ import { resolveSshPublicKey } from "./workspace.js";
 import {
   GcpApiError,
   listDnsZones,
+  dnsNameExists,
   listEnabledServices,
   getMachineType,
   getProject,
@@ -13,8 +14,16 @@ import {
   readKey,
 } from "./gcp.js";
 import { LOCAL_SSD_GIB, maxLocalSsdsForMachineType } from "./nvme.js";
-import { describeAppWebExposure, normalizeAppMachineTypes, summarizeAppMachineTypes } from "./app-web.js";
+import {
+  describeAppWebExposure,
+  normalizeAppDiskGib,
+  normalizeAppMachineTypes,
+  parseAppExtraPorts,
+  summarizeAppDiskGib,
+  summarizeAppMachineTypes,
+} from "./app-web.js";
 import { iamHint } from "./quotas.js";
+import { clusterNamePrefix, normalizeClusters, plannedDnsNames, summarizeClusters, totalClusterNodes } from "./clusters.js";
 import type { CreateInstanceInput } from "./types.js";
 
 export type CheckLevel = "pass" | "warn" | "fail";
@@ -60,7 +69,10 @@ const REQUIRED_SERVICES: Record<string, string[]> = {
   gke: ["compute.googleapis.com", "container.googleapis.com"],
 };
 
-export async function preflight(input: CreateInstanceInput): Promise<PreflightResult> {
+export async function preflight(
+  input: CreateInstanceInput,
+  opts?: { allowExistingId?: string },
+): Promise<PreflightResult> {
   const checks: CheckResult[] = [];
   const mode = input.mode;
   const env = input.env || "default";
@@ -71,11 +83,32 @@ export async function preflight(input: CreateInstanceInput): Promise<PreflightRe
 
   // 1. Instance name uniqueness in the local registry
   const existing = await readRegistry();
-  if (existing.some((i) => i.id === instanceId)) {
+  const clash = existing.find((i) => i.id === instanceId);
+  if (clash && clash.id !== opts?.allowExistingId) {
     checks.push(fail("name", "Instance name", `${instanceId} already exists in this wizard`));
+  } else if (clash && clash.status !== "destroyed") {
+    checks.push(fail("name", "Instance name", `${instanceId} is still live — destroy it first`));
   } else {
     checks.push(pass("name", "Instance name", `${instanceId} is available`));
   }
+
+  let clusters;
+  try {
+    clusters = normalizeClusters(input);
+  } catch (err) {
+    checks.push(
+      fail("clusters", "Redis clusters", err instanceof Error ? err.message : String(err)),
+    );
+    return { ok: false, instanceId, checks };
+  }
+
+  checks.push(
+    pass(
+      "cluster_names",
+      "Cluster names",
+      clusters.map((c, i) => clusterNamePrefix(namePrefix, i, c.name)).join(", "),
+    ),
+  );
 
   // 2. Credentials readable and usable
   let projectFromKey = "";
@@ -157,14 +190,24 @@ export async function preflight(input: CreateInstanceInput): Promise<PreflightRe
     }
 
     // 6. CPU quota in region
-    const nodes = mode === "vm" ? (input.clustersize ?? 3) : (input.gke_clustersize ?? 3);
-    const nodeMachine =
-      mode === "vm" ? input.machine_type || "e2-standard-2" : input.gke_machine_type || "e2-standard-8";
     const probeZone = usableZones[0] || `${region}-b`;
 
     try {
-      const mt = await getMachineType(credentialsFile, project, probeZone, nodeMachine);
-      const clusterCpus = mt.guestCpus * nodes;
+      let clusterCpus = 0;
+      let redisNodes = 0;
+      if (mode === "vm") {
+        for (const c of clusters) {
+          const mt = await getMachineType(credentialsFile, project, probeZone, c.machine_type);
+          clusterCpus += mt.guestCpus * c.nodes;
+          redisNodes += c.nodes;
+        }
+      } else {
+        const nodeMachine = input.gke_machine_type || "e2-standard-8";
+        const gkeNodes = input.gke_clustersize ?? 3;
+        const mt = await getMachineType(credentialsFile, project, probeZone, nodeMachine);
+        clusterCpus = mt.guestCpus * gkeNodes;
+        redisNodes = gkeNodes;
+      }
       let appCpus = 0;
       const appCount = mode === "vm" ? (input.app ?? 0) : 0;
       const appTypes =
@@ -183,8 +226,8 @@ export async function preflight(input: CreateInstanceInput): Promise<PreflightRe
       }
       const requiredCpus = clusterCpus + appCpus;
       const breakdown = appCpus
-        ? ` (${clusterCpus} for ${nodes} Redis node(s) + ${appCpus} for ${appCount} app VM(s): ${summarizeAppMachineTypes(appTypes)})`
-        : "";
+        ? ` (${clusterCpus} for ${redisNodes} Redis node(s) across ${clusters.length} cluster(s) + ${appCpus} for ${appCount} app VM(s): ${summarizeAppMachineTypes(appTypes)})`
+        : ` (${summarizeClusters(clusters)})`;
 
       const cpuQuota = regionInfo.quotas.find((q) => q.metric === "CPUS");
       if (cpuQuota) {
@@ -217,77 +260,130 @@ export async function preflight(input: CreateInstanceInput): Promise<PreflightRe
   }
 
   // 7. Machine type available in every selected zone
-  const machineType =
-    mode === "vm" ? input.machine_type || "e2-standard-2" : input.gke_machine_type || "e2-standard-8";
   const zonesToCheck = usableZones.length ? usableZones : [`${region}-b`];
-  const zonesForMachine = mode === "vm" ? zonesToCheck : [zonesToCheck[0]];
-  const missingIn: string[] = [];
-  let machineDetail = "";
-  let machineArm = false;
-  for (const zone of zonesForMachine) {
-    try {
-      const mt = await getMachineType(credentialsFile, project, zone, machineType);
-      machineDetail = `${mt.name} — ${mt.guestCpus} vCPU, ${Math.round(mt.memoryMb / 1024)} GB`;
-      machineArm = mt.architecture === "ARM64";
-    } catch (err) {
-      if (err instanceof GcpApiError && err.status === 404) {
-        missingIn.push(zone);
+  if (mode === "vm") {
+    for (let i = 0; i < clusters.length; i++) {
+      const machineType = clusters[i].machine_type;
+      const missingIn: string[] = [];
+      let machineDetail = "";
+      let machineArm = false;
+      for (const zone of zonesToCheck) {
+        try {
+          const mt = await getMachineType(credentialsFile, project, zone, machineType);
+          machineDetail = `${mt.name} — ${mt.guestCpus} vCPU, ${Math.round(mt.memoryMb / 1024)} GB`;
+          machineArm = mt.architecture === "ARM64";
+        } catch (err) {
+          if (err instanceof GcpApiError && err.status === 404) {
+            missingIn.push(zone);
+          } else {
+            missingIn.push(`${zone} (${errorText(err)})`);
+          }
+        }
+      }
+      const label = clusters.length > 1 ? `Cluster ${i + 1} machine type` : "Machine type";
+      const id = clusters.length > 1 ? `machine_type_${i}` : "machine_type";
+      if (missingIn.length) {
+        checks.push(fail(id, label, `${machineType} unavailable in: ${missingIn.join(", ")}`));
+      } else if (machineArm) {
+        checks.push(
+          fail(
+            id,
+            label,
+            `${machineType} is Arm (ARM64) and the Ubuntu 22.04 image used here is x86_64. Pick an x86 type such as n2-standard-8.`,
+          ),
+        );
       } else {
-        missingIn.push(`${zone} (${errorText(err)})`);
+        checks.push(pass(id, label, machineDetail || machineType));
       }
     }
-  }
-  if (missingIn.length) {
-    checks.push(
-      fail(
-        "machine_type",
-        "Machine type",
-        `${machineType} unavailable in: ${missingIn.join(", ")}`,
-      ),
-    );
-  } else if (machineArm) {
-    checks.push(
-      fail(
-        "machine_type",
-        "Machine type",
-        `${machineType} is Arm (ARM64) and the Ubuntu 22.04 image used here is x86_64. Pick an x86 type such as n2-standard-8.`,
-      ),
-    );
   } else {
-    checks.push(pass("machine_type", "Machine type", machineDetail || machineType));
+    const machineType = input.gke_machine_type || "e2-standard-8";
+    const zone = zonesToCheck[0];
+    try {
+      const mt = await getMachineType(credentialsFile, project, zone, machineType);
+      if (mt.architecture === "ARM64") {
+        checks.push(
+          fail(
+            "machine_type",
+            "Machine type",
+            `${machineType} is Arm (ARM64). Pick an x86 type such as e2-standard-8.`,
+          ),
+        );
+      } else {
+        checks.push(
+          pass(
+            "machine_type",
+            "Machine type",
+            `${mt.name} — ${mt.guestCpus} vCPU, ${Math.round(mt.memoryMb / 1024)} GB`,
+          ),
+        );
+      }
+    } catch (err) {
+      checks.push(
+        fail("machine_type", "Machine type", `${machineType} unavailable in ${zone}: ${errorText(err)}`),
+      );
+    }
   }
 
   // 8. Redis Enterprise sizing sanity
   if (mode === "vm") {
-    const nodes = input.clustersize ?? 3;
-    if (nodes === 2) {
+    for (let i = 0; i < clusters.length; i++) {
+      const nodes = clusters[i].nodes;
+      const id = clusters.length > 1 ? `sizing_${i}` : "sizing";
+      const label = clusters.length > 1 ? `Cluster ${i + 1} sizing` : "Cluster sizing";
+      if (nodes === 2) {
+        checks.push(
+          warn(id, label, "2 nodes cannot form a quorum for HA; use 1 for testing or 3+ for HA"),
+        );
+      } else if (nodes >= 3 && nodes % 2 === 0) {
+        checks.push(warn(id, label, `${nodes} nodes — an odd count is recommended`));
+      } else {
+        checks.push(
+          pass(
+            id,
+            label,
+            `${nodes} node(s)${clusters.length > 1 ? ` · ${clusters[i].rs_version}` : ""}`,
+          ),
+        );
+      }
+    }
+  } else {
+    const gkeNodes = input.gke_clustersize ?? 3;
+    const maxRec = Math.max(...clusters.map((c) => c.rec_nodes));
+    const sumRec = totalClusterNodes(clusters);
+    if (clusters.some((c) => c.rec_nodes % 2 === 0)) {
       checks.push(
         warn(
           "sizing",
-          "Cluster sizing",
-          "2 nodes cannot form a quorum for HA; use 1 for testing or 3+ for HA",
+          "REC sizing",
+          `${clusters.map((c) => c.rec_nodes).join(", ")} REC nodes — odd counts are recommended for HA`,
         ),
       );
-    } else if (nodes >= 3 && nodes % 2 === 0) {
-      checks.push(warn("sizing", "Cluster sizing", `${nodes} nodes — an odd count is recommended`));
-    } else {
-      checks.push(pass("sizing", "Cluster sizing", `${nodes} node(s)`));
     }
-  } else {
-    const recNodes = input.rec_nodes ?? 3;
-    const gkeNodes = input.gke_clustersize ?? 3;
-    if (recNodes % 2 === 0) {
-      checks.push(warn("sizing", "REC sizing", `${recNodes} REC nodes — must be odd for HA`));
-    } else if (gkeNodes < recNodes) {
+    if (gkeNodes < maxRec) {
       checks.push(
         fail(
           "sizing",
           "REC sizing",
-          `${recNodes} REC pods need at least ${recNodes} GKE nodes (anti-affinity), have ${gkeNodes}`,
+          `Largest REC needs ${maxRec} GKE nodes (anti-affinity), pool has ${gkeNodes}`,
+        ),
+      );
+    } else if (gkeNodes < sumRec) {
+      checks.push(
+        warn(
+          "sizing",
+          "REC sizing",
+          `${sumRec} REC pods on ${gkeNodes} GKE nodes — they will share nodes. ${sumRec}+ GKE nodes is safer.`,
         ),
       );
     } else {
-      checks.push(pass("sizing", "REC sizing", `${recNodes} REC nodes on ${gkeNodes} GKE nodes`));
+      checks.push(
+        pass(
+          "sizing",
+          "REC sizing",
+          `${clusters.length} REC(s), ${sumRec} pods on ${gkeNodes} GKE nodes`,
+        ),
+      );
     }
   }
 
@@ -314,6 +410,42 @@ export async function preflight(input: CreateInstanceInput): Promise<PreflightRe
         );
       } else {
         checks.push(pass("dns", "DNS managed zone", `${zoneName} → ${found.dnsName}`));
+        try {
+          const hosts = plannedDnsNames({
+            deploymentPrefix: namePrefix,
+            dnsZone: dnsName,
+            clusters,
+            appCount: input.app ?? 0,
+          });
+          const results = await Promise.all(
+            hosts.map(async (host) => ({
+              host,
+              exists: await dnsNameExists(credentialsFile, project, zoneName, host),
+            })),
+          );
+          const taken = results.filter((r) => r.exists).map((r) => r.host);
+          if (taken.length) {
+            const shown = taken.slice(0, 6).join(", ");
+            const extra = taken.length > 6 ? ` (+${taken.length - 6} more)` : "";
+            checks.push(
+              fail(
+                "dns_records",
+                "DNS records",
+                `${taken.length} name(s) already exist in ${zoneName}: ${shown}${extra}. Pick a different instance name, env, or cluster name — a colleague may already be using this prefix.`,
+              ),
+            );
+          } else {
+            checks.push(
+              pass(
+                "dns_records",
+                "DNS records",
+                `${hosts.length} name(s) free in ${zoneName} (cluster/node/app FQDNs)`,
+              ),
+            );
+          }
+        } catch (err) {
+          checks.push(warn("dns_records", "DNS records", `Could not verify: ${errorText(err)}`));
+        }
       }
     } catch (err) {
       checks.push(warn("dns", "DNS managed zone", `Could not verify: ${errorText(err)}`));
@@ -352,61 +484,67 @@ export async function preflight(input: CreateInstanceInput): Promise<PreflightRe
 
   // 12. Redis Enterprise release URL reachable (VM mode)
   if (mode === "vm") {
-    const url =
-      input.RS_release ||
-      "https://s3.amazonaws.com/redis-enterprise-software-downloads/8.2.0/redislabs-8.2.0-46-jammy-amd64.tar";
-    try {
-      const res = await fetch(url, { method: "HEAD", signal: AbortSignal.timeout(8000) });
-      if (res.ok) {
-        const size = Number(res.headers.get("content-length") || 0);
+    const seen = new Set<string>();
+    for (let i = 0; i < clusters.length; i++) {
+      const url = clusters[i].RS_release;
+      if (seen.has(url)) continue;
+      seen.add(url);
+      const id = seen.size === 1 && clusters.length === 1 ? "release" : `release_${i}`;
+      try {
+        const res = await fetch(url, { method: "HEAD", signal: AbortSignal.timeout(8000) });
+        if (res.ok) {
+          const size = Number(res.headers.get("content-length") || 0);
+          checks.push(
+            pass(
+              id,
+              "Redis Enterprise release",
+              size
+                ? `${clusters[i].rs_version} · ${url.split("/").pop()} (${Math.round(size / 1024 / 1024)} MB)`
+                : `${clusters[i].rs_version} reachable`,
+            ),
+          );
+        } else {
+          checks.push(warn(id, "Redis Enterprise release", `${clusters[i].rs_version}: HEAD ${res.status}`));
+        }
+      } catch (err) {
         checks.push(
-          pass(
-            "release",
-            "Redis Enterprise release",
-            size ? `${url.split("/").pop()} (${Math.round(size / 1024 / 1024)} MB)` : "reachable",
-          ),
+          warn(id, "Redis Enterprise release", `${clusters[i].rs_version} not reachable: ${errorText(err)}`),
         );
-      } else {
-        checks.push(warn("release", "Redis Enterprise release", `HEAD returned ${res.status}`));
       }
-    } catch (err) {
-      checks.push(warn("release", "Redis Enterprise release", `Not reachable: ${errorText(err)}`));
     }
   }
 
   // 12b. Local NVMe / Redis on Flash (VM only)
   if (mode === "vm") {
-    const nvme = input.rof_nvme_disks ?? 0;
-    const machine = input.machine_type || "e2-standard-2";
-    const max = maxLocalSsdsForMachineType(machine);
-    const nodes = input.clustersize ?? 3;
-    if (nvme === 0) {
-      checks.push(pass("nvme", "Local NVMe disks", "0 — standard RAM-only cluster"));
-    } else if (max === 0) {
-      checks.push(
-        fail(
-          "nvme",
-          "Local NVMe disks",
-          `${machine} does not support Local SSD / NVMe. Choose an n2/n2d/c2/c3 family machine type, or set NVMe to 0.`,
-        ),
-      );
-    } else if (max !== undefined && nvme > max) {
-      checks.push(
-        fail(
-          "nvme",
-          "Local NVMe disks",
-          `${machine} supports at most ${max} Local SSD(s); requested ${nvme}`,
-        ),
-      );
-    } else {
-      const totalGib = nodes * nvme * LOCAL_SSD_GIB;
-      checks.push(
-        pass(
-          "nvme",
-          "Local NVMe disks",
-          `Redis on Flash: ${nvme} × ${LOCAL_SSD_GIB} GiB per node × ${nodes} nodes ≈ ${totalGib} GiB flash`,
-        ),
-      );
+    for (let i = 0; i < clusters.length; i++) {
+      const nvme = clusters[i].rof_nvme_disks;
+      const machine = clusters[i].machine_type;
+      const max = maxLocalSsdsForMachineType(machine);
+      const nodes = clusters[i].nodes;
+      const id = clusters.length > 1 ? `nvme_${i}` : "nvme";
+      const label = clusters.length > 1 ? `Cluster ${i + 1} NVMe` : "Local NVMe disks";
+      if (nvme === 0) {
+        checks.push(pass(id, label, "0 — standard RAM-only cluster"));
+      } else if (max === 0) {
+        checks.push(
+          fail(
+            id,
+            label,
+            `${machine} does not support Local SSD / NVMe. Choose an n2/n2d/c2/c3 family machine type, or set NVMe to 0.`,
+          ),
+        );
+      } else if (max !== undefined && nvme > max) {
+        checks.push(fail(id, label, `${machine} supports at most ${max} Local SSD(s); requested ${nvme}`));
+      } else {
+        const totalGib = nodes * nvme * LOCAL_SSD_GIB;
+        checks.push(
+          pass(
+            id,
+            label,
+            `Redis on Flash: ${nvme} × ${LOCAL_SSD_GIB} GiB per node × ${nodes} nodes ≈ ${totalGib} GiB flash`,
+          ),
+        );
+      }
     }
   }
 
@@ -426,7 +564,18 @@ export async function preflight(input: CreateInstanceInput): Promise<PreflightRe
       });
       const exposeHttp = Boolean(input.app_expose_http);
       const exposeHttps = Boolean(input.app_expose_https);
-      const webDetail = describeAppWebExposure({ exposeHttp, exposeHttps });
+      const disks = normalizeAppDiskGib({
+        app: appCount,
+        app_disk_gib: input.app_disk_gib,
+      });
+      let extraPorts: number[] = [];
+      let extraPortsError = "";
+      try {
+        extraPorts = parseAppExtraPorts(input.app_extra_ports);
+      } catch (err) {
+        extraPortsError = err instanceof Error ? err.message : String(err);
+      }
+      const webDetail = describeAppWebExposure({ exposeHttp, exposeHttps, extraPorts });
       const details: string[] = [];
       let failed = false;
       for (let i = 0; i < appTypes.length; i++) {
@@ -443,8 +592,9 @@ export async function preflight(input: CreateInstanceInput): Promise<PreflightRe
               ),
             );
           } else {
+            const extra = disks[i] > 0 ? `, +${disks[i]} GiB /data` : "";
             details.push(
-              `#${i + 1} ${appMachine} (${mt.guestCpus} vCPU, ${Math.round(mt.memoryMb / 1024)} GB)`,
+              `#${i + 1} ${appMachine} (${mt.guestCpus} vCPU, ${Math.round(mt.memoryMb / 1024)} GB${extra})`,
             );
           }
         } catch (err) {
@@ -473,7 +623,7 @@ export async function preflight(input: CreateInstanceInput): Promise<PreflightRe
           pass(
             "app_vms",
             "App VMs",
-            `${appCount} in ${appZone}: ${details.join("; ")} · DNS ${appHost}`,
+            `${appCount} in ${appZone}: ${details.join("; ")} · ${summarizeAppDiskGib(disks)} · DNS ${appHost}`,
           ),
         );
       }
@@ -484,6 +634,17 @@ export async function preflight(input: CreateInstanceInput): Promise<PreflightRe
           `${webDetail}${exposeHttp ? ` · http://${appHost}` : ""}${exposeHttps ? ` · https://${appHost}` : ""}`,
         ),
       );
+      if (extraPortsError) {
+        checks.push(fail("app_extra_ports", "App extra TCP ports", extraPortsError));
+      } else if (extraPorts.length) {
+        checks.push(
+          pass(
+            "app_extra_ports",
+            "App extra TCP ports",
+            `${extraPorts.join(", ")} open from the internet on every App VM`,
+          ),
+        );
+      }
     }
 
     if (input.memviz_enabled) {

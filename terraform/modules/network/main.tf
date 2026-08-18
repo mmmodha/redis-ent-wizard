@@ -39,6 +39,12 @@ variable "app_expose_https" {
   default = false
 }
 
+variable "app_extra_ports" {
+  type        = list(number)
+  description = "Additional TCP ports opened on App VMs (app-extra tag)"
+  default     = []
+}
+
 resource "google_compute_network" "vpc" {
   name                    = "${var.name_prefix}-vpc"
   auto_create_subnetworks = false
@@ -164,6 +170,20 @@ resource "google_compute_firewall" "allow_app_https" {
   }
 
   target_tags   = ["app-https"]
+  source_ranges = ["0.0.0.0/0"]
+}
+
+resource "google_compute_firewall" "allow_app_extra" {
+  count   = var.app_count > 0 && length(var.app_extra_ports) > 0 ? 1 : 0
+  name    = "${var.name_prefix}-fw-allow-app-extra"
+  network = google_compute_network.vpc.name
+
+  allow {
+    protocol = "tcp"
+    ports    = [for p in var.app_extra_ports : tostring(p)]
+  }
+
+  target_tags   = ["app-extra"]
   source_ranges = ["0.0.0.0/0"]
 }
 

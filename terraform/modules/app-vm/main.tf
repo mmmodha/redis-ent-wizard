@@ -14,11 +14,16 @@ locals {
     var.app_expose_http ? ["app-http"] : [],
     var.app_expose_https ? ["app-https"] : [],
     var.memviz_enabled ? ["memviz"] : [],
+    length(var.app_extra_ports) > 0 ? ["app-extra"] : [],
   )
   # Pad / truncate so Terraform never indexes past the list if callers mis-size it.
   app_machine_types = [
     for i in range(var.app_count) :
     length(var.app_machine_types) > i && var.app_machine_types[i] != "" ? var.app_machine_types[i] : "n2-standard-8"
+  ]
+  app_disk_gib = [
+    for i in range(var.app_count) :
+    length(var.app_disk_gib) > i && var.app_disk_gib[i] > 0 ? var.app_disk_gib[i] : 0
   ]
 }
 
@@ -94,6 +99,34 @@ variable "app_expose_https" {
   default = false
 }
 
+variable "app_disk_gib" {
+  type        = list(number)
+  description = "Extra persistent disk GiB per App VM (0 = boot disk only)"
+  default     = []
+}
+
+variable "app_extra_ports" {
+  type        = list(number)
+  description = "Additional TCP ports; used only to tag VMs for the app-extra firewall"
+  default     = []
+}
+
+resource "google_compute_disk" "app_data" {
+  for_each = {
+    for i, size in local.app_disk_gib : tostring(i) => size if size > 0
+  }
+
+  name = "${var.name_prefix}-app-data-${each.key}"
+  type = "pd-balanced"
+  zone = "${var.region_name}-${var.region_zones[0]}"
+  size = each.value
+
+  labels = {
+    owner         = local.owner_label
+    skip_deletion = "yes"
+  }
+}
+
 resource "google_compute_instance" "app" {
   count = var.app_count
 
@@ -106,6 +139,15 @@ resource "google_compute_instance" "app" {
     initialize_params {
       image = "ubuntu-minimal-2204-jammy-v20250311"
       size  = 30
+    }
+  }
+
+  dynamic "attached_disk" {
+    for_each = local.app_disk_gib[count.index] > 0 ? [tostring(count.index)] : []
+    content {
+      source      = google_compute_disk.app_data[attached_disk.value].id
+      device_name = "app-data"
+      mode        = "READ_WRITE"
     }
   }
 
@@ -123,6 +165,7 @@ resource "google_compute_instance" "app" {
       memviz_port        = var.memviz_port
       memviz_repo_url    = var.memviz_repo_url
       memviz_repo_ref    = var.memviz_repo_ref
+      extra_disk_gib     = local.app_disk_gib[count.index]
     })
   }
 
@@ -135,9 +178,9 @@ resource "google_compute_instance" "app" {
 resource "google_dns_record_set" "app" {
   count = var.app_count
 
-  name = count.index <= 0 ? "app.${var.name_prefix}.${var.dns_zone_dns_name}." : "app.${var.name_prefix}-${count.index}.${var.dns_zone_dns_name}."
-  type = "A"
-  ttl  = 300
+  name         = count.index <= 0 ? "app.${var.name_prefix}.${var.dns_zone_dns_name}." : "app.${var.name_prefix}-${count.index}.${var.dns_zone_dns_name}."
+  type         = "A"
+  ttl          = 300
   managed_zone = var.dns_managed_zone
   rrdatas      = [google_compute_instance.app[count.index].network_interface[0].access_config[0].nat_ip]
 }
@@ -159,7 +202,23 @@ output "app_dns" {
 }
 
 output "how_to_ssh_to_app" {
-  value = var.app_count > 0 ? "gcloud compute ssh ${google_compute_instance.app[0].name}" : ""
+  value = [
+    for inst in google_compute_instance.app :
+    "gcloud compute ssh ${inst.name} --zone ${inst.zone}"
+  ]
+}
+
+output "apps" {
+  value = [
+    for i, inst in google_compute_instance.app : {
+      name         = inst.name
+      machine_type = inst.machine_type
+      ip           = inst.network_interface[0].access_config[0].nat_ip
+      dns          = trimsuffix(google_dns_record_set.app[i].name, ".")
+      zone         = inst.zone
+      how_to_ssh   = "gcloud compute ssh ${inst.name} --zone ${inst.zone}"
+    }
+  ]
 }
 
 output "memviz_url" {

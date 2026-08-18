@@ -1,5 +1,6 @@
 import type { AuthUser } from "./auth.js";
 import { dbReadInstances } from "./db.js";
+import { countRedisClusters, normalizeClusters } from "./clusters.js";
 import type { CreateInstanceInput, InstanceStatus } from "./types.js";
 
 export type QuotaLimits = {
@@ -33,21 +34,32 @@ export async function checkCreateQuota(
     (i) => (i.ownerSub === user.sub || i.ownerEmail === user.email) && LIVE.includes(i.status) && i.status !== "destroyed",
   );
   const live = mine.filter((i) => i.status !== "destroyed" && i.status !== "failed");
-  if (live.length >= limits.maxLiveClusters && user.role !== "admin") {
+  const liveRedis = live.reduce((n, i) => {
+    const cfg = (i.config || {}) as unknown as CreateInstanceInput;
+    return n + countRedisClusters({ ...cfg, mode: i.mode });
+  }, 0);
+  const requested = countRedisClusters(input);
+  if (liveRedis + requested > limits.maxLiveClusters && user.role !== "admin") {
     errors.push(
-      `Quota: you already have ${live.length} live cluster(s); limit is ${limits.maxLiveClusters}. Destroy one first.`,
+      `Quota: you already have ${liveRedis} live Redis cluster(s); this deployment adds ${requested} (limit ${limits.maxLiveClusters}). Destroy one first.`,
     );
   }
 
-  const nodes =
-    input.mode === "gke" ? (input.gke_clustersize ?? 3) : (input.clustersize ?? 3);
-  if (nodes > limits.maxNodesPerCluster) {
-    errors.push(`Quota: max ${limits.maxNodesPerCluster} nodes per cluster (requested ${nodes})`);
-  }
-
-  const nvme = input.rof_nvme_disks ?? 0;
-  if (nvme > limits.maxNvmePerNode) {
-    errors.push(`Quota: max ${limits.maxNvmePerNode} NVMe disks per node (requested ${nvme})`);
+  try {
+    for (const c of normalizeClusters(input)) {
+      if (c.nodes > limits.maxNodesPerCluster) {
+        errors.push(
+          `Quota: max ${limits.maxNodesPerCluster} nodes per cluster (requested ${c.nodes})`,
+        );
+      }
+      if (c.rof_nvme_disks > limits.maxNvmePerNode) {
+        errors.push(
+          `Quota: max ${limits.maxNvmePerNode} NVMe disks per node (requested ${c.rof_nvme_disks})`,
+        );
+      }
+    }
+  } catch (err) {
+    errors.push(err instanceof Error ? err.message : String(err));
   }
 
   return { ok: errors.length === 0, errors };

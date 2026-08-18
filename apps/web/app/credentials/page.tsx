@@ -92,6 +92,7 @@ export default function CredentialsPage() {
     <div>
       <div className="page-head">
         <div>
+          <p className="page-eyebrow">GCP</p>
           <h2 className="page-title">Credentials</h2>
           <p className="page-sub">
             Add your GCP service account JSON, then verify it has the IAM permissions the wizard
