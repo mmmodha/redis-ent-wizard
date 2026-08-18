@@ -1,0 +1,19 @@
+# TLS terminator for shared / enterprise deploys.
+# Place certs at ./certs/cert.pem and ./certs/key.pem or use Caddy's automatic HTTPS.
+
+:443 {
+	tls /certs/cert.pem /certs/key.pem
+
+	@api path /health /auth/* /credentials* /instances* /gcp* /preflight /folders /owners /admin*
+	handle @api {
+		reverse_proxy api:4000
+	}
+
+	handle {
+		reverse_proxy web:3000
+	}
+}
+
+:80 {
+	redir https://{host}{uri} permanent
+}

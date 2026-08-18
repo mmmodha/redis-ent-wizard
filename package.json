@@ -1,0 +1,15 @@
+{
+  "name": "redis-ent-wizard",
+  "private": true,
+  "version": "1.0.0",
+  "workspaces": [
+    "apps/*"
+  ],
+  "scripts": {
+    "dev:api": "npm run dev -w @redis-ent-wizard/api",
+    "dev:web": "npm run dev -w @redis-ent-wizard/web",
+    "build": "npm run build -w @redis-ent-wizard/api && npm run build -w @redis-ent-wizard/web",
+    "start:api": "npm run start -w @redis-ent-wizard/api",
+    "start:web": "npm run start -w @redis-ent-wizard/web"
+  }
+}

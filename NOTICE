@@ -1,0 +1,6 @@
+This project includes Terraform and shell scripts adapted from:
+
+  https://github.com/alexvasseur/redis-terraform-gcp
+
+Upstream license is Apache-2.0 (see that repository). Application UI/API code in
+apps/ is provided for Redis lab/demo usage.

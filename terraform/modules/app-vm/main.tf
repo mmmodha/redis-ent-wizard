@@ -1,0 +1,175 @@
+variable "name_prefix" {
+  type = string
+}
+
+variable "youremail" {
+  type = string
+}
+
+# GCP label values reject '@' and '.', so an owner email must be normalised.
+locals {
+  owner_label = substr(replace(lower(var.youremail), "/[^a-z0-9_-]+/", "-"), 0, 63)
+  app_tags = concat(
+    ["ssh"],
+    var.app_expose_http ? ["app-http"] : [],
+    var.app_expose_https ? ["app-https"] : [],
+    var.memviz_enabled ? ["memviz"] : [],
+  )
+  # Pad / truncate so Terraform never indexes past the list if callers mis-size it.
+  app_machine_types = [
+    for i in range(var.app_count) :
+    length(var.app_machine_types) > i && var.app_machine_types[i] != "" ? var.app_machine_types[i] : "n2-standard-8"
+  ]
+}
+
+variable "app_count" {
+  type = number
+}
+
+variable "app_machine_types" {
+  type        = list(string)
+  description = "Machine type for each App VM (length must equal app_count)"
+  default     = []
+}
+
+variable "region_name" {
+  type = string
+}
+
+variable "region_zones" {
+  type = list(string)
+}
+
+variable "dns_managed_zone" {
+  type = string
+}
+
+variable "dns_zone_dns_name" {
+  type = string
+}
+
+variable "public_subnet_name" {
+  type = string
+}
+
+variable "ssh_public_key" {
+  type = string
+}
+
+variable "scripts_path" {
+  type = string
+}
+
+variable "clustersize" {
+  type = number
+}
+
+variable "memviz_enabled" {
+  type    = bool
+  default = false
+}
+
+variable "memviz_port" {
+  type    = number
+  default = 3000
+}
+
+variable "memviz_repo_url" {
+  type    = string
+  default = "https://github.com/itay-ct/memviz.git"
+}
+
+variable "memviz_repo_ref" {
+  type    = string
+  default = "main"
+}
+
+variable "app_expose_http" {
+  type    = bool
+  default = false
+}
+
+variable "app_expose_https" {
+  type    = bool
+  default = false
+}
+
+resource "google_compute_instance" "app" {
+  count = var.app_count
+
+  name         = count.index <= 0 ? "${var.name_prefix}-app" : "${var.name_prefix}-app-${count.index}"
+  machine_type = local.app_machine_types[count.index]
+  zone         = "${var.region_name}-${var.region_zones[0]}"
+  tags         = local.app_tags
+
+  boot_disk {
+    initialize_params {
+      image = "ubuntu-minimal-2204-jammy-v20250311"
+      size  = 30
+    }
+  }
+
+  labels = {
+    owner         = local.owner_label
+    skip_deletion = "yes"
+  }
+
+  metadata = {
+    ssh-keys = "ubuntu:${var.ssh_public_key}"
+    startup-script = templatefile("${var.scripts_path}/app.sh", {
+      cluster_dns_suffix = "${var.name_prefix}.${var.dns_zone_dns_name}"
+      nodes              = tostring(var.clustersize)
+      memviz_enabled     = var.memviz_enabled
+      memviz_port        = var.memviz_port
+      memviz_repo_url    = var.memviz_repo_url
+      memviz_repo_ref    = var.memviz_repo_ref
+    })
+  }
+
+  network_interface {
+    subnetwork = var.public_subnet_name
+    access_config {}
+  }
+}
+
+resource "google_dns_record_set" "app" {
+  count = var.app_count
+
+  name = count.index <= 0 ? "app.${var.name_prefix}.${var.dns_zone_dns_name}." : "app.${var.name_prefix}-${count.index}.${var.dns_zone_dns_name}."
+  type = "A"
+  ttl  = 300
+  managed_zone = var.dns_managed_zone
+  rrdatas      = [google_compute_instance.app[count.index].network_interface[0].access_config[0].nat_ip]
+}
+
+output "app_names" {
+  value = google_compute_instance.app[*].name
+}
+
+output "app_machine_types" {
+  value = local.app_machine_types
+}
+
+output "app_ips" {
+  value = google_compute_instance.app[*].network_interface[0].access_config[0].nat_ip
+}
+
+output "app_dns" {
+  value = [for r in google_dns_record_set.app : trimsuffix(r.name, ".")]
+}
+
+output "how_to_ssh_to_app" {
+  value = var.app_count > 0 ? "gcloud compute ssh ${google_compute_instance.app[0].name}" : ""
+}
+
+output "memviz_url" {
+  value = var.memviz_enabled && var.app_count > 0 ? "http://app.${var.name_prefix}.${var.dns_zone_dns_name}:${var.memviz_port}" : ""
+}
+
+output "app_http_url" {
+  value = var.app_expose_http && var.app_count > 0 ? "http://app.${var.name_prefix}.${var.dns_zone_dns_name}" : ""
+}
+
+output "app_https_url" {
+  value = var.app_expose_https && var.app_count > 0 ? "https://app.${var.name_prefix}.${var.dns_zone_dns_name}" : ""
+}

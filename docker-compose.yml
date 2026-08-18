@@ -1,0 +1,79 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: rew
+      POSTGRES_PASSWORD: rew
+      POSTGRES_DB: rew
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    restart: unless-stopped
+    profiles: ["enterprise"]
+
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    ports:
+      - "4000:4000"
+    environment:
+      PORT: "4000"
+      DATA_DIR: /data
+      TERRAFORM_DIR: /app/terraform
+      SSH_PUBLIC_KEY_PATH: /ssh/google_compute_engine.pub
+      # Local Compose defaults to open auth so demos keep working.
+      # For Okta: set AUTH_DISABLED=false and OKTA_* below.
+      AUTH_DISABLED: "${AUTH_DISABLED:-true}"
+      OKTA_ISSUER: "${OKTA_ISSUER:-}"
+      OKTA_CLIENT_ID: "${OKTA_CLIENT_ID:-}"
+      OKTA_AUDIENCE: "${OKTA_AUDIENCE:-}"
+      OKTA_ADMIN_GROUPS: "${OKTA_ADMIN_GROUPS:-rew-admins,rew-ops}"
+      CREDENTIALS_ENCRYPTION_KEY: "${CREDENTIALS_ENCRYPTION_KEY:-change-me-in-production-please}"
+      DATABASE_URL: "${DATABASE_URL:-}"
+      JOB_GLOBAL_LIMIT: "${JOB_GLOBAL_LIMIT:-10}"
+      JOB_PER_USER_LIMIT: "${JOB_PER_USER_LIMIT:-2}"
+      QUOTA_MAX_LIVE_CLUSTERS: "${QUOTA_MAX_LIVE_CLUSTERS:-5}"
+      QUOTA_MAX_NODES: "${QUOTA_MAX_NODES:-7}"
+      QUOTA_MAX_NVME: "${QUOTA_MAX_NVME:-8}"
+    volumes:
+      - ./data:/data
+      - ./terraform:/app/terraform:ro
+      - ${GCP_CREDENTIALS_HOST_DIR:-./data/credentials}:/data/credentials:ro
+      - ${SSH_DIR:-$HOME/.ssh}:/ssh:ro
+    restart: unless-stopped
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: http://localhost:4000
+    ports:
+      - "3000:3000"
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:4000
+      API_INTERNAL_URL: http://api:4000
+    depends_on:
+      - api
+    restart: unless-stopped
+
+  # Optional TLS terminator for shared / enterprise deploys:
+  # put certs in ./certs and run: docker compose --profile tls up
+  caddy:
+    image: caddy:2-alpine
+    profiles: ["tls"]
+    ports:
+      - "443:443"
+      - "80:80"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./certs:/certs:ro
+    depends_on:
+      - web
+      - api
+    restart: unless-stopped
+
+volumes:
+  pgdata:
