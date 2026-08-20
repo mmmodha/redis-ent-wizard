@@ -24,7 +24,6 @@ import {
   type RegionInfo,
   type RsReleaseInfo,
 } from "@/lib/api";
-import { useAuth } from "@/lib/auth";
 
 type Mode = "vm" | "gke";
 
@@ -77,7 +76,6 @@ function extraPortsLooksValid(value: string): boolean {
 
 export default function WizardPage() {
   const router = useRouter();
-  const { user } = useAuth();
   const [step, setStep] = useState(0);
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -100,6 +98,7 @@ export default function WizardPage() {
   const [form, setForm] = useState({
     name: "",
     youremail: "",
+    skip_deletion: false,
     project: "",
     credentialsFile: "",
     region_name: "",
@@ -126,12 +125,6 @@ export default function WizardPage() {
     dns_managed_zone: "",
     dns_zone_dns_name: "",
   });
-
-  useEffect(() => {
-    if (user?.email) {
-      setForm((prev) => (prev.youremail ? prev : { ...prev, youremail: user.email }));
-    }
-  }, [user?.email]);
 
   function update<K extends keyof typeof form>(key: K, value: (typeof form)[K]) {
     setForm((prev) => ({ ...prev, [key]: value }));
@@ -304,6 +297,7 @@ export default function WizardPage() {
       name: form.name,
       mode: form.mode,
       youremail: form.youremail,
+      skip_deletion: form.skip_deletion,
       project: form.project,
       credentialsFile: form.credentialsFile,
       region_name: form.region_name,
@@ -356,15 +350,14 @@ export default function WizardPage() {
 
   const validCredential = credentials.find((c) => c.file === form.credentialsFile)?.valid;
 
-  // Mirrors the API rule: an email, or a person's name if they have no email here.
+  // Workplace policy: GCP owner must be firstName_lastName.
   const ownerError = useMemo(() => {
     const value = form.youremail.trim();
-    if (!value) return "Required — who is creating this?";
-    if (value.length < 3) return "Too short";
-    if (value.includes("@")) {
-      return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value) ? "" : "Not a valid email address";
+    if (!value) return "Required — firstName_lastName (e.g. mehul_modha)";
+    if (!/^[A-Za-z][A-Za-z0-9]*_[A-Za-z][A-Za-z0-9]*$/.test(value)) {
+      return "Use firstName_lastName (e.g. mehul_modha)";
     }
-    return /^[\p{L}][\p{L}\d._' -]+$/u.test(value) ? "" : "Use an email address or a name";
+    return "";
   }, [form.youremail]);
 
   const canContinue = useMemo(() => {
@@ -407,6 +400,7 @@ export default function WizardPage() {
     const cred = credentials.find((c) => c.file === form.credentialsFile);
     const rows: { label: string; value: string }[] = [
       { label: "Owner", value: form.youremail + (form.folder.trim() ? ` · folder ${form.folder.trim()}` : "") },
+      { label: "Skip deletion", value: form.skip_deletion ? "yes — GCP label skip_deletion=yes" : "no" },
       { label: "Credentials", value: cred?.name || cred?.file || form.credentialsFile },
       { label: "Project", value: form.project },
     ];
@@ -637,8 +631,8 @@ export default function WizardPage() {
               <span className="field-required">Created by</span>
               <input
                 value={form.youremail}
-                onChange={(e) => update("youremail", e.target.value)}
-                placeholder="you@company.com or your name"
+                onChange={(e) => update("youremail", e.target.value.toLowerCase())}
+                placeholder="mehul_modha"
                 aria-invalid={Boolean(ownerError)}
                 required
               />
@@ -646,9 +640,23 @@ export default function WizardPage() {
                 <span className="field-error">{ownerError}</span>
               ) : (
                 <span className="hint">
-                  Email or name — used for grouping and as the owner label on GCP resources
+                  Workplace policy: firstName_lastName — this is the GCP owner label
                 </span>
               )}
+            </label>
+
+            <label>
+              Skip deletion label
+              <select
+                value={form.skip_deletion ? "yes" : "no"}
+                onChange={(e) => update("skip_deletion", e.target.value === "yes")}
+              >
+                <option value="no">No — omit skip_deletion</option>
+                <option value="yes">Yes — add skip_deletion=yes</option>
+              </select>
+              <span className="hint">
+                When yes, GCP resources get the skip_deletion=yes label so org cleanup jobs leave them
+              </span>
             </label>
 
             <label>

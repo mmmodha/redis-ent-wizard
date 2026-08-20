@@ -49,7 +49,7 @@ No `.env` is required for a local test. `AUTH_DISABLED=true` is the Compose defa
 
 1. **Credentials** — paste your SA JSON (or pick a file you dropped in `data/credentials/`). Click **Verify**. VM should be ready before you create a cluster. Fix any failed checks with the `gcloud` snippets shown.
 2. **Create** wizard:
-   - Credentials: pick the JSON, project, region, **Created by** (your email)
+   - Credentials: pick the JSON, project, region, **Created by** (`firstName_lastName`, e.g. `mehul_modha`)
    - Target: start with **VM** (smaller blast radius than GKE)
    - Sizing: 3 nodes is HA; optional App VMs (each can be a different machine size), HTTP/HTTPS, Memviz
    - Validate: wait until checks pass, then **Apply with Terraform**
@@ -249,7 +249,8 @@ password is available, and the node counter tells you how far the cluster has go
 ## Notes
 
 - Instance IDs are `{name}-{env}` (default env `default`).
-- **Created by** is mandatory (email or person's name) and is enforced by the API, not just the UI, so every instance is attributable. It is also normalised into the GCP `owner` label, which only permits lowercase letters, digits, `_` and `-`.
+- **Created by** is mandatory and must be `firstName_lastName` (e.g. `mehul_modha`). That exact value is written to the GCP `owner` label. Emails, spaces, and the local-dev login are rejected.
+- **Skip deletion** is optional. When enabled, resources also get the GCP label `skip_deletion=yes` so org cleanup jobs leave them. It is off by default.
 - The theme follows your OS by default; the toggle in the header overrides it and is remembered per browser.
 - Concurrent applies use isolated working directories under `data/instances/<id>/`.
 - A failed instance shows a **Retry apply** button; retrying regenerates the workspace from the saved config, so template fixes are picked up without recreating the instance.

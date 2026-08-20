@@ -6,9 +6,19 @@ variable "youremail" {
   type = string
 }
 
-# Kubernetes node labels reject '@', so an owner email must be normalised.
+variable "skip_deletion" {
+  type    = bool
+  default = false
+}
+
+# GKE `owner` is Created by as firstName_lastName (e.g. mehul_modha).
+# skip_deletion=yes is opt-in so org cleanup jobs leave these resources.
 locals {
-  owner_label = substr(replace(lower(var.youremail), "/[^a-z0-9_-]+/", "-"), 0, 63)
+  owner_label = var.youremail
+  resource_labels = merge(
+    { owner = local.owner_label },
+    var.skip_deletion ? { skip_deletion = "yes" } : {},
+  )
 }
 
 variable "region_name" {
@@ -41,6 +51,7 @@ resource "google_container_cluster" "gke" {
   remove_default_node_pool = true
   initial_node_count       = 1
   deletion_protection      = false
+  resource_labels          = local.resource_labels
 
   ip_allocation_policy {
     cluster_secondary_range_name  = "gke-pods"
@@ -62,10 +73,7 @@ resource "google_container_node_pool" "np" {
 
   node_config {
     machine_type = var.gke_machine_type
-    labels = {
-      owner         = local.owner_label
-      skip_deletion = "yes"
-    }
+    labels = local.resource_labels
     oauth_scopes = [
       "https://www.googleapis.com/auth/cloud-platform",
     ]

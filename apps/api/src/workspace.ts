@@ -130,6 +130,7 @@ module "stack" {
 
   yourname     = var.yourname
   youremail    = var.youremail
+  skip_deletion = var.skip_deletion
   credentials  = var.credentials
   project      = var.project
   env          = var.env
@@ -216,6 +217,7 @@ output "deployment_mode" { value = module.stack.deployment_mode }
       ? `
 variable "yourname" { type = string }
 variable "youremail" { type = string }
+variable "skip_deletion" { type = bool }
 variable "credentials" { type = string }
 variable "project" { type = string }
 variable "env" { type = string }
@@ -252,6 +254,7 @@ variable "ssh_public_key" { type = string }
       : `
 variable "yourname" { type = string }
 variable "youremail" { type = string }
+variable "skip_deletion" { type = bool }
 variable "credentials" { type = string }
 variable "project" { type = string }
 variable "env" { type = string }
@@ -276,6 +279,7 @@ variable "outputs_dir" { type = string }
   const tfvars: Record<string, unknown> = {
     yourname: input.name,
     youremail: input.youremail,
+    skip_deletion: input.skip_deletion ?? true,
     // Relative so the same workspace authenticates from inside the container
     // (/data/...) and from the host when the teardown scripts run it.
     credentials: portableCredentialsPath(workDir, credentialsAbs),

@@ -18,6 +18,7 @@ module "gke" {
 
   name_prefix        = local.name_prefix
   youremail          = var.youremail
+  skip_deletion      = var.skip_deletion
   region_name        = var.region_name
   gke_clustersize    = var.gke_clustersize
   gke_machine_type   = var.gke_machine_type

@@ -51,6 +51,7 @@ import { audit, listAudit } from "./audit.js";
 import { checkCreateQuota, getQuotaLimits, iamHint } from "./quotas.js";
 import { queueStats } from "./jobs.js";
 import { initDb, migrateFileRegistryIfNeeded } from "./db.js";
+import { CREATED_BY_ERROR, isValidCreatedBy, resolveCreatedBy } from "./created-by.js";
 import type { CreateInstanceInput, InstanceRecord } from "./types.js";
 
 const createSchema = z.object({
@@ -63,9 +64,9 @@ const createSchema = z.object({
   youremail: z
     .string()
     .trim()
-    .min(3, "owner email or name is required")
-    .max(64)
-    .optional(),
+    .max(63)
+    .refine((v) => isValidCreatedBy(v), { message: CREATED_BY_ERROR }),
+  skip_deletion: z.boolean().optional(),
   project: z.string().min(1),
   credentialsFile: z.string().min(1),
   region_name: z.string().optional(),
@@ -325,7 +326,11 @@ app.post("/preflight", async (req, reply) => {
   }
   try {
     const input = { ...parsed.data } as CreateInstanceInput;
-    if (!input.youremail) input.youremail = user.email;
+    const createdBy = resolveCreatedBy(input.youremail, user);
+    if (!createdBy) {
+      return reply.code(400).send({ error: CREATED_BY_ERROR });
+    }
+    input.youremail = createdBy;
     const { absPath } = await resolveOwnedCredentialsPath(user, input.credentialsFile);
     input.credentialsFile = absPath;
     return await preflight(input);
@@ -485,7 +490,11 @@ app.post("/instances", async (req, reply) => {
   }
 
   const input = parsed.data as CreateInstanceInput;
-  input.youremail = user.email || input.youremail || user.name;
+  const createdBy = resolveCreatedBy(input.youremail, user);
+  if (!createdBy) {
+    return reply.code(400).send({ error: CREATED_BY_ERROR });
+  }
+  input.youremail = createdBy;
   const id = toId(input.name, input.env);
   if (await getInstance(id)) {
     return reply.code(409).send({ error: `Instance ${id} already exists` });
@@ -763,7 +772,10 @@ app.post<{ Params: { id: string } }>("/instances/:id/recreate", async (req, repl
   if (!config?.name || !config?.mode) {
     return reply.code(400).send({ error: "Saved configuration is missing name or mode" });
   }
-  config.youremail = config.youremail || inst.ownerEmail;
+  config.youremail = resolveCreatedBy(config.youremail || inst.ownerEmail, user);
+  if (!config.youremail) {
+    return reply.code(400).send({ error: CREATED_BY_ERROR });
+  }
   config.project = config.project || inst.project;
   config.credentialsFile = inst.credentialsId || inst.credentialsFile;
 

@@ -50,6 +50,8 @@ export interface CreateInstanceInput {
   name: string;
   mode: DeploymentMode;
   youremail: string;
+  /** When true, GCP resources get skip_deletion=yes. */
+  skip_deletion?: boolean;
   project: string;
   credentialsFile: string;
   region_name?: string;

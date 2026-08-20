@@ -6,9 +6,19 @@ variable "youremail" {
   type = string
 }
 
-# GCP label values reject '@' and '.', so an owner email must be normalised.
+variable "skip_deletion" {
+  type    = bool
+  default = false
+}
+
+# GCP `owner` is Created by as firstName_lastName (e.g. mehul_modha).
+# skip_deletion=yes is opt-in so org cleanup jobs leave these resources.
 locals {
-  owner_label = substr(replace(lower(var.youremail), "/[^a-z0-9_-]+/", "-"), 0, 63)
+  owner_label = var.youremail
+  resource_labels = merge(
+    { owner = local.owner_label },
+    var.skip_deletion ? { skip_deletion = "yes" } : {},
+  )
 }
 
 variable "clustersize" {
@@ -95,10 +105,7 @@ resource "google_compute_instance" "node1" {
     automatic_restart   = true
   }
 
-  labels = {
-    owner         = local.owner_label
-    skip_deletion = "yes"
-  }
+  labels = local.resource_labels
 
   metadata = {
     ssh-keys = "ubuntu:${var.ssh_public_key}"
@@ -150,10 +157,7 @@ resource "google_compute_instance" "nodeX" {
     automatic_restart   = true
   }
 
-  labels = {
-    owner         = local.owner_label
-    skip_deletion = "yes"
-  }
+  labels = local.resource_labels
 
   metadata = {
     ssh-keys = "ubuntu:${var.ssh_public_key}"

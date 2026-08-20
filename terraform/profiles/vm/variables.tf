@@ -3,7 +3,19 @@ variable "yourname" {
 }
 
 variable "youremail" {
-  type = string
+  type        = string
+  description = "Created by in firstName_lastName form (e.g. mehul_modha); GCP owner label."
+
+  validation {
+    condition     = can(regex("^[a-z][a-z0-9]*_[a-z][a-z0-9]*$", var.youremail))
+    error_message = "youremail (Created by) must be firstName_lastName, e.g. mehul_modha."
+  }
+}
+
+variable "skip_deletion" {
+  type        = bool
+  default     = false
+  description = "If true, GCP resources get skip_deletion=yes so org cleanup jobs leave them."
 }
 
 variable "credentials" {

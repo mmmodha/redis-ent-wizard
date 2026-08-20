@@ -37,6 +37,7 @@ module "re_vm" {
 
   name_prefix        = local.cluster_prefixes[count.index]
   youremail          = var.youremail
+  skip_deletion      = var.skip_deletion
   clustersize        = local.clusters[count.index].nodes
   machine_type       = local.clusters[count.index].machine_type
   region_name        = var.region_name
@@ -61,6 +62,7 @@ module "app_vm" {
 
   name_prefix        = local.name_prefix
   youremail          = var.youremail
+  skip_deletion      = var.skip_deletion
   app_count          = var.app
   app_machine_types  = var.app_machine_types
   region_name        = var.region_name
