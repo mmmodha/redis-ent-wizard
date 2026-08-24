@@ -329,6 +329,28 @@ code,
   color: var(--redis-deep-hyper);
 }
 
+.db-endpoint-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.btn-copy {
+  padding: 2px 8px;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+/* Right-hand column of the instance detail page: endpoints, load balancers,
+   databases and application workloads stacked as consistent panels. */
+.detail-col {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  min-width: 0;
+}
+
 .btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
@@ -1442,6 +1464,69 @@ textarea.mono {
 
 .app-advanced summary:hover {
   color: var(--redis-hyper);
+}
+
+/* Wizard workload editors (databases, applications, load balancers) */
+.wiz-field-wide {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 6px;
+}
+
+.wiz-check-row {
+  display: inline-flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--redis-text-secondary);
+  font-weight: 500;
+}
+
+.wiz-check-row input[type="checkbox"],
+.wiz-check-row input[type="radio"] {
+  width: auto;
+}
+
+.wiz-radio-row {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.wiz-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.wiz-env-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.wiz-workload-card {
+  display: grid;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-soft);
+  border-left: 3px solid var(--redis-text-link);
+  border-radius: var(--radius);
+  background: var(--redis-bg-primary);
+}
+
+.wiz-workload-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.wiz-workload-head h4 {
+  margin: 0;
+  font-size: 14px;
 }
 
 @media (max-width: 720px) {

@@ -1,4 +1,4 @@
-import type { CreateInstanceInput, DeploymentMode } from "./types.js";
+import type { CreateInstanceInput, DatabaseSpec, DeploymentMode } from "./types.js";
 import { DEFAULT_RS_VERSION, resolveVmRelease } from "./rs-releases.js";
 
 export const MAX_CLUSTERS = 3;
@@ -13,6 +13,10 @@ export type ClusterSpec = {
   rs_version: string;
   RS_release: string;
   rec_nodes: number;
+  /** Non-Terraform metadata: databases created via the REST API after bootstrap. */
+  databases?: DatabaseSpec[];
+  /** Non-Terraform metadata: license applied via the REST API after bootstrap. */
+  license?: string;
 };
 
 export type ClusterInput = {
@@ -23,6 +27,8 @@ export type ClusterInput = {
   rs_version?: string;
   RS_release?: string;
   rec_nodes?: number;
+  databases?: DatabaseSpec[];
+  license?: string;
 };
 
 const RESERVED_CLUSTER_NAMES = new Set(["app", "gke"]);
@@ -112,6 +118,10 @@ export function normalizeClusters(input: {
       rs_version: release.rs_version,
       RS_release: release.RS_release,
       rec_nodes: recNodes,
+      // Carry non-Terraform metadata through so it survives the create handler
+      // overwriting input.clusters with the normalized specs.
+      ...(Array.isArray(c.databases) && c.databases.length ? { databases: c.databases } : {}),
+      ...(typeof c.license === "string" && c.license.trim() ? { license: c.license } : {}),
     };
   });
 }

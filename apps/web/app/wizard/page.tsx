@@ -1,12 +1,25 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { useRouter } from "next/navigation";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { CheckList } from "@/components/CheckList";
 import { MachineTypePicker } from "@/components/MachineTypePicker";
+import {
+  ApplicationsEditor,
+  DatabaseEditor,
+  LoadBalancerEditor,
+  blankApplication,
+  blankLb,
+  databaseDraftFromConfig,
+  type ApplicationDraft,
+  type DatabaseDraft,
+  type LbDraft,
+} from "@/components/wizard/WorkloadEditors";
+import { parsePorts } from "@/lib/diagram";
 import Link from "next/link";
 import {
   createInstance,
+  getInstance,
   listCredentials,
   listDnsZones,
   listFolders,
@@ -39,6 +52,19 @@ type ClusterDraft = {
   rof_nvme_disks: number;
   rs_version: string;
   rec_nodes: number;
+  license: string;
+  databases: DatabaseDraft[];
+};
+
+type StoredCluster = {
+  name?: string;
+  nodes?: number;
+  machine_type?: string;
+  rof_nvme_disks?: number;
+  rs_version?: string;
+  rec_nodes?: number;
+  license?: string;
+  databases?: Record<string, unknown>[];
 };
 
 function blankCluster(machine = ""): ClusterDraft {
@@ -49,7 +75,28 @@ function blankCluster(machine = ""): ClusterDraft {
     rof_nvme_disks: 0,
     rs_version: DEFAULT_RS_VERSION,
     rec_nodes: 3,
+    license: "",
+    databases: [],
   };
+}
+
+/** Normalize database drafts into the backend shape, mirroring the designer. */
+function databasesToPayload(dbs: DatabaseDraft[]): Record<string, unknown>[] {
+  return dbs.map((d) => ({
+    name: d.name.trim() || "db",
+    memory_gb: Number(d.memory_gb),
+    replication: Boolean(d.replication),
+    sharding: Boolean(d.sharding),
+    shards_count: d.sharding ? Number(d.shards_count) : 1,
+    eviction_policy: d.eviction_policy,
+    port: Number(d.port),
+    password: d.password,
+    modules: d.modules,
+    proxy_policy: d.proxy_policy,
+    shards_placement: d.shards_placement,
+    oss_cluster: Boolean(d.oss_cluster),
+    flex: Boolean(d.flex),
+  }));
 }
 
 function clusterSlug(raw: string): string {
@@ -74,8 +121,177 @@ function extraPortsLooksValid(value: string): boolean {
   return /^[\d\s,;\-]+$/.test(value);
 }
 
-export default function WizardPage() {
+function str(v: unknown): string {
+  return typeof v === "string" ? v : "";
+}
+
+function strArray(v: unknown): string[] {
+  return Array.isArray(v) ? v.map((x) => String(x)) : [];
+}
+
+function numArray(v: unknown): number[] {
+  return Array.isArray(v) ? v.map((x) => Number(x) || 0) : [];
+}
+
+function extraPortsToString(v: unknown): string {
+  if (typeof v === "string") return v;
+  if (Array.isArray(v)) return v.join(", ");
+  return "";
+}
+
+function clusterDraftFromConfig(c: StoredCluster): ClusterDraft {
+  return {
+    name: c.name || "",
+    nodes: Number(c.nodes ?? c.rec_nodes ?? 3) || 3,
+    machine_type: c.machine_type || "",
+    rof_nvme_disks: Number(c.rof_nvme_disks ?? 0) || 0,
+    rs_version: c.rs_version || DEFAULT_RS_VERSION,
+    rec_nodes: Number(c.rec_nodes ?? c.nodes ?? 3) || 3,
+    license: c.license || "",
+    databases: Array.isArray(c.databases) ? c.databases.map(databaseDraftFromConfig) : [],
+  };
+}
+
+type WizardForm = {
+  name: string;
+  youremail: string;
+  skip_deletion: boolean;
+  project: string;
+  credentialsFile: string;
+  region_name: string;
+  env: string;
+  folder: string;
+  mode: Mode;
+  region_zones: string[];
+  clustersize: number;
+  machine_type: string;
+  rof_nvme_disks: number;
+  clusters: ClusterDraft[];
+  applications: ApplicationDraft[];
+  load_balancers: LbDraft[];
+  RS_admin: string;
+  app: number;
+  app_machine_types: string[];
+  memviz_enabled: boolean;
+  app_expose_http: boolean;
+  app_expose_https: boolean;
+  app_disk_gib: number[];
+  app_extra_ports: string;
+  gke_clustersize: number;
+  gke_machine_type: string;
+  rec_nodes: number;
+  operator_chart_version: string;
+  dns_managed_zone: string;
+  dns_zone_dns_name: string;
+};
+
+function applicationDraftFromConfig(a: Record<string, unknown>): ApplicationDraft {
+  const artifact = (a.artifact as Record<string, unknown> | undefined) || {};
+  const env =
+    a.env && typeof a.env === "object"
+      ? Object.entries(a.env as Record<string, unknown>).map(([key, value]) => ({
+          key,
+          value: String(value),
+        }))
+      : [];
+  return {
+    name: str(a.name),
+    command: str(a.command),
+    ports: Array.isArray(a.ports) ? a.ports.map(String).join(", ") : "",
+    env,
+    connectClusters: strArray(a.connectClusters),
+    requirements: strArray(a.requirements),
+    artifact: {
+      kind:
+        artifact.kind === "url" || artifact.kind === "gcs"
+          ? (artifact.kind as "url" | "gcs")
+          : "upload",
+      ref: str(artifact.ref),
+      type: artifact.type === "binary" ? "binary" : "jar",
+    },
+    vm_count: Number(a.vm_count) || 1,
+    machine_type: str(a.machine_type),
+    disk_gib: Number(a.disk_gib) || 0,
+    image: str(a.image),
+    replicas: Number(a.replicas) || 1,
+    expose: a.expose === "lb" ? "lb" : "none",
+  };
+}
+
+function lbDraftFromConfig(lb: Record<string, unknown>): LbDraft {
+  return {
+    name: str(lb.name),
+    target: str(lb.target) || "app",
+    target_kind: lb.target_kind === "application" ? "application" : "vms",
+    ports: Array.isArray(lb.ports) ? lb.ports.map(String).join(", ") : extraPortsToString(lb.ports),
+  };
+}
+
+/** Invert `payload()` — rebuild the wizard form from a stored create-config. */
+function formFromConfig(
+  prev: WizardForm,
+  cfg: Record<string, unknown>,
+  credentialsFile: string,
+): WizardForm {
+  const mode: Mode = cfg.mode === "gke" ? "gke" : "vm";
+  const rawClusters = Array.isArray(cfg.clusters) ? (cfg.clusters as StoredCluster[]) : [];
+  const clusters: ClusterDraft[] = rawClusters.length
+    ? rawClusters.map(clusterDraftFromConfig)
+    : [
+        clusterDraftFromConfig({
+          name: undefined,
+          nodes: Number(cfg.clustersize) || 3,
+          machine_type: str(cfg.machine_type),
+          rof_nvme_disks: Number(cfg.rof_nvme_disks) || 0,
+          rs_version: str(cfg.rs_version) || DEFAULT_RS_VERSION,
+          rec_nodes: Number(cfg.rec_nodes) || 3,
+        }),
+      ];
+  const zones = strArray(cfg.region_zones);
+  return {
+    ...prev,
+    name: str(cfg.name),
+    youremail: str(cfg.youremail),
+    skip_deletion: Boolean(cfg.skip_deletion),
+    project: str(cfg.project),
+    credentialsFile,
+    region_name: str(cfg.region_name),
+    env: str(cfg.env) || "default",
+    folder: str(cfg.folder),
+    mode,
+    region_zones: zones.length ? zones : prev.region_zones,
+    clustersize: Number(cfg.clustersize) || clusters[0]?.nodes || 3,
+    machine_type: str(cfg.machine_type) || clusters[0]?.machine_type || "",
+    rof_nvme_disks: Number(cfg.rof_nvme_disks) || clusters[0]?.rof_nvme_disks || 0,
+    clusters,
+    applications: Array.isArray(cfg.applications)
+      ? (cfg.applications as Record<string, unknown>[]).map(applicationDraftFromConfig)
+      : [],
+    load_balancers: Array.isArray(cfg.load_balancers)
+      ? (cfg.load_balancers as Record<string, unknown>[]).map(lbDraftFromConfig)
+      : [],
+    RS_admin: str(cfg.RS_admin) || prev.RS_admin,
+    app: Number(cfg.app) || 0,
+    app_machine_types: strArray(cfg.app_machine_types),
+    memviz_enabled: Boolean(cfg.memviz_enabled),
+    app_expose_http: Boolean(cfg.app_expose_http),
+    app_expose_https: Boolean(cfg.app_expose_https),
+    app_disk_gib: numArray(cfg.app_disk_gib),
+    app_extra_ports: extraPortsToString(cfg.app_extra_ports),
+    gke_clustersize: Number(cfg.gke_clustersize) || clusters[0]?.rec_nodes || 3,
+    gke_machine_type: str(cfg.gke_machine_type),
+    rec_nodes: Number(cfg.rec_nodes) || clusters[0]?.rec_nodes || 3,
+    operator_chart_version: str(cfg.operator_chart_version) || "latest",
+    dns_managed_zone: str(cfg.dns_managed_zone),
+    dns_zone_dns_name: str(cfg.dns_zone_dns_name),
+  };
+}
+
+function WizardInner() {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const fromId = searchParams.get("from");
+  const hydratedRef = useRef(false);
   const [step, setStep] = useState(0);
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -110,6 +326,8 @@ export default function WizardPage() {
     machine_type: "",
     rof_nvme_disks: 0,
     clusters: [blankCluster()] as ClusterDraft[],
+    applications: [] as ApplicationDraft[],
+    load_balancers: [] as LbDraft[],
     RS_admin: "admin@redis.io",
     app: 0,
     app_machine_types: [] as string[],
@@ -142,6 +360,26 @@ export default function WizardPage() {
     return `${form.region_name}-${suffix}`;
   }, [form.region_name, form.region_zones, selectedRegion]);
 
+  // Connect-target names for applications, matching the designer's clusterName().
+  const clusterConnectNames = useMemo(
+    () => form.clusters.map((c, i) => clusterSlug(c.name) || `cluster${i + 1}`),
+    [form.clusters],
+  );
+
+  const appDefaultMachineType = useMemo(
+    () =>
+      machineTypes.find((m) => m.name === "n2-standard-8")?.name ||
+      machineTypes.find((m) => m.name === "e2-standard-4")?.name ||
+      machineTypes[0]?.name ||
+      "",
+    [machineTypes],
+  );
+
+  const appNames = useMemo(
+    () => form.applications.map((a) => a.name.trim()).filter(Boolean),
+    [form.applications],
+  );
+
   useEffect(() => {
     listCredentials()
       .then(setCredentials)
@@ -159,6 +397,19 @@ export default function WizardPage() {
         setGkeReleases([{ id: "latest", label: "Latest operator chart", chartVersion: "" }]);
       });
   }, []);
+
+  // Reopen a destroyed instance's config for editing (?from=<id>). Runs once.
+  useEffect(() => {
+    if (!fromId || hydratedRef.current) return;
+    hydratedRef.current = true;
+    getInstance(fromId)
+      .then((inst) => {
+        setForm((prev) => formFromConfig(prev, inst.config || {}, inst.credentialsId || ""));
+      })
+      .catch((err) =>
+        setError(err instanceof Error ? err.message : "Failed to load instance for editing"),
+      );
+  }, [fromId]);
 
   // Credentials -> projects
   useEffect(() => {
@@ -305,6 +556,34 @@ export default function WizardPage() {
       folder: form.folder.trim() || undefined,
       region_zones: form.region_zones,
     };
+
+    const applications = form.applications.map((a) => {
+      const ports = parsePorts(a.ports);
+      const env: Record<string, string> = {};
+      for (const row of a.env) {
+        const key = row.key.trim();
+        if (key) env[key] = row.value;
+      }
+      const app: Record<string, unknown> = { name: a.name.trim() || "app" };
+      if (a.command.trim()) app.command = a.command.trim();
+      if (ports.length) app.ports = ports;
+      if (Object.keys(env).length) app.env = env;
+      if (a.connectClusters.length) app.connectClusters = a.connectClusters;
+      if (a.requirements.length) app.requirements = a.requirements;
+      if (form.mode === "vm") {
+        Object.assign(app, {
+          artifact: { kind: a.artifact.kind, ref: a.artifact.ref, type: a.artifact.type },
+          vm_count: Number(a.vm_count),
+          machine_type: a.machine_type,
+          disk_gib: Number(a.disk_gib),
+        });
+      } else {
+        Object.assign(app, { image: a.image, replicas: Number(a.replicas), expose: a.expose });
+      }
+      return app;
+    });
+    if (applications.length) base.applications = applications;
+
     if (form.mode === "vm") {
       const clusters = form.clusters;
       const first = clusters[0] || blankCluster(form.machine_type);
@@ -319,6 +598,8 @@ export default function WizardPage() {
           machine_type: c.machine_type,
           rof_nvme_disks: Number(c.rof_nvme_disks),
           rs_version: c.rs_version,
+          license: c.license.trim() || undefined,
+          ...(c.databases.length ? { databases: databasesToPayload(c.databases) } : {}),
         })),
         RS_admin: form.RS_admin,
         app: Number(form.app),
@@ -332,6 +613,16 @@ export default function WizardPage() {
         dns_managed_zone: form.dns_managed_zone,
         dns_zone_dns_name: form.dns_zone_dns_name,
       });
+      const loadBalancers = form.load_balancers
+        .map((lb) => ({
+          name: lb.name.trim(),
+          target: lb.target_kind === "vms" ? "app" : lb.target,
+          target_kind: lb.target_kind,
+          ports: parsePorts(lb.ports),
+        }))
+        .filter((lb) => lb.ports.length && lb.target)
+        .map((lb) => ({ ...lb, name: lb.name || `${lb.target}-lb` }));
+      if (loadBalancers.length) base.load_balancers = loadBalancers;
     } else {
       Object.assign(base, {
         gke_clustersize: Number(form.gke_clustersize),
@@ -342,6 +633,8 @@ export default function WizardPage() {
           name: c.name.trim() || undefined,
           rec_nodes: Number(c.rec_nodes),
           nodes: Number(c.rec_nodes),
+          license: c.license.trim() || undefined,
+          ...(c.databases.length ? { databases: databasesToPayload(c.databases) } : {}),
         })),
       });
     }
@@ -864,6 +1157,34 @@ export default function WizardPage() {
                       : "Optional Local SSD NVMe for Redis on Flash"}
                   </span>
                 </label>
+                <label>
+                  License key (optional)
+                  <textarea
+                    value={cluster.license}
+                    onChange={(e) => {
+                      const license = e.target.value;
+                      setForm((prev) => ({
+                        ...prev,
+                        clusters: prev.clusters.map((c, idx) => (idx === i ? { ...c, license } : c)),
+                      }));
+                      setPreflightResult(null);
+                    }}
+                    rows={4}
+                    placeholder="optional"
+                  />
+                  <span className="hint">Leave blank to use the built-in trial license.</span>
+                </label>
+                <DatabaseEditor
+                  databases={cluster.databases}
+                  clusterHasNvme={cluster.rof_nvme_disks > 0}
+                  onChange={(databases) => {
+                    setForm((prev) => ({
+                      ...prev,
+                      clusters: prev.clusters.map((c, idx) => (idx === i ? { ...c, databases } : c)),
+                    }));
+                    setPreflightResult(null);
+                  }}
+                />
               </div>
             ))}
 
@@ -1114,6 +1435,29 @@ export default function WizardPage() {
                 ) : null}
               </div>
             </div>
+
+            <ApplicationsEditor
+              applications={form.applications}
+              mode="vm"
+              machineTypes={machineTypes}
+              loadingMachines={loading.machines}
+              probeZone={probeZone}
+              defaultMachineType={appDefaultMachineType}
+              clusterNames={clusterConnectNames}
+              onChange={(applications) => {
+                setForm((prev) => ({ ...prev, applications }));
+                setPreflightResult(null);
+              }}
+            />
+
+            <LoadBalancerEditor
+              loadBalancers={form.load_balancers}
+              appNames={appNames}
+              onChange={(load_balancers) => {
+                setForm((prev) => ({ ...prev, load_balancers }));
+                setPreflightResult(null);
+              }}
+            />
           </div>
         )}
 
@@ -1222,6 +1566,34 @@ export default function WizardPage() {
                     <option value={5}>5 — HA, larger</option>
                   </select>
                 </label>
+                <label>
+                  License key (optional)
+                  <textarea
+                    value={cluster.license}
+                    onChange={(e) => {
+                      const license = e.target.value;
+                      setForm((prev) => ({
+                        ...prev,
+                        clusters: prev.clusters.map((c, idx) => (idx === i ? { ...c, license } : c)),
+                      }));
+                      setPreflightResult(null);
+                    }}
+                    rows={4}
+                    placeholder="optional"
+                  />
+                  <span className="hint">Leave blank to use the built-in trial license.</span>
+                </label>
+                <DatabaseEditor
+                  databases={cluster.databases}
+                  clusterHasNvme={cluster.rof_nvme_disks > 0}
+                  onChange={(databases) => {
+                    setForm((prev) => ({
+                      ...prev,
+                      clusters: prev.clusters.map((c, idx) => (idx === i ? { ...c, databases } : c)),
+                    }));
+                    setPreflightResult(null);
+                  }}
+                />
               </div>
             ))}
 
@@ -1254,6 +1626,20 @@ export default function WizardPage() {
                 hint="e2-standard-8 or larger is recommended for REC pods"
               />
             </div>
+
+            <ApplicationsEditor
+              applications={form.applications}
+              mode="gke"
+              machineTypes={machineTypes}
+              loadingMachines={loading.machines}
+              probeZone={probeZone}
+              defaultMachineType={appDefaultMachineType}
+              clusterNames={clusterConnectNames}
+              onChange={(applications) => {
+                setForm((prev) => ({ ...prev, applications }));
+                setPreflightResult(null);
+              }}
+            />
           </div>
         )}
 
@@ -1327,5 +1713,13 @@ export default function WizardPage() {
         </div>
       </div>
     </div>
+  );
+}
+
+export default function WizardPage() {
+  return (
+    <Suspense fallback={<div className="empty">Loading…</div>}>
+      <WizardInner />
+    </Suspense>
   );
 }

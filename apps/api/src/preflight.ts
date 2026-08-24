@@ -12,7 +12,11 @@ import {
   gkeClusterExists,
   networkExists,
   readKey,
+  testIamPermissions,
+  STORAGE_READ_PERMISSIONS,
 } from "./gcp.js";
+import { normalizeApplications } from "./applications.js";
+import { capacityFor } from "./databases.js";
 import { LOCAL_SSD_GIB, maxLocalSsdsForMachineType } from "./nvme.js";
 import {
   describeAppWebExposure,
@@ -24,7 +28,11 @@ import {
 } from "./app-web.js";
 import { iamHint } from "./quotas.js";
 import { clusterNamePrefix, normalizeClusters, plannedDnsNames, summarizeClusters, totalClusterNodes } from "./clusters.js";
-import type { CreateInstanceInput } from "./types.js";
+import type { CreateInstanceInput, DatabaseSpec } from "./types.js";
+
+function fmtGib(bytes: number): string {
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+}
 
 export type CheckLevel = "pass" | "warn" | "fail";
 
@@ -81,13 +89,23 @@ export async function preflight(
   const region = input.region_name || "europe-west1";
   const credentialsFile = input.credentialsFile;
 
-  // 1. Instance name uniqueness in the local registry
+  // 1. Instance name uniqueness in the local registry. A destroyed instance is
+  // overwriteable (create replaces it), so re-provisioning the same name is
+  // allowed; a live one still blocks.
   const existing = await readRegistry();
   const clash = existing.find((i) => i.id === instanceId);
-  if (clash && clash.id !== opts?.allowExistingId) {
-    checks.push(fail("name", "Instance name", `${instanceId} already exists in this wizard`));
-  } else if (clash && clash.status !== "destroyed") {
-    checks.push(fail("name", "Instance name", `${instanceId} is still live — destroy it first`));
+  if (clash && clash.id === opts?.allowExistingId) {
+    checks.push(pass("name", "Instance name", `${instanceId} (re-provisioning this instance)`));
+  } else if (clash && clash.status === "destroyed") {
+    checks.push(pass("name", "Instance name", `${instanceId} will replace the destroyed instance`));
+  } else if (clash) {
+    checks.push(
+      fail(
+        "name",
+        "Instance name",
+        `${instanceId} already exists (${clash.status}) — destroy it first, or pick another name`,
+      ),
+    );
   } else {
     checks.push(pass("name", "Instance name", `${instanceId} is available`));
   }
@@ -655,6 +673,135 @@ export async function preflight(
         );
       } else {
         checks.push(pass("memviz", "Memviz", `http://${appHost}:${port} on the first app VM`));
+      }
+    }
+  }
+
+  // 12d. Database capacity per cluster
+  {
+    const rawClusters = Array.isArray(input.clusters) ? input.clusters : [];
+    const probeZone = usableZones[0] || `${region}-b`;
+    for (let i = 0; i < clusters.length; i++) {
+      const dbs = (rawClusters[i]?.databases as DatabaseSpec[] | undefined) || [];
+      if (!dbs.length) continue;
+      const id = clusters.length > 1 ? `databases_${i}` : "databases";
+      const label = clusters.length > 1 ? `Cluster ${i + 1} databases` : "Databases";
+      const names = dbs.map((d) => d.name);
+      const ports = dbs.map((d) => d.port ?? 12000);
+      if (new Set(names).size !== names.length) {
+        checks.push(fail(id, label, "Database names must be unique within a cluster"));
+        continue;
+      }
+      if (new Set(ports).size !== ports.length) {
+        checks.push(fail(id, label, "Database ports must be unique within a cluster"));
+        continue;
+      }
+      const flexDbs = dbs.filter((d) => d.flex);
+      if (flexDbs.length && (mode !== "vm" || Number(clusters[i].rof_nvme_disks) <= 0)) {
+        checks.push(
+          fail(
+            id,
+            label,
+            mode !== "vm"
+              ? `Flex (Redis on Flash) databases are only supported on VM clusters with NVMe disks; disable Flex on ${flexDbs.map((d) => d.name).join(", ")}.`
+              : `${flexDbs.length} Flex (Redis on Flash) database(s) need NVMe disks on this cluster; set NVMe disks on the cluster, or disable Flex.`,
+          ),
+        );
+        continue;
+      }
+      const machineType = mode === "vm" ? clusters[i].machine_type : input.gke_machine_type || "e2-standard-8";
+      try {
+        const mt = await getMachineType(credentialsFile, project, probeZone, machineType);
+        const cap = capacityFor(clusters[i].nodes, mt.memoryMb, dbs);
+        if (!cap.ok) {
+          checks.push(
+            fail(
+              id,
+              label,
+              `${dbs.length} database(s) need ${fmtGib(cap.required)} but the cluster offers about ${fmtGib(cap.capacity)} usable (${clusters[i].nodes} × ${machineType}). Reduce memory, add nodes, or pick a larger machine type.`,
+            ),
+          );
+        } else {
+          checks.push(
+            pass(
+              id,
+              label,
+              `${dbs.length} database(s), ${fmtGib(cap.required)} of about ${fmtGib(cap.capacity)} usable, ${fmtGib(cap.remaining)} free`,
+            ),
+          );
+        }
+      } catch (err) {
+        checks.push(warn(id, label, `Could not verify capacity: ${errorText(err)}`));
+      }
+    }
+  }
+
+  // 12e. Custom application workloads
+  {
+    let apps: ReturnType<typeof normalizeApplications> | null = null;
+    try {
+      apps = normalizeApplications({ mode, applications: input.applications });
+    } catch (err) {
+      checks.push(fail("applications", "Applications", err instanceof Error ? err.message : String(err)));
+    }
+    if (apps && apps.length) {
+      const probeZone = usableZones[0] || `${region}-b`;
+      let needGcsRead = false;
+      let anyFail = false;
+      for (const app of apps) {
+        if (mode !== "vm") continue;
+        if (app.artifact && app.artifact.kind === "gcs") {
+          needGcsRead = true;
+        }
+        const machineType = app.machine_type || "e2-standard-2";
+        try {
+          const mt = await getMachineType(credentialsFile, project, probeZone, machineType);
+          if (mt.architecture === "ARM64") {
+            anyFail = true;
+            checks.push(
+              fail(`app_${app.name}`, `Application ${app.name}`, `${machineType} is Arm (ARM64); pick an x86 type such as e2-standard-2`),
+            );
+          }
+        } catch (err) {
+          anyFail = true;
+          checks.push(
+            fail(`app_${app.name}`, `Application ${app.name}`, `${machineType} unavailable in ${probeZone}: ${errorText(err)}`),
+          );
+        }
+      }
+      if (!anyFail) {
+        checks.push(
+          pass(
+            "applications",
+            "Applications",
+            apps
+              .map((a) =>
+                mode === "vm"
+                  ? `${a.name} (${a.vm_count} VM(s), ${a.command ? "auto-start" : "manual start"})`
+                  : `${a.name} (${a.image}, ${a.replicas} replica(s))`,
+              )
+              .join("; "),
+          ),
+        );
+      }
+      if (needGcsRead) {
+        try {
+          const granted = await testIamPermissions(credentialsFile, project, STORAGE_READ_PERMISSIONS);
+          const missing = STORAGE_READ_PERMISSIONS.filter((p) => !granted.includes(p));
+          if (missing.length) {
+            checks.push(
+              fail(
+                "app_storage",
+                "Artifact read IAM",
+                `Missing ${missing.join(", ")} — needed to read a gs:// application artifact. Grant roles/storage.objectViewer (uploaded and https artifacts need no storage role).`,
+              ),
+            );
+          } else {
+            checks.push(pass("app_storage", "Artifact read IAM", "gs:// artifact read permitted"));
+          }
+        } catch (err) {
+          checks.push(warn("app_storage", "Artifact read IAM", `Could not verify: ${errorText(err)}`));
+        }
       }
     }
   }

@@ -52,6 +52,23 @@ export type ClusterHealth = {
   detail: string;
 };
 
+export type DatabaseState = {
+  cluster: string;
+  name: string;
+  status: "pending" | "creating" | "active" | "failed";
+  uid?: number;
+  endpoint?: string;
+  port?: number;
+  error?: string;
+};
+
+export type LicenseState = {
+  cluster: string;
+  status: "applied" | "failed";
+  detail?: string;
+  error?: string;
+};
+
 export type Instance = {
   id: string;
   name: string;
@@ -62,6 +79,7 @@ export type Instance = {
   project: string;
   region: string;
   ownerEmail: string;
+  credentialsId?: string;
   folder?: string;
   busy?: boolean;
   endpoints?: Record<string, unknown>;
@@ -69,6 +87,8 @@ export type Instance = {
   config?: Record<string, unknown>;
   progress?: Progress;
   health?: ClusterHealth;
+  databaseStates?: DatabaseState[];
+  licenseStates?: LicenseState[];
 };
 
 export type FolderInfo = { folder: string; count: number };
@@ -345,6 +365,42 @@ export async function runPreflight(body: Record<string, unknown>): Promise<Prefl
       method: "POST",
       headers: authHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify(body),
+    }),
+  );
+}
+
+export type Artifact = {
+  id: string;
+  name: string;
+  filename: string;
+  size: number;
+  type: "jar" | "binary";
+};
+
+export async function listArtifacts(): Promise<Artifact[]> {
+  return jsonOrThrow(
+    await fetch(`${apiBase()}/artifacts`, { cache: "no-store", headers: authHeaders() }),
+  );
+}
+
+export async function uploadArtifact(file: File): Promise<Artifact> {
+  const form = new FormData();
+  form.append("file", file);
+  return jsonOrThrow(
+    await fetch(`${apiBase()}/artifacts`, {
+      method: "POST",
+      // Let the browser set the multipart boundary; only auth is added here.
+      headers: authHeaders(),
+      body: form,
+    }),
+  );
+}
+
+export async function deleteArtifact(id: string): Promise<void> {
+  await jsonOrThrow(
+    await fetch(`${apiBase()}/artifacts/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+      headers: authHeaders(),
     }),
   );
 }

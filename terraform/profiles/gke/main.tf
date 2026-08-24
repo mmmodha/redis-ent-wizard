@@ -42,6 +42,21 @@ module "re_k8s" {
   depends_on = [module.gke]
 }
 
+module "app_k8s" {
+  source = "../../modules/app-k8s"
+  count  = length(var.applications) > 0 ? 1 : 0
+
+  name_prefix      = local.name_prefix
+  project          = var.project
+  cluster_name     = module.gke.cluster_name
+  cluster_location = module.gke.location
+  credentials_file = abspath(var.credentials)
+  outputs_dir      = var.outputs_dir
+  applications     = var.applications
+
+  depends_on = [module.gke, module.re_k8s]
+}
+
 output "how_to_kubectl" {
   value = module.gke.how_to_kubectl
 }
@@ -68,6 +83,10 @@ output "rec_namespace" {
 
 output "k8s_outputs_file" {
   value = module.re_k8s.k8s_outputs_file
+}
+
+output "app_outputs_file" {
+  value = length(module.app_k8s) > 0 ? module.app_k8s[0].app_outputs_file : ""
 }
 
 output "deployment_mode" {
