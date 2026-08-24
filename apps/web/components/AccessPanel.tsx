@@ -9,7 +9,15 @@ import {
   type AccessView,
 } from "@/lib/access";
 
-const HIDDEN_OUTPUTS = new Set(["deployment_mode", "k8s_outputs_file", ...ACCESS_ENDPOINT_KEYS]);
+const HIDDEN_OUTPUTS = new Set([
+  "deployment_mode",
+  "k8s_outputs_file",
+  "app_outputs_file",
+  // Surfaced in dedicated detail-page panels (Application workloads, Load balancers).
+  "app_workloads",
+  "gke_app_services",
+  ...ACCESS_ENDPOINT_KEYS,
+]);
 
 function copy(text: string) {
   void navigator.clipboard.writeText(text);

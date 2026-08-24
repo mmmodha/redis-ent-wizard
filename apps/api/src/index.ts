@@ -1,7 +1,9 @@
 import Fastify from "fastify";
 import cors from "@fastify/cors";
+import multipart from "@fastify/multipart";
 import { z } from "zod";
 import {
+  appendLog,
   getInstance,
   instanceDir,
   readLog,
@@ -13,10 +15,17 @@ import {
   getMergedOutputs,
   isBusy,
   isWatching,
+  provisionClusterResources,
   startApply,
   startDestroy,
   watchBootstrap,
 } from "./terraform.js";
+import {
+  deleteUserArtifact,
+  listUserArtifacts,
+  saveUserArtifact,
+} from "./artifacts-store.js";
+import { normalizeApplications, resolveApplicationArtifacts } from "./applications.js";
 import { probeHealth } from "./health.js";
 import { writeInstanceWorkspace } from "./workspace.js";
 import { computeProgress, clusterNamesFromConfig } from "./progress.js";
@@ -53,6 +62,55 @@ import { queueStats } from "./jobs.js";
 import { initDb, migrateFileRegistryIfNeeded } from "./db.js";
 import { CREATED_BY_ERROR, isValidCreatedBy, resolveCreatedBy } from "./created-by.js";
 import type { CreateInstanceInput, InstanceRecord } from "./types.js";
+
+const databaseSchema = z.object({
+  name: z
+    .string()
+    .min(1)
+    .max(40)
+    .regex(/^[a-z][a-z0-9-]*$/, "database name must be lowercase alphanumeric/hyphen"),
+  memory_gb: z.number().positive().max(1024),
+  replication: z.boolean().optional(),
+  sharding: z.boolean().optional(),
+  shards_count: z.number().int().min(1).max(512).optional(),
+  eviction_policy: z.string().max(40).optional(),
+  port: z.number().int().min(1024).max(65535).optional(),
+  password: z.string().max(256).optional(),
+  modules: z.array(z.string().min(1).max(40)).max(16).optional(),
+  proxy_policy: z.enum(["single", "all-master-shards"]).optional(),
+  shards_placement: z.enum(["dense", "sparse"]).optional(),
+  oss_cluster: z.boolean().optional(),
+  flex: z.boolean().optional(),
+});
+
+const applicationSchema = z.object({
+  name: z.string().min(1).max(24),
+  command: z.string().max(2048).optional(),
+  ports: z.array(z.number().int().min(1).max(65535)).max(16).optional(),
+  env: z.record(z.string()).optional(),
+  connectClusters: z.array(z.string().max(40)).max(3).optional(),
+  artifact: z
+    .object({
+      kind: z.enum(["upload", "url", "gcs"]),
+      ref: z.string().min(1).max(2048),
+      type: z.enum(["jar", "binary"]),
+    })
+    .optional(),
+  vm_count: z.number().int().min(1).max(10).optional(),
+  machine_type: z.string().optional(),
+  disk_gib: z.number().int().min(0).max(65536).optional(),
+  image: z.string().max(512).optional(),
+  replicas: z.number().int().min(1).max(20).optional(),
+  expose: z.enum(["none", "http", "https", "lb"]).optional(),
+  requirements: z.array(z.string().min(1).max(40)).max(20).optional(),
+});
+
+const loadBalancerSchema = z.object({
+  name: z.string().min(1).max(40),
+  target: z.string().min(1).max(40),
+  target_kind: z.enum(["application", "vms"]),
+  ports: z.array(z.number().int().min(1).max(65535)).min(1).max(16),
+});
 
 const createSchema = z.object({
   name: z
@@ -101,11 +159,15 @@ const createSchema = z.object({
         rs_version: z.string().optional(),
         RS_release: z.string().optional(),
         rec_nodes: z.number().int().min(1).max(9).optional(),
+        databases: z.array(databaseSchema).max(16).optional(),
+        license: z.string().max(20000).optional(),
       }),
     )
     .min(1)
     .max(3)
     .optional(),
+  applications: z.array(applicationSchema).max(8).optional(),
+  load_balancers: z.array(loadBalancerSchema).max(8).optional(),
   dns_managed_zone: z.string().optional(),
   dns_zone_dns_name: z.string().optional(),
   rs_private_subnet: z.string().optional(),
@@ -169,6 +231,7 @@ await migrateFileRegistryIfNeeded();
 
 const app = Fastify({ logger: true });
 await app.register(cors, { origin: true, credentials: true });
+await app.register(multipart, { limits: { fileSize: 512 * 1024 * 1024, files: 1 } });
 
 app.addHook("preHandler", async (req, reply) => {
   await authHook(req, reply);
@@ -235,6 +298,43 @@ app.delete<{ Params: { id: string } }>("/credentials/:id", async (req, reply) =>
   try {
     await deleteUserCredential(user, req.params.id, isAdmin(user));
     await audit(user, "credentials.delete", "credential", req.params.id);
+    return { ok: true };
+  } catch (err) {
+    return httpError(reply, err);
+  }
+});
+
+app.get("/artifacts", async (req) => listUserArtifacts(requireUser(req)));
+
+app.post<{ Querystring: { type?: string } }>("/artifacts", async (req, reply) => {
+  const user = requireUser(req);
+  let file: Awaited<ReturnType<typeof req.file>>;
+  try {
+    file = await req.file();
+  } catch (err) {
+    return reply.code(400).send({ error: err instanceof Error ? err.message : "Invalid upload" });
+  }
+  if (!file) return reply.code(400).send({ error: "file is required (multipart field 'file')" });
+  try {
+    const data = await file.toBuffer();
+    const created = saveUserArtifact(user, {
+      name: file.filename,
+      filename: file.filename,
+      type: req.query?.type,
+      data,
+    });
+    await audit(user, "artifact.upload", "artifact", created.id, created.filename);
+    return reply.code(201).send(created);
+  } catch (err) {
+    return httpError(reply, err);
+  }
+});
+
+app.delete<{ Params: { id: string } }>("/artifacts/:id", async (req, reply) => {
+  const user = requireUser(req);
+  try {
+    deleteUserArtifact(user, req.params.id);
+    await audit(user, "artifact.delete", "artifact", req.params.id);
     return { ok: true };
   } catch (err) {
     return httpError(reply, err);
@@ -425,6 +525,28 @@ app.post<{ Params: { id: string } }>("/instances/:id/health", async (req, reply)
   return health;
 });
 
+app.post<{ Params: { id: string } }>("/instances/:id/databases/reconcile", async (req, reply) => {
+  const user = requireUser(req);
+  const inst = await getInstance(req.params.id);
+  if (!inst) return reply.code(404).send({ error: "not found" });
+  try {
+    assertCanMutate(user, inst);
+  } catch (err) {
+    return httpError(reply, err);
+  }
+  if (inst.status !== "ready" && inst.status !== "degraded" && inst.status !== "bootstrapping") {
+    return reply.code(409).send({ error: `instance is ${inst.status}; databases can only be reconciled once the cluster is up` });
+  }
+  await audit(user, "instance.reconcile_databases", "instance", inst.id);
+  await provisionClusterResources(inst.id);
+  const updated = await getInstance(inst.id);
+  return {
+    ok: true,
+    licenseStates: updated?.licenseStates ?? [],
+    databaseStates: updated?.databaseStates ?? [],
+  };
+});
+
 app.get<{ Params: { id: string }; Querystring: { access_token?: string } }>(
   "/instances/:id/logs",
   async (req, reply) => {
@@ -496,8 +618,20 @@ app.post("/instances", async (req, reply) => {
   }
   input.youremail = createdBy;
   const id = toId(input.name, input.env);
-  if (await getInstance(id)) {
+  const existing = await getInstance(id);
+  // A destroyed instance keeps its record until it is forgotten; re-creating
+  // over it (e.g. after editing its config in the wizard/designer) overwrites
+  // it. A live instance still blocks with 409.
+  if (existing && existing.status !== "destroyed") {
     return reply.code(409).send({ error: `Instance ${id} already exists` });
+  }
+  const overwriting = Boolean(existing);
+  if (overwriting) {
+    try {
+      assertCanMutate(user, existing!);
+    } catch (err) {
+      return httpError(reply, err);
+    }
   }
 
   const quota = await checkCreateQuota(user, input);
@@ -518,7 +652,10 @@ app.post("/instances", async (req, reply) => {
   const skipPreflight = (req.query as { force?: string } | undefined)?.force === "true";
   if (!skipPreflight) {
     try {
-      const result = await preflight({ ...input, credentialsFile: credentialsAbs });
+      const result = await preflight(
+        { ...input, credentialsFile: credentialsAbs },
+        overwriting ? { allowExistingId: id } : undefined,
+      );
       if (!result.ok) {
         return reply.code(422).send({
           error: "Preflight checks failed",
@@ -578,6 +715,19 @@ app.post("/instances", async (req, reply) => {
     });
   }
 
+  if (input.applications?.length) {
+    try {
+      input.applications = normalizeApplications({ mode: input.mode, applications: input.applications });
+      await resolveApplicationArtifacts(input, {
+        user,
+        credentialsFile: credentialsAbs,
+        project: input.project,
+      });
+    } catch (err) {
+      return reply.code(400).send({ error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+
   const workDir = instanceDir(id);
   try {
     writeInstanceWorkspace(workDir, input.mode, input, credentialsAbs);
@@ -593,7 +743,7 @@ app.post("/instances", async (req, reply) => {
     name: input.name,
     mode: input.mode,
     status: "pending",
-    createdAt: now,
+    createdAt: overwriting ? existing!.createdAt : now,
     updatedAt: now,
     project: input.project,
     region: input.region_name || "europe-west1",
@@ -739,6 +889,14 @@ app.post<{ Params: { id: string } }>("/instances/:id/retry", async (req, reply) 
         user,
         inst.credentialsId || inst.credentialsFile,
       );
+      if (config.applications?.length) {
+        config.applications = normalizeApplications({ mode: config.mode, applications: config.applications });
+        await resolveApplicationArtifacts(config, {
+          user,
+          credentialsFile: absPath,
+          project: config.project || inst.project,
+        });
+      }
       writeInstanceWorkspace(instanceDir(inst.id), inst.mode, config, absPath);
     }
   } catch (err) {
@@ -811,6 +969,14 @@ app.post<{ Params: { id: string } }>("/instances/:id/recreate", async (req, repl
   }
 
   try {
+    if (config.applications?.length) {
+      config.applications = normalizeApplications({ mode: config.mode, applications: config.applications });
+      await resolveApplicationArtifacts(config, {
+        user,
+        credentialsFile: absPath,
+        project: config.project,
+      });
+    }
     writeInstanceWorkspace(instanceDir(inst.id), inst.mode, config, absPath);
   } catch (err) {
     return reply.code(400).send({
@@ -850,8 +1016,28 @@ app.get("/admin/jobs", async (req, reply) => {
   return queueStats();
 });
 
+// Recover work orphaned by a restart. A job runs in-process, so a restart
+// leaves anything mid-flight with a status but no worker. Bootstraps resume
+// their probe; an interrupted destroy is re-run (terraform destroy is
+// idempotent, so it reconciles any resources the killed run did not reach and
+// then marks the instance destroyed); an interrupted apply is marked failed so
+// it can be retried.
 for (const inst of await readRegistry()) {
-  if (inst.status === "bootstrapping" && !isWatching(inst.id)) watchBootstrap(inst.id);
+  if (isBusy(inst.id)) continue;
+  if (inst.status === "bootstrapping" && !isWatching(inst.id)) {
+    watchBootstrap(inst.id);
+  } else if (inst.status === "destroying") {
+    appendLog(inst.id, "\nResuming destroy after a server restart.\n");
+    void startDestroy(inst.id, false, inst.ownerSub || "system");
+  } else if (inst.status === "applying") {
+    appendLog(inst.id, "\nApply was interrupted by a server restart.\n");
+    await upsertInstance({
+      ...inst,
+      status: "failed",
+      lastError: "Apply was interrupted by a server restart. Retry to continue.",
+      updatedAt: new Date().toISOString(),
+    });
+  }
 }
 
 const port = Number(process.env.PORT || 4000);

@@ -11,6 +11,7 @@ import {
   removeInstance,
 } from "./registry.js";
 import { probeHealth } from "./health.js";
+import { applyLicenses, createDatabases, hasDatabases, hasLicenses } from "./databases.js";
 import { acquireJobSlot, isJobActive, releaseJobSlot } from "./jobs.js";
 import type { InstanceRecord } from "./types.js";
 
@@ -53,6 +54,7 @@ export function watchBootstrap(id: string): void {
 
         if (health.state === "ready") {
           appendLog(id, `\n=== CLUSTER READY ${new Date().toISOString()} — ${health.detail} ===\n`);
+          await provisionClusterResources(id);
           return;
         }
 
@@ -77,6 +79,21 @@ export function watchBootstrap(id: string): void {
       watchers.delete(id);
     }
   })();
+}
+
+/**
+ * Remove a stale local-backend state lock left by a job that was killed
+ * (e.g. the container was restarted mid-apply/destroy). Safe in this
+ * single-container deployment: the per-id job guard means no other worker is
+ * touching this workspace when a job starts, so any lock present is orphaned.
+ * Only the state lock is removed — never the provider lock (.terraform.lock.hcl).
+ */
+function clearStaleStateLock(id: string, workDir: string): void {
+  const lock = path.join(workDir, ".terraform.tfstate.lock.info");
+  if (fs.existsSync(lock)) {
+    fs.rmSync(lock, { force: true });
+    appendLog(id, "Cleared a stale Terraform state lock from an interrupted run.\n");
+  }
 }
 
 function runCommand(
@@ -142,6 +159,18 @@ async function collectOutputs(id: string, workDir: string, record: InstanceRecor
     }
   }
 
+  // GKE application Deployments/Services (namespaced so it never collides with
+  // the VM `apps` output, which lists companion app VMs).
+  const appFile = path.join(workDir, "app-outputs.json");
+  if (fs.existsSync(appFile)) {
+    try {
+      const appOut = JSON.parse(fs.readFileSync(appFile, "utf8")) as { apps?: unknown };
+      if (Array.isArray(appOut.apps)) flat.gke_app_services = appOut.apps;
+    } catch {
+      appendLog(id, "Failed to parse app-outputs.json\n");
+    }
+  }
+
   writeOutputs(id, flat);
   fs.writeFileSync(outFile, JSON.stringify(flat, null, 2) + "\n", "utf8");
 
@@ -177,6 +206,7 @@ export async function startApply(id: string, ownerSub = "system"): Promise<void>
       };
       await upsertInstance(record);
       appendLog(id, `\n=== APPLY START ${new Date().toISOString()} ===\n`);
+      clearStaleStateLock(id, workDir);
 
       let code = await runCommand(id, "terraform", ["init", "-input=false"], workDir);
       if (code !== 0) throw new Error(`terraform init failed with code ${code}`);
@@ -245,6 +275,7 @@ export async function startDestroy(
       };
       await upsertInstance(record);
       appendLog(id, `\n=== DESTROY START ${startedAt} ===\n`);
+      clearStaleStateLock(id, workDir);
 
       if (
         !fs.existsSync(path.join(workDir, ".terraform")) &&
@@ -291,6 +322,57 @@ export async function startDestroy(
       jobs.delete(id);
     }
   })();
+}
+
+/**
+ * Post-bootstrap cluster setup via the RE REST API, once the cluster is ready:
+ * apply per-cluster licenses first (a trial license caps shards/memory), then
+ * create the configured databases. Idempotent — safe to call again (reconcile
+ * / retry).
+ */
+export async function provisionClusterResources(id: string): Promise<void> {
+  const record = await getInstance(id);
+  if (!record || (!hasLicenses(record) && !hasDatabases(record))) return;
+
+  if (hasLicenses(record)) {
+    appendLog(id, `\n=== APPLYING LICENSES ${new Date().toISOString()} ===\n`);
+    try {
+      const licenseStates = await applyLicenses(record);
+      const current = await getInstance(id);
+      if (current) {
+        await upsertInstance({ ...current, licenseStates, updatedAt: new Date().toISOString() });
+      }
+      for (const s of licenseStates) {
+        appendLog(
+          id,
+          s.status === "applied"
+            ? `  license applied to ${s.cluster}${s.detail ? ` (${s.detail})` : ""}\n`
+            : `  license FAILED on ${s.cluster}: ${s.error || "unknown"}\n`,
+        );
+      }
+    } catch (err) {
+      appendLog(id, `  license application error: ${err instanceof Error ? err.message : String(err)}\n`);
+    }
+  }
+
+  if (!hasDatabases(record)) return;
+  appendLog(id, `\n=== CREATING DATABASES ${new Date().toISOString()} ===\n`);
+  try {
+    const states = await createDatabases(record);
+    const current = await getInstance(id);
+    if (!current) return;
+    await upsertInstance({ ...current, databaseStates: states, updatedAt: new Date().toISOString() });
+    for (const s of states) {
+      appendLog(
+        id,
+        s.status === "active"
+          ? `  database ${s.cluster}/${s.name} ready${s.endpoint ? ` at ${s.endpoint}` : ""}\n`
+          : `  database ${s.cluster}/${s.name} FAILED: ${s.error || "unknown"}\n`,
+      );
+    }
+  } catch (err) {
+    appendLog(id, `  database creation error: ${err instanceof Error ? err.message : String(err)}\n`);
+  }
 }
 
 export async function getMergedOutputs(id: string): Promise<Record<string, unknown>> {

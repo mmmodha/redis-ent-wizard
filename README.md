@@ -24,6 +24,8 @@ Least-privilege IAM for **VM create** (prefer this over Project Owner):
 
 For **GKE** add `roles/container.clusterAdmin`, and `roles/iam.serviceAccountUser` **on the GKE node service account only** (not project-wide). The **Credentials** page → **Verify** button tells you exactly what is missing.
 
+**Application** artifacts are copied onto the VMs over SSH (VM mode already requires the SSH key pair below), so *uploaded* and `https://` artifacts need **no** extra IAM. Only an artifact referenced by `gs://` needs a read role — `roles/storage.objectViewer` — because the API downloads it before copying it across.
+
 ### Run it
 
 ```bash
@@ -76,7 +78,11 @@ Shared/Okta rollout is documented in [docs/ENTERPRISE.md](docs/ENTERPRISE.md).
 
 ## What you get
 
-- Tabbed UI: **Instances** (inventory) and **Create** (wizard), in light or dark theme
+- Tabbed UI: **Instances** (inventory), **Create** (wizard), and **Design** (drag-and-drop canvas), in light or dark theme
+- **Design** canvas: drag Redis clusters, databases, VMs, applications, and a load balancer onto a canvas, nest and connect them, then validate and create with the same preflight as the wizard
+- **Databases**: add one or more databases (HA or sharded) to a cluster; created via the Redis Enterprise REST API once the cluster is ready, with capacity enforced against the cluster's memory
+- **License keys**: set a Redis Enterprise license per cluster; applied via the REST API once the cluster is ready (before databases, since a trial license caps memory and shards). Leave it blank to keep the built-in trial license
+- **Applications**: deploy a custom binary/JAR (uploaded or fetched from a URL/`gs://`) on its own VM group with an optional run command, or a container image on GKE
 - Folders and owners for grouping — filter, multi-select, move, and bulk-destroy
 - Redis-branded wizard with dropdowns populated live from your GCP project
 - Preflight validation that blocks invalid configurations before Terraform runs
@@ -110,6 +116,10 @@ Every create runs a preflight against the GCP APIs (also enforced server-side, s
 | App VMs (VM) | App VM machine type unavailable in the first zone, or Arm |
 | App web ports (VM) | Shown for informational purposes — HTTP :80 / HTTPS :443 when toggled |
 | Memviz | Enabled with no app VM to run it on |
+| Database capacity | Sum of database memory (×2 when replicated) exceeds the cluster's usable memory |
+| Database names/ports | Duplicate database name or port within a cluster |
+| Application machine type | App VM machine type unavailable in the first zone, or Arm |
+| Artifact read IAM | `storage.objects.get` missing for a `gs://` artifact (uploaded / `https` need none) |
 | SSH public key | `google_compute_engine.pub` not mounted (VM mode) |
 | Redis Enterprise release | Release URL unreachable (warning only) |
 | Terraform binary | `terraform` not on PATH |
@@ -206,6 +216,8 @@ data/             credentials, instances.json, per-instance state (gitignored)
 
 | Method | Path | Purpose |
 | --- | --- | --- |
+| GET/POST/DELETE | `/artifacts` | List, upload (multipart `file`), or delete application artifacts |
+| POST | `/instances/:id/databases/reconcile` | Re-run database creation on a ready cluster |
 | GET | `/credentials` | Service account keys found in `data/credentials/` |
 | GET | `/gcp/projects` | Projects visible to a key |
 | GET | `/gcp/regions` | Regions and their zones |

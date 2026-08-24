@@ -21,6 +21,96 @@ export interface ClusterHealth {
 
 export type DeploymentMode = "vm" | "gke";
 
+/** A database hosted on a Redis cluster, created post-bootstrap via the RE REST API. */
+export interface DatabaseSpec {
+  name: string;
+  /** Dataset memory limit in GB (per the bdb `memory_size`, before replication). */
+  memory_gb: number;
+  replication?: boolean;
+  sharding?: boolean;
+  shards_count?: number;
+  eviction_policy?: string;
+  port?: number;
+  password?: string;
+  /** RE module names, e.g. "search", "ReJSON", "timeseries", "bf". */
+  modules?: string[];
+  /** Proxy policy: "single" (one endpoint) or "all-master-shards" (all primary shards). */
+  proxy_policy?: "single" | "all-master-shards";
+  /** Shard placement across nodes: "dense" (pack) or "sparse" (spread). */
+  shards_placement?: "dense" | "sparse";
+  /** Enable the OSS Cluster API (Redis Cluster protocol). Forces all-master-shards proxy. */
+  oss_cluster?: boolean;
+  /** Redis on Flash (Auto Tiering) — needs NVMe disks on the cluster. */
+  flex?: boolean;
+}
+
+export type ArtifactKind = "upload" | "url" | "gcs";
+
+export interface ApplicationArtifact {
+  kind: ArtifactKind;
+  /** Upload id, https URL, or gs:// path depending on kind. */
+  ref: string;
+  type: "jar" | "binary";
+}
+
+/**
+ * A custom workload. On VM it provisions its own VM group and (optionally) runs
+ * the artifact as a systemd service; on GKE it deploys a container image.
+ */
+/** A load balancer fronting an application or Set-of-VMs group. */
+export interface LoadBalancerSpec {
+  name: string;
+  /** Name of the target application, or "app" for the Set-of-VMs group. */
+  target: string;
+  target_kind: "application" | "vms";
+  /** Ports the load balancer forwards to the target VMs. */
+  ports: number[];
+}
+
+export interface Application {
+  name: string;
+  /** Optional. When empty on VM, the artifact is only staged (manual start). */
+  command?: string;
+  ports?: number[];
+  env?: Record<string, string>;
+  /** Requirement ids to apt-install on the VM before starting (e.g. "openjdk-25", "nodejs"). */
+  requirements?: string[];
+  /** Names of clusters in this deployment whose endpoint is injected as env. */
+  connectClusters?: string[];
+  // VM
+  artifact?: ApplicationArtifact;
+  vm_count?: number;
+  machine_type?: string;
+  disk_gib?: number;
+  // GKE
+  image?: string;
+  replicas?: number;
+  expose?: "none" | "http" | "https" | "lb";
+  /** Populated server-side: a local file path Terraform copies to the VM over SSH. */
+  artifactLocalPath?: string;
+  artifactFilename?: string;
+}
+
+/** Per-database runtime state recorded after API-driven creation. */
+export interface DatabaseState {
+  cluster: string;
+  name: string;
+  status: "pending" | "creating" | "active" | "failed";
+  uid?: number;
+  endpoint?: string;
+  port?: number;
+  error?: string;
+}
+
+/** Per-cluster license application state recorded after the cluster forms. */
+export interface LicenseState {
+  cluster: string;
+  status: "applied" | "failed";
+  /** Expiry / edition summary from the cluster once the license is set. */
+  detail?: string;
+  error?: string;
+}
+
 export interface InstanceRecord {
   id: string;
   name: string;
@@ -44,6 +134,10 @@ export interface InstanceRecord {
   health?: ClusterHealth;
   /** User-defined grouping label, e.g. a team, customer or demo name. */
   folder?: string;
+  /** State of API-driven database creation (populated after the cluster is ready). */
+  databaseStates?: DatabaseState[];
+  /** State of per-cluster license application (populated after the cluster is ready). */
+  licenseStates?: LicenseState[];
 }
 
 export interface CreateInstanceInput {
@@ -86,7 +180,15 @@ export interface CreateInstanceInput {
     rs_version?: string;
     RS_release?: string;
     rec_nodes?: number;
+    /** Databases to create on this cluster after it forms. */
+    databases?: DatabaseSpec[];
+    /** Redis Enterprise license key applied to this cluster once it forms. */
+    license?: string;
   }>;
+  /** Custom application workloads (own VM group on VM, Deployment on GKE). */
+  applications?: Application[];
+  /** Internal load balancers fronting application / Set-of-VMs groups (VM mode). */
+  load_balancers?: LoadBalancerSpec[];
   // GKE
   gke_clustersize?: number;
   gke_machine_type?: string;

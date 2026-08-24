@@ -51,6 +51,33 @@ describe("normalizeClusters", () => {
     assert.equal(clusters[1].name, "");
   });
 
+  it("carries databases and license through normalization", () => {
+    const clusters = normalizeClusters({
+      mode: "vm",
+      clusters: [
+        {
+          name: "cache",
+          nodes: 3,
+          machine_type: "n2-standard-8",
+          databases: [{ name: "sessions", memory_gb: 2, replication: true }],
+          license: "LICENSE-KEY",
+        },
+      ],
+    });
+    assert.equal(clusters[0].databases?.length, 1);
+    assert.equal(clusters[0].databases?.[0].name, "sessions");
+    assert.equal(clusters[0].license, "LICENSE-KEY");
+  });
+
+  it("omits an empty databases list and a blank license", () => {
+    const clusters = normalizeClusters({
+      mode: "vm",
+      clusters: [{ name: "cache", nodes: 3, machine_type: "n2-standard-8", databases: [], license: "   " }],
+    });
+    assert.equal(clusters[0].databases, undefined);
+    assert.equal(clusters[0].license, undefined);
+  });
+
   it("slugifies unique cluster names", () => {
     const clusters = normalizeClusters({
       mode: "vm",

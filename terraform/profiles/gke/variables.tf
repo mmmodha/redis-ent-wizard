@@ -87,3 +87,17 @@ variable "rec_specs" {
   }))
   default = []
 }
+
+variable "applications" {
+  type = list(object({
+    name     = string
+    image    = string
+    command  = string
+    replicas = number
+    ports    = list(number)
+    env      = map(string)
+    expose   = string
+  }))
+  description = "Custom application workloads deployed as containers on GKE."
+  default     = []
+}

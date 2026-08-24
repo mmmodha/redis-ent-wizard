@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { normalizeAppDiskGib, normalizeAppMachineTypes, parseAppExtraPorts } from "./app-web.js";
+import { normalizeApplications } from "./applications.js";
 import { clusterNamePrefix, normalizeClusters } from "./clusters.js";
 import { resolveGkeOperatorChart } from "./rs-releases.js";
 import type { CreateInstanceInput, DeploymentMode } from "./types.js";
@@ -61,6 +62,27 @@ export function resolveSshPublicKey(): string {
   );
 }
 
+/**
+ * Path (not contents) of the SSH private key Terraform uses to copy application
+ * artifacts onto VMs. Returned as a path so the key never lands in tfvars.
+ */
+export function resolveSshPrivateKeyPath(): string {
+  const configured = process.env.SSH_PRIVATE_KEY_PATH;
+  const fromPublic = process.env.SSH_PUBLIC_KEY_PATH?.replace(/\.pub$/, "");
+  const candidates = [
+    configured,
+    fromPublic,
+    "/ssh/google_compute_engine",
+    path.join(process.env.HOME || "", ".ssh/google_compute_engine"),
+  ].filter(Boolean) as string[];
+  for (const c of candidates) {
+    if (fs.existsSync(c)) return c;
+  }
+  // Fall back to the conventional container path even if unreadable at write
+  // time; Terraform reads it at apply time inside the API container.
+  return "/ssh/google_compute_engine";
+}
+
 // Terraform treats an absolute module source as its own package, so a profile
 // referenced that way cannot reach ../../modules. Copying the tree in keeps every
 // source a local path, and leaves the instance destroyable from the host later.
@@ -85,6 +107,68 @@ function vendorTerraform(workDir: string): string {
     },
   });
   return dest;
+}
+
+function injectClusterEnv(
+  env: Record<string, string> | undefined,
+  connectClusters: string[] | undefined,
+  clusterEndpoints: Map<string, string>,
+): Record<string, string> {
+  const out: Record<string, string> = { ...(env || {}) };
+  const connected = (connectClusters || []).filter(Boolean);
+  connected.forEach((name, i) => {
+    const host = clusterEndpoints.get(name);
+    if (!host) return;
+    const slug = name.toUpperCase().replace(/[^A-Z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+    out[`REDIS_${slug}_HOST`] = host;
+    if (i === 0) out.REDIS_HOST = host;
+  });
+  return out;
+}
+
+function buildVmApplications(
+  input: CreateInstanceInput,
+  clusterEndpoints: Map<string, string>,
+): Record<string, unknown>[] {
+  const apps = normalizeApplications({ mode: "vm", applications: input.applications });
+  return apps.map((app) => ({
+    name: app.name,
+    artifact_local_path: app.artifactLocalPath || "",
+    artifact_type: app.artifact?.type || "binary",
+    artifact_filename: app.artifactFilename || (app.artifact?.type === "jar" ? "app.jar" : "app"),
+    command: app.command || "",
+    vm_count: app.vm_count ?? 1,
+    machine_type: app.machine_type || "e2-standard-2",
+    disk_gib: app.disk_gib ?? 0,
+    ports: app.ports || [],
+    env: injectClusterEnv(app.env, app.connectClusters, clusterEndpoints),
+    expose_http: app.expose === "http" || app.expose === "lb",
+    expose_https: app.expose === "https" || app.expose === "lb",
+    requirements: app.requirements || [],
+  }));
+}
+
+function buildLoadBalancers(input: CreateInstanceInput): Record<string, unknown>[] {
+  const lbs = Array.isArray(input.load_balancers) ? input.load_balancers : [];
+  return lbs.map((lb) => ({
+    name: lb.name,
+    target: lb.target,
+    target_kind: lb.target_kind === "vms" ? "vms" : "application",
+    ports: Array.isArray(lb.ports) ? lb.ports : [],
+  }));
+}
+
+function buildGkeApplications(input: CreateInstanceInput): Record<string, unknown>[] {
+  const apps = normalizeApplications({ mode: "gke", applications: input.applications });
+  return apps.map((app) => ({
+    name: app.name,
+    image: app.image || "",
+    command: app.command || "",
+    replicas: app.replicas ?? 1,
+    ports: app.ports || [],
+    env: app.env || {},
+    expose: app.expose || "none",
+  }));
 }
 
 export function writeInstanceWorkspace(
@@ -158,6 +242,9 @@ ${
   rof_nvme_disks   = var.rof_nvme_disks
   region_zones     = var.region_zones
   ssh_public_key   = var.ssh_public_key
+  ssh_private_key_path = var.ssh_private_key_path
+  applications     = var.applications
+  load_balancers   = var.load_balancers
 `
     : `
   gke_clustersize          = var.gke_clustersize
@@ -166,6 +253,7 @@ ${
   rec_specs                = var.rec_specs
   operator_chart_version   = var.operator_chart_version
   outputs_dir              = var.outputs_dir
+  applications             = var.applications
 `
 }
 }
@@ -197,6 +285,8 @@ output "clusters" {
   value     = module.stack.clusters
   sensitive = true
 }
+output "app_workloads" { value = module.stack.app_workloads }
+output "load_balancers" { value = module.stack.load_balancers }
 output "deployment_mode" { value = module.stack.deployment_mode }
 `
     : `
@@ -207,6 +297,7 @@ output "rec_name" { value = module.stack.rec_name }
 output "rec_names" { value = module.stack.rec_names }
 output "rec_namespace" { value = module.stack.rec_namespace }
 output "k8s_outputs_file" { value = module.stack.k8s_outputs_file }
+output "app_outputs_file" { value = module.stack.app_outputs_file }
 output "deployment_mode" { value = module.stack.deployment_mode }
 `
 }
@@ -250,6 +341,34 @@ variable "rs_private_subnet" { type = string }
 variable "rs_public_subnet" { type = string }
 variable "region_zones" { type = list(string) }
 variable "ssh_public_key" { type = string }
+variable "ssh_private_key_path" { type = string }
+variable "applications" {
+  type = list(object({
+    name                = string
+    artifact_local_path = string
+    artifact_type       = string
+    artifact_filename   = string
+    command             = string
+    vm_count            = number
+    machine_type        = string
+    disk_gib            = number
+    ports               = list(number)
+    env                 = map(string)
+    expose_http         = bool
+    expose_https        = bool
+    requirements        = list(string)
+  }))
+  default = []
+}
+variable "load_balancers" {
+  type = list(object({
+    name        = string
+    target      = string
+    target_kind = string
+    ports       = list(number)
+  }))
+  default = []
+}
 `
       : `
 variable "yourname" { type = string }
@@ -274,6 +393,18 @@ variable "dns_zone_dns_name" { type = string }
 variable "rs_private_subnet" { type = string }
 variable "rs_public_subnet" { type = string }
 variable "outputs_dir" { type = string }
+variable "applications" {
+  type = list(object({
+    name     = string
+    image    = string
+    command  = string
+    replicas = number
+    ports    = list(number)
+    env      = map(string)
+    expose   = string
+  }))
+  default = []
+}
 `;
 
   const tfvars: Record<string, unknown> = {
@@ -325,7 +456,18 @@ variable "outputs_dir" { type = string }
       rof_nvme_disks: first.rof_nvme_disks,
       region_zones: input.region_zones || ["b", "c", "d"],
       ssh_public_key: sshKey,
+      ssh_private_key_path: resolveSshPrivateKeyPath(),
     });
+    const vmPrefix = `${input.name}-${input.env || "default"}`;
+    const dnsSuffix = String(tfvars.dns_zone_dns_name);
+    const clusterEndpoints = new Map<string, string>();
+    clusters.forEach((c, i) => {
+      const host = `cluster.${clusterNamePrefix(vmPrefix, i, c.name)}.${dnsSuffix}`;
+      if (c.name) clusterEndpoints.set(c.name, host);
+      if (i === 0) clusterEndpoints.set(vmPrefix, host);
+    });
+    tfvars.applications = buildVmApplications(input, clusterEndpoints);
+    tfvars.load_balancers = buildLoadBalancers(input);
   } else {
     const clusters = normalizeClusters({ ...input, mode: "gke" });
     const prefix = `${input.name}-${input.env || "default"}`;
@@ -340,6 +482,7 @@ variable "outputs_dir" { type = string }
       operator_chart_version: resolveGkeOperatorChart(input.operator_chart_version),
       outputs_dir: workDir,
     });
+    tfvars.applications = buildGkeApplications(input);
   }
 
   const tfvarsBody = Object.entries(tfvars)

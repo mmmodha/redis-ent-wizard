@@ -153,3 +153,40 @@ variable "clusters" {
   description = "Redis clusters in this deployment. Empty falls back to the legacy single-cluster variables."
   default     = []
 }
+
+variable "ssh_private_key_path" {
+  type        = string
+  description = "Path to the SSH private key used to copy application artifacts to VMs."
+  default     = "~/.ssh/google_compute_engine"
+}
+
+variable "applications" {
+  type = list(object({
+    name                = string
+    artifact_local_path = string
+    artifact_type       = string
+    artifact_filename   = string
+    command             = string
+    vm_count            = number
+    machine_type        = string
+    disk_gib            = number
+    ports               = list(number)
+    env                 = map(string)
+    expose_http         = bool
+    expose_https        = bool
+    requirements        = list(string)
+  }))
+  description = "Custom application workloads run on dedicated VMs."
+  default     = []
+}
+
+variable "load_balancers" {
+  type = list(object({
+    name        = string
+    target      = string # application name, or "app" for the Set-of-VMs group
+    target_kind = string # "application" | "vms"
+    ports       = list(number)
+  }))
+  description = "Regional internal TCP passthrough load balancers fronting app VMs."
+  default     = []
+}

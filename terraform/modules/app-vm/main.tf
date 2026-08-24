@@ -193,6 +193,10 @@ output "app_names" {
   value = google_compute_instance.app[*].name
 }
 
+output "instance_self_links" {
+  value = google_compute_instance.app[*].self_link
+}
+
 output "app_machine_types" {
   value = local.app_machine_types
 }

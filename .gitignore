@@ -16,6 +16,7 @@ data/credentials-meta.json
 data/quota-overrides.json
 data/credentials-user/
 data/credentials-runtime/
+data/artifacts/
 *.tfstate
 *.tfstate.*
 .terraform/

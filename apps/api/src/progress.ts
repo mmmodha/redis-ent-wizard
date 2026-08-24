@@ -73,7 +73,7 @@ const SHARED_SECTION_DEFS: { id: string; label: string; match: (addr: string) =>
   {
     id: "app",
     label: "Application / memtier VM",
-    match: (a) => a.includes("module.app_vm"),
+    match: (a) => a.includes("module.app_vm") || a.includes("module.app_workload"),
   },
   {
     id: "gke",
@@ -84,6 +84,11 @@ const SHARED_SECTION_DEFS: { id: string; label: string; match: (addr: string) =>
     id: "operator",
     label: "Redis Enterprise Operator and REC",
     match: (a) => a.includes("module.re_k8s"),
+  },
+  {
+    id: "apps_k8s",
+    label: "Application workloads (k8s)",
+    match: (a) => a.includes("module.app_k8s"),
   },
 ];
 

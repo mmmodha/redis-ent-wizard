@@ -9,6 +9,7 @@ import { useAuth } from "@/lib/auth";
 const TABS = [
   { href: "/", label: "Instances", match: (p: string) => p === "/" || p.startsWith("/instances") },
   { href: "/wizard", label: "Create", match: (p: string) => p.startsWith("/wizard") },
+  { href: "/design", label: "Design", match: (p: string) => p.startsWith("/design") },
   { href: "/credentials", label: "Credentials", match: (p: string) => p.startsWith("/credentials") },
 ];
 

@@ -73,7 +73,7 @@ resource "google_container_node_pool" "np" {
 
   node_config {
     machine_type = var.gke_machine_type
-    labels = local.resource_labels
+    labels       = local.resource_labels
     oauth_scopes = [
       "https://www.googleapis.com/auth/cloud-platform",
     ]

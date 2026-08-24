@@ -456,3 +456,35 @@ export async function gkeClusterExists(
     throw err;
   }
 }
+
+// ---------------------------------------------------------------------------
+// Cloud Storage — read a gs:// application artifact so the API can copy it onto
+// the VM over SSH. Only a read permission is needed (no bucket admin).
+// ---------------------------------------------------------------------------
+
+/** Permission needed to read a gs:// artifact (checked in preflight). */
+export const STORAGE_READ_PERMISSIONS = ["storage.objects.get"];
+
+/** Download a GCS object's bytes (media). Requires storage.objects.get. */
+export async function downloadObject(
+  credentialsFile: string,
+  bucket: string,
+  objectName: string,
+): Promise<Buffer> {
+  const token = await fetchAccessToken(credentialsFile);
+  const res = await fetch(
+    `https://storage.googleapis.com/storage/v1/b/${encodeURIComponent(bucket)}/o/${encodeURIComponent(objectName)}?alt=media`,
+    { headers: { Authorization: `Bearer ${token}` } },
+  );
+  if (!res.ok) {
+    let detail = res.statusText;
+    try {
+      const body = (await res.json()) as { error?: { message?: string } };
+      detail = body.error?.message || detail;
+    } catch {
+      /* keep statusText */
+    }
+    throw new GcpApiError(`Artifact download failed: ${detail}`, res.status);
+  }
+  return Buffer.from(await res.arrayBuffer());
+}

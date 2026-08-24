@@ -318,6 +318,18 @@ export function InstanceBoard() {
                             {inst.folder ? (
                               <div className="hint mono">{inst.folder}</div>
                             ) : null}
+                            {inst.status === "destroyed" ? (
+                              <div className="hint">
+                                Edit in{" "}
+                                <Link href={`/wizard?from=${encodeURIComponent(inst.id)}`}>
+                                  wizard
+                                </Link>{" "}
+                                or{" "}
+                                <Link href={`/design?from=${encodeURIComponent(inst.id)}`}>
+                                  designer
+                                </Link>
+                              </div>
+                            ) : null}
                           </td>
                           <td className="mono">{inst.ownerEmail}</td>
                           <td className="mono">{inst.mode.toUpperCase()}</td>

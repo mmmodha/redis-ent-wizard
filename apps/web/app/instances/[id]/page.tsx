@@ -106,7 +106,18 @@ export default function InstanceDetailPage() {
   const [checking, setChecking] = useState(false);
   const [showLog, setShowLog] = useState(false);
   const [folderDraft, setFolderDraft] = useState("");
+  const [copied, setCopied] = useState("");
   const logRef = useRef<HTMLDivElement>(null);
+
+  async function copyEndpoint(value: string) {
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopied(value);
+      setTimeout(() => setCopied((c) => (c === value ? "" : c)), 1500);
+    } catch {
+      // clipboard may be unavailable (e.g. non-secure context); ignore
+    }
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -277,6 +288,102 @@ export default function InstanceDetailPage() {
     return parts.filter(Boolean).join(" · ");
   })();
 
+  const databases = inst?.databaseStates ?? [];
+  const licenses = inst?.licenseStates ?? [];
+  const configuredDbCount = asClusters(inst?.config).reduce(
+    (n, c) => n + (Array.isArray(c.databases) ? (c.databases as unknown[]).length : 0),
+    0,
+  );
+  const vmWorkloads = Array.isArray(inst?.endpoints?.app_workloads)
+    ? (inst!.endpoints!.app_workloads as Array<Record<string, unknown>>)
+    : [];
+  const gkeAppServices = Array.isArray(inst?.endpoints?.gke_app_services)
+    ? (inst!.endpoints!.gke_app_services as Array<Record<string, unknown>>)
+    : [];
+  const configuredAppCount = Array.isArray(inst?.config?.applications)
+    ? (inst!.config!.applications as unknown[]).length
+    : 0;
+
+  // Provisioned load balancers: GKE LoadBalancer Services (REC UI + app
+  // Services) expose a real external VIP; VM mode fronts the app VMs' public
+  // address with the opened ports.
+  const hostFromUrl = (u: string): string => {
+    try {
+      return u ? new URL(u).hostname : "";
+    } catch {
+      return "";
+    }
+  };
+  const loadBalancers: { name: string; vip: string; ports: string; kind: string }[] = [];
+  gkeAppServices.forEach((s) => {
+    const vip = String(s.service_ip || "");
+    if (vip) {
+      loadBalancers.push({
+        name: String(s.name || "app"),
+        vip,
+        ports: Array.isArray(s.ports) ? (s.ports as unknown[]).join(", ") : "",
+        kind: "GKE service",
+      });
+    }
+  });
+  const recRows = Array.isArray(inst?.endpoints?.recs)
+    ? (inst!.endpoints!.recs as Array<Record<string, unknown>>)
+    : [];
+  (recRows.length
+    ? recRows.map((r) => ({ name: String(r.name || "REC"), ui: String(r.ui || r.rec_ui_url || "") }))
+    : [{ name: "REC", ui: String(inst?.endpoints?.rec_ui_url || "") }]
+  ).forEach((r) => {
+    const host = hostFromUrl(r.ui);
+    if (host) loadBalancers.push({ name: `${r.name} UI`, vip: host, ports: "8443", kind: "REC UI" });
+  });
+  if (inst?.mode === "vm") {
+    const cfg = (inst.config || {}) as Record<string, unknown>;
+    const extra = Array.isArray(cfg.app_extra_ports)
+      ? (cfg.app_extra_ports as unknown[]).map(String)
+      : typeof cfg.app_extra_ports === "string" && cfg.app_extra_ports.trim()
+        ? cfg.app_extra_ports.trim().split(/[\s,;]+/)
+        : [];
+    const ports = [
+      cfg.app_expose_http ? "80" : null,
+      cfg.app_expose_https ? "443" : null,
+      ...extra,
+    ].filter(Boolean) as string[];
+    const ips = Array.isArray(inst.endpoints?.app_ips) ? (inst.endpoints!.app_ips as unknown[]).map(String) : [];
+    const dns = Array.isArray(inst.endpoints?.app_dns) ? (inst.endpoints!.app_dns as unknown[]).map(String) : [];
+    if (ports.length && (ips.length || dns.length)) {
+      loadBalancers.push({
+        name: "App VMs",
+        vip: dns[0] || ips[0] || "",
+        ports: ports.join(", "),
+        kind: "app VM ports",
+      });
+    }
+  }
+  // Authoritative internal LB VIPs provisioned by Terraform.
+  const internalLbs = Array.isArray(inst?.endpoints?.load_balancers)
+    ? (inst!.endpoints!.load_balancers as Array<Record<string, unknown>>)
+    : [];
+  internalLbs.forEach((lb) => {
+    const vip = String(lb.vip || "");
+    if (vip) {
+      loadBalancers.push({
+        name: String(lb.name || "internal-lb"),
+        vip,
+        ports: Array.isArray(lb.ports) ? (lb.ports as unknown[]).join(", ") : "",
+        kind: "internal LB",
+      });
+    }
+  });
+  const showLbPanel = loadBalancers.length > 0;
+  const dbStatusColor = (status: string) =>
+    status === "active" || status === "applied"
+      ? "var(--success)"
+      : status === "failed"
+        ? "var(--redis-hyper)"
+        : "var(--redis-text-muted)";
+  const showDbPanel = databases.length > 0 || licenses.length > 0 || configuredDbCount > 0;
+  const showAppPanel = vmWorkloads.length > 0 || gkeAppServices.length > 0 || configuredAppCount > 0;
+
   return (
     <div>
       <div className="page-head">
@@ -372,6 +479,16 @@ export default function InstanceDetailPage() {
                 Recreate
               </button>
             ) : null}
+            {inst?.status === "destroyed" ? (
+              <>
+                <Link className="btn" href={`/wizard?from=${encodeURIComponent(id)}`}>
+                  Edit in wizard
+                </Link>
+                <Link className="btn" href={`/design?from=${encodeURIComponent(id)}`}>
+                  Edit in designer
+                </Link>
+              </>
+            ) : null}
             {canForget ? (
               <button
                 className="btn"
@@ -457,6 +574,152 @@ export default function InstanceDetailPage() {
                     : undefined
                 }
               />
+              {showDbPanel ? (
+                <div className="access-section">
+                  <h3>Databases</h3>
+          {databases.length === 0 ? (
+            <div className="empty">
+              {inst?.status === "destroyed"
+                ? "Resources destroyed."
+                : configuredDbCount > 0
+                  ? `${configuredDbCount} database(s) will be created once the cluster is ready.`
+                  : "No databases configured."}
+            </div>
+          ) : (
+            <div className="summary-grid">
+              {databases.map((d) => (
+                <div className="summary-row" key={`${d.cluster}/${d.name}`}>
+                  <div className="summary-label">
+                    {d.cluster} / <span className="mono">{d.name}</span>
+                  </div>
+                  <div className="summary-value">
+                    <span className="mono" style={{ color: dbStatusColor(d.status) }}>
+                      {d.status}
+                    </span>
+                    {d.endpoint ? (
+                      <span className="db-endpoint-row">
+                        <span className="mono"> · {d.endpoint}</span>
+                        <button
+                          type="button"
+                          className="btn btn-copy"
+                          onClick={() => copyEndpoint(d.endpoint!)}
+                          title="Copy endpoint to clipboard"
+                        >
+                          {copied === d.endpoint ? "Copied" : "Copy"}
+                        </button>
+                      </span>
+                    ) : null}
+                    {d.error ? <div className="hint">{d.error}</div> : null}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+          {licenses.length ? (
+            <div style={{ marginTop: 16 }}>
+              <h3 style={{ margin: "0 0 8px" }}>License</h3>
+              <div className="summary-grid">
+                {licenses.map((l) => (
+                  <div className="summary-row" key={l.cluster}>
+                    <div className="summary-label">{l.cluster}</div>
+                    <div className="summary-value">
+                      <span className="mono" style={{ color: dbStatusColor(l.status) }}>
+                        {l.status}
+                      </span>
+                      {l.detail ? <span className="hint"> · {l.detail}</span> : null}
+                      {l.error ? <div className="hint">{l.error}</div> : null}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+
+              {showAppPanel ? (
+                <div className="access-section">
+                  <h3>Application workloads</h3>
+          {vmWorkloads.length === 0 && gkeAppServices.length === 0 ? (
+            <div className="empty">
+              {inst?.status === "destroyed"
+                ? "Resources destroyed."
+                : configuredAppCount > 0
+                  ? `${configuredAppCount} application(s) are provisioned during apply.`
+                  : "No application workloads configured."}
+            </div>
+          ) : (
+            <div className="summary-grid">
+              {vmWorkloads.map((w, i) => {
+                const ports = Array.isArray(w.ports) ? (w.ports as number[]).join(", ") : "";
+                return (
+                  <div className="summary-row" key={`vm-${String(w.name || i)}`}>
+                    <div className="summary-label">
+                      {String(w.app_name || w.name || `app ${i + 1}`)}
+                      <div className="hint">{w.command_set ? "systemd service" : "staged (manual start)"}</div>
+                    </div>
+                    <div className="summary-value">
+                      {w.ip ? <div className="mono">{String(w.ip)}</div> : null}
+                      {w.dns ? <div className="mono">{String(w.dns)}</div> : null}
+                      {ports ? <div className="hint">ports {ports}</div> : null}
+                      {w.how_to_ssh ? <div className="mono hint">{String(w.how_to_ssh)}</div> : null}
+                    </div>
+                  </div>
+                );
+              })}
+              {gkeAppServices.map((s, i) => {
+                const ports = Array.isArray(s.ports) ? (s.ports as number[]).join(", ") : "";
+                return (
+                  <div className="summary-row" key={`gke-${String(s.name || i)}`}>
+                    <div className="summary-label">
+                      {String(s.name || `app ${i + 1}`)}
+                      <div className="hint">GKE deployment</div>
+                    </div>
+                    <div className="summary-value">
+                      {s.service_ip ? (
+                        <div className="mono">{String(s.service_ip)}</div>
+                      ) : (
+                        <div className="hint">no external IP</div>
+                      )}
+                      {ports ? <div className="hint">ports {ports}</div> : null}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      ) : null}
+
+              {showLbPanel ? (
+                <div className="access-section">
+                  <h3>Load balancers</h3>
+          <div className="summary-grid">
+            {loadBalancers.map((lb, i) => (
+              <div className="summary-row" key={`lb-${lb.name}-${i}`}>
+                <div className="summary-label">
+                  {lb.name}
+                  <div className="hint">{lb.kind}</div>
+                </div>
+                <div className="summary-value">
+                  <span className="db-endpoint-row">
+                    <span className="mono">VIP {lb.vip}</span>
+                    <button
+                      type="button"
+                      className="btn btn-copy"
+                      onClick={() => copyEndpoint(lb.vip)}
+                      title="Copy VIP to clipboard"
+                    >
+                      {copied === lb.vip ? "Copied" : "Copy"}
+                    </button>
+                  </span>
+                  {lb.ports ? <div className="hint">ports {lb.ports}</div> : null}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+              ) : null}
             </>
           )}
         </div>
