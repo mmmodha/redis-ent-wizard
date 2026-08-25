@@ -206,5 +206,35 @@ module.stack.module.app_workload["demo-app"].null_resource.deploy[0]: Creating..
     assert.equal(app?.done, 2);
     assert.equal(app?.state, "active");
   });
+
+  it("skips Redis install steps for an app-only deploy", () => {
+    const extras = progressExtrasFromConfig(
+      {
+        clusters: [],
+        applications: [
+          {
+            name: "web",
+            command: "true",
+            artifact: { kind: "git", ref: "https://github.com/x/y" },
+          },
+        ],
+      },
+      "vm",
+    );
+    assert.deepEqual(extras.clusterNames, []);
+    const progress = computeProgress(
+      `
+=== APPLY START 2026-08-25T12:00:00.000Z ===
+Plan: 2 to add, 0 to change, 0 to destroy.
+`,
+      "applying",
+      "vm",
+      undefined,
+      undefined,
+      extras,
+    );
+    assert.ok(!progress.steps.some((s) => s.id === "bootstrap"));
+    assert.match(progress.steps.find((s) => s.id === "ready")?.label || "", /application/i);
+  });
 });
 

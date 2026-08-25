@@ -296,6 +296,15 @@ function applyStepDefs(
   mode: DeploymentMode,
   extras?: ProgressContext,
 ): { id: string; label: string }[] {
+  const redis = (extras?.clusterNames?.length ?? 0) > 0;
+  if (mode === "vm" && extras && !redis) {
+    return [
+      { id: "init", label: "Initialize Terraform" },
+      { id: "plan", label: "Plan infrastructure" },
+      { id: "create", label: "Create VPC, nodes, DNS" },
+      { id: "ready", label: "Application VMs available" },
+    ];
+  }
   const base = mode === "gke" ? APPLY_STEPS_GKE : APPLY_STEPS_VM;
   const extra: { id: string; label: string }[] = [];
   if ((extras?.licenseCount ?? 0) > 0) extra.push({ id: "licenses", label: "Apply Redis licenses" });
@@ -303,6 +312,10 @@ function applyStepDefs(
   if (!extra.length) return base;
   const readyIdx = base.findIndex((s) => s.id === "ready");
   return [...base.slice(0, readyIdx), ...extra, ...base.slice(readyIdx)];
+}
+
+export function appWorkloadsSucceeded(log: string, names: string[]): boolean {
+  return names.every((name) => log.includes(`=== APPWL ${name} DONE ===`));
 }
 
 function lastMatch(log: string, re: RegExp): string | undefined {

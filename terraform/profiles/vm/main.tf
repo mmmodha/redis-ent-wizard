@@ -1,13 +1,17 @@
 locals {
   name_prefix  = "${var.yourname}-${var.env}"
   scripts_path = abspath("${path.module}/../../scripts")
-  clusters = length(var.clusters) > 0 ? var.clusters : [{
-    name           = ""
-    nodes          = var.clustersize
-    machine_type   = var.machine_type
-    rof_nvme_disks = var.rof_nvme_disks
-    RS_release     = var.RS_release
-  }]
+  clusters = var.redis_enabled ? (
+    length(var.clusters) > 0 ? [for c in var.clusters : c if c.nodes > 0] : (
+      var.clustersize > 0 ? [{
+        name           = ""
+        nodes          = var.clustersize
+        machine_type   = var.machine_type
+        rof_nvme_disks = var.rof_nvme_disks
+        RS_release     = var.RS_release
+      }] : []
+    )
+  ) : []
   cluster_prefixes = [
     for i, c in local.clusters :
     trimspace(c.name) != "" ? "${local.name_prefix}-${c.name}" : (
@@ -90,7 +94,7 @@ module "app_vm" {
   public_subnet_name = module.network.public_subnet_name
   ssh_public_key     = var.ssh_public_key
   scripts_path       = local.scripts_path
-  clustersize        = local.clusters[0].nodes
+  clustersize        = try(local.clusters[0].nodes, 0)
   memviz_enabled     = var.memviz_enabled
   memviz_port        = var.memviz_port
   memviz_repo_url    = var.memviz_repo_url
@@ -269,15 +273,15 @@ resource "google_compute_firewall" "lb_health_check" {
 }
 
 output "rs_ui_dns" {
-  value = module.re_vm[0].rs_ui_dns
+  value = length(module.re_vm) > 0 ? module.re_vm[0].rs_ui_dns : []
 }
 
 output "rs_ui_ip" {
-  value = module.re_vm[0].rs_ui_ip
+  value = length(module.re_vm) > 0 ? module.re_vm[0].rs_ui_ip : ""
 }
 
 output "rs_cluster_dns" {
-  value = module.re_vm[0].rs_cluster_dns
+  value = length(module.re_vm) > 0 ? module.re_vm[0].rs_cluster_dns : ""
 }
 
 output "nodes_ip" {
@@ -289,16 +293,16 @@ output "nodes_dns" {
 }
 
 output "admin_username" {
-  value = var.RS_admin
+  value = length(module.re_vm) > 0 ? var.RS_admin : ""
 }
 
 output "admin_password" {
-  value     = module.re_vm[0].admin_password
+  value     = length(module.re_vm) > 0 ? module.re_vm[0].admin_password : ""
   sensitive = true
 }
 
 output "how_to_ssh" {
-  value = "gcloud compute ssh ${module.re_vm[0].node1_name} --zone ${var.region_name}-${var.region_zones[0]}"
+  value = length(module.re_vm) > 0 ? "gcloud compute ssh ${module.re_vm[0].node1_name} --zone ${var.region_name}-${var.region_zones[0]}" : ""
 }
 
 output "clusters" {

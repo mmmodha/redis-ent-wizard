@@ -131,7 +131,10 @@ function vmClustersFromList(
   endpoints: Record<string, unknown>,
   ctx: AccessContext,
 ): AccessCluster[] {
-  const list = Array.isArray(endpoints.clusters) ? endpoints.clusters : [];
+  const listed = Array.isArray(endpoints.clusters) ? endpoints.clusters : null;
+  if (!listed) {
+    return vmClusterFromFlat(endpoints, ctx);
+  }
   const username = asString(endpoints.admin_username);
   const fallbackZone = parseSshZone(asStringList(endpoints.how_to_ssh)[0] || "");
   const suffixes = ctx.region_zones?.length
@@ -141,8 +144,10 @@ function vmClustersFromList(
       : [];
   const region = ctx.region || fallbackZone.replace(/-[a-z]$/, "");
 
-  return list.map((raw, i) => {
-    const c = asRecord(raw) || {};
+  return listed
+    .map((raw) => asRecord(raw) || {})
+    .filter((c) => Number(c.nodes) > 0)
+    .map((c, i) => {
     const clusterDns = trimDot(asString(c.dns || c.cluster_dns || c.rs_cluster_dns));
     const ips = asStringList(c.nodes_ip);
     const dnsList = asStringList(c.nodes_dns).map(trimDot);
@@ -269,7 +274,9 @@ function gkeClusters(endpoints: Record<string, unknown>): AccessCluster[] {
 }
 
 function appVms(endpoints: Record<string, unknown>, ctx: AccessContext): AccessAppVm[] {
-  const listed = Array.isArray(endpoints.apps) ? endpoints.apps : [];
+  const listedCompanion = Array.isArray(endpoints.apps) ? endpoints.apps : [];
+  const listedWorkloads = Array.isArray(endpoints.app_workloads) ? endpoints.app_workloads : [];
+  const listed = listedCompanion.length ? listedCompanion : listedWorkloads;
   const names = asStringList(endpoints.app_names);
   const ips = asStringList(endpoints.app_ips);
   const dns = asStringList(endpoints.app_dns).map(trimDot);
@@ -314,9 +321,10 @@ export function buildAccessView(
     return { clusters: gkeClusters(ep), apps: [], kubectl };
   }
   const clusters = vmClustersFromList(ep, ctx);
+  const apps = appVms(ep, ctx);
   return {
-    clusters: clusters.length ? clusters : vmClusterFromFlat(ep, ctx),
-    apps: appVms(ep, ctx),
+    clusters: clusters.length || apps.length ? clusters : vmClusterFromFlat(ep, ctx),
+    apps,
     kubectl,
   };
 }

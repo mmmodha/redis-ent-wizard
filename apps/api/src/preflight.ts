@@ -28,7 +28,7 @@ import {
   summarizeAppMachineTypes,
 } from "./app-web.js";
 import { iamHint } from "./quotas.js";
-import { clusterNamePrefix, normalizeClusters, plannedDnsNames, summarizeClusters, totalClusterNodes } from "./clusters.js";
+import { clusterNamePrefix, hasAppCompute, normalizeClusters, plannedDnsNames, summarizeClusters, totalClusterNodes } from "./clusters.js";
 import type { CreateInstanceInput, DatabaseSpec } from "./types.js";
 
 function fmtGib(bytes: number): string {
@@ -124,10 +124,33 @@ export async function preflight(
   checks.push(
     pass(
       "cluster_names",
-      "Cluster names",
-      clusters.map((c, i) => clusterNamePrefix(namePrefix, i, c.name)).join(", "),
+      clusters.length ? "Cluster names" : "Workload",
+      clusters.length
+        ? clusters.map((c, i) => clusterNamePrefix(namePrefix, i, c.name)).join(", ")
+        : "No Redis cluster — application VMs only",
     ),
   );
+
+  if (mode === "gke" && !clusters.length) {
+    checks.push(
+      fail(
+        "clusters",
+        "Redis clusters",
+        "GKE deploys need a Redis Enterprise cluster. Use VM mode to deploy only application VMs.",
+      ),
+    );
+    return { ok: false, instanceId, checks };
+  }
+  if (mode === "vm" && !clusters.length && !hasAppCompute(input)) {
+    checks.push(
+      fail(
+        "clusters",
+        "Redis clusters",
+        "Add a Redis cluster, or turn Redis off and include a set of VMs or an application.",
+      ),
+    );
+    return { ok: false, instanceId, checks };
+  }
 
   // 2. Credentials readable and usable
   let projectFromKey = "";

@@ -43,7 +43,7 @@ import {
   type DesignSettings,
 } from "@/lib/diagram";
 import { useGcpLookups } from "@/lib/useGcpLookups";
-import { canUseDesignerCanvas, designerLockReason } from "@/lib/designer-gate";
+import { canUseDesignerCanvas, designerLockReason, designValidateHint } from "@/lib/designer-gate";
 import {
   canEnableDbReplication,
   clusterRedisNodeCount,
@@ -90,6 +90,7 @@ function DesignCanvas() {
     folder: "",
     youremail: "",
     skip_deletion: false,
+    redis_enabled: true,
     mode: "vm",
     RS_admin: "admin@redis.io",
     operator_chart_version: "latest",
@@ -115,7 +116,7 @@ function DesignCanvas() {
   // Switching mode rebuilds the root and clears the canvas to avoid invalid nesting.
   const switchMode = useCallback(
     (mode: "vm" | "gke") => {
-      setMeta((m) => ({ ...m, mode }));
+      setMeta((m) => ({ ...m, mode, redis_enabled: mode === "gke" ? true : m.redis_enabled }));
       setNodes(layoutDiagram([rootNode(mode)]));
       setEdges([]);
       resetPreflight();
@@ -139,6 +140,9 @@ function DesignCanvas() {
           folder: typeof cfg.folder === "string" ? cfg.folder : m.folder,
           youremail: typeof cfg.youremail === "string" ? cfg.youremail : m.youremail,
           skip_deletion: Boolean(cfg.skip_deletion),
+          redis_enabled: Array.isArray(cfg.clusters)
+            ? (cfg.clusters as unknown[]).length > 0
+            : cfg.redis_enabled !== false,
           mode,
           RS_admin: typeof cfg.RS_admin === "string" && cfg.RS_admin ? cfg.RS_admin : m.RS_admin,
           operator_chart_version:
@@ -182,6 +186,7 @@ function DesignCanvas() {
       folder: meta.folder,
       youremail: meta.youremail,
       skip_deletion: meta.skip_deletion,
+      redis_enabled: meta.redis_enabled,
       mode: meta.mode,
       RS_admin: meta.RS_admin,
       operator_chart_version: meta.operator_chart_version,
@@ -438,8 +443,10 @@ function DesignCanvas() {
 
   const oe = ownerError(meta.youremail);
   const hasCluster = nodes.some((n) => n.data.kind === "cluster");
+  const hasAppWorkload = nodes.some((n) => n.data.kind === "vms" || n.data.kind === "application");
+  const topologyOk = meta.mode === "gke" || meta.redis_enabled ? hasCluster : hasAppWorkload;
   const canValidate = Boolean(
-    meta.name && !oe && canvasReady && gcp.settings.project && gcp.settings.region_name && hasCluster,
+    meta.name && !oe && canvasReady && gcp.settings.project && gcp.settings.region_name && topologyOk,
   );
 
   const validate = useCallback(async () => {
@@ -511,7 +518,18 @@ function DesignCanvas() {
           meta={meta}
           onModeChange={switchMode}
           setMeta={(update) => {
-            setMeta(update);
+            setMeta((prev: DesignMeta) => {
+              const next = typeof update === "function" ? update(prev) : update;
+              if (prev.redis_enabled && !next.redis_enabled) {
+                setNodes((ns: DesignNode[]) => {
+                  const kept = ns.filter((n) => n.data.kind !== "cluster" && n.data.kind !== "database");
+                  const ids = new Set(kept.map((n) => n.id));
+                  setEdges((es: DesignEdge[]) => es.filter((e) => ids.has(e.source) && ids.has(e.target)));
+                  return layoutDiagram(kept);
+                });
+              }
+              return next;
+            });
             resetPreflight();
           }}
         />
@@ -562,7 +580,7 @@ function DesignCanvas() {
           </DesignProvider>
         </div>
         <div className="design-side">
-          <Palette mode={meta.mode} disabled={!canvasReady} />
+          <Palette mode={meta.mode} redisEnabled={meta.mode === "gke" || meta.redis_enabled} disabled={!canvasReady} />
         </div>
       </div>
 
@@ -599,8 +617,14 @@ function DesignCanvas() {
           </button>
         </div>
 
-        {!hasCluster ? (
-          <p className="hint">Add at least one Redis cluster before validating.</p>
+        {!topologyOk ? (
+          <p className="hint">
+            {designValidateHint({
+              hasWorkload: topologyOk,
+              redisEnabled: meta.redis_enabled,
+              mode: meta.mode,
+            })}
+          </p>
         ) : null}
 
         {checking && !preflight ? <div className="empty">Validating against GCP…</div> : null}

@@ -173,6 +173,31 @@ function buildGkeApplications(input: CreateInstanceInput): Record<string, unknow
   }));
 }
 
+export function vmStackModuleArguments(): string {
+  return `
+  clustersize      = var.clustersize
+  redis_enabled    = var.redis_enabled
+  machine_type     = var.machine_type
+  RS_release       = var.RS_release
+  clusters         = var.clusters
+  RS_admin         = var.RS_admin
+  app              = var.app
+  app_machine_types = var.app_machine_types
+  memviz_enabled   = var.memviz_enabled
+  memviz_port      = var.memviz_port
+  app_expose_http  = var.app_expose_http
+  app_expose_https = var.app_expose_https
+  app_disk_gib     = var.app_disk_gib
+  app_extra_ports  = var.app_extra_ports
+  rof_nvme_disks   = var.rof_nvme_disks
+  region_zones     = var.region_zones
+  ssh_public_key   = var.ssh_public_key
+  ssh_private_key_path = var.ssh_private_key_path
+  applications     = var.applications
+  load_balancers   = var.load_balancers
+`;
+}
+
 export function writeInstanceWorkspace(
   workDir: string,
   mode: DeploymentMode,
@@ -227,27 +252,7 @@ module "stack" {
   rs_public_subnet  = var.rs_public_subnet
 ${
   mode === "vm"
-    ? `
-  clustersize      = var.clustersize
-  machine_type     = var.machine_type
-  RS_release       = var.RS_release
-  clusters         = var.clusters
-  RS_admin         = var.RS_admin
-  app              = var.app
-  app_machine_types = var.app_machine_types
-  memviz_enabled   = var.memviz_enabled
-  memviz_port      = var.memviz_port
-  app_expose_http  = var.app_expose_http
-  app_expose_https = var.app_expose_https
-  app_disk_gib     = var.app_disk_gib
-  app_extra_ports  = var.app_extra_ports
-  rof_nvme_disks   = var.rof_nvme_disks
-  region_zones     = var.region_zones
-  ssh_public_key   = var.ssh_public_key
-  ssh_private_key_path = var.ssh_private_key_path
-  applications     = var.applications
-  load_balancers   = var.load_balancers
-`
+    ? vmStackModuleArguments()
     : `
   gke_clustersize          = var.gke_clustersize
   gke_machine_type         = var.gke_machine_type
@@ -316,6 +321,7 @@ variable "project" { type = string }
 variable "env" { type = string }
 variable "region_name" { type = string }
 variable "clustersize" { type = number }
+variable "redis_enabled" { type = bool }
 variable "machine_type" { type = string }
 variable "RS_release" { type = string }
 variable "clusters" {
@@ -431,9 +437,10 @@ variable "applications" {
     const clusters = normalizeClusters(input);
     const first = clusters[0];
     Object.assign(tfvars, {
-      clustersize: first.nodes,
-      machine_type: first.machine_type,
-      RS_release: first.RS_release,
+      redis_enabled: clusters.length > 0,
+      clustersize: first?.nodes ?? 0,
+      machine_type: first?.machine_type || input.machine_type || "e2-standard-2",
+      RS_release: first?.RS_release || input.RS_release || "",
       clusters: clusters.map((c) => ({
         name: c.name,
         nodes: c.nodes,
@@ -457,7 +464,7 @@ variable "applications" {
         app_disk_gib: input.app_disk_gib,
       }),
       app_extra_ports: (input.app ?? 0) > 0 ? parseAppExtraPorts(input.app_extra_ports) : [],
-      rof_nvme_disks: first.rof_nvme_disks,
+      rof_nvme_disks: first?.rof_nvme_disks ?? 0,
       region_zones: input.region_zones || ["b", "c", "d"],
       ssh_public_key: sshKey,
       ssh_private_key_path: resolveSshPrivateKeyPath(),

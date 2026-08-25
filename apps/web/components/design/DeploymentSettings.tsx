@@ -9,6 +9,7 @@ export type DesignMeta = {
   folder: string;
   youremail: string;
   skip_deletion: boolean;
+  redis_enabled: boolean;
   mode: "vm" | "gke";
   RS_admin: string;
   operator_chart_version: string;
@@ -111,6 +112,20 @@ export function DeploymentSettings({
             <option value="yes">Yes — add skip_deletion=yes</option>
           </select>
         </label>
+
+        {meta.mode === "vm" ? (
+          <label className="design-check-row">
+            <input
+              type="checkbox"
+              checked={meta.redis_enabled}
+              onChange={(e) => setMeta((m) => ({ ...m, redis_enabled: e.target.checked }))}
+            />
+            Include Redis Enterprise cluster
+            <span className="hint" style={{ flexBasis: "100%", margin: 0 }}>
+              Off deploys only application VMs on the VPC. GKE still requires Redis.
+            </span>
+          </label>
+        ) : null}
 
         <label>
           Service account key

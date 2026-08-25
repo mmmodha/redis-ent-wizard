@@ -158,6 +158,7 @@ type WizardForm = {
   name: string;
   youremail: string;
   skip_deletion: boolean;
+  redis_enabled: boolean;
   project: string;
   credentialsFile: string;
   region_name: string;
@@ -239,24 +240,29 @@ function formFromConfig(
 ): WizardForm {
   const mode: Mode = cfg.mode === "gke" ? "gke" : "vm";
   const rawClusters = Array.isArray(cfg.clusters) ? (cfg.clusters as StoredCluster[]) : [];
-  const clusters: ClusterDraft[] = rawClusters.length
-    ? rawClusters.map(clusterDraftFromConfig)
-    : [
-        clusterDraftFromConfig({
-          name: undefined,
-          nodes: Number(cfg.clustersize) || 3,
-          machine_type: str(cfg.machine_type),
-          rof_nvme_disks: Number(cfg.rof_nvme_disks) || 0,
-          rs_version: str(cfg.rs_version) || DEFAULT_RS_VERSION,
-          rec_nodes: Number(cfg.rec_nodes) || 3,
-        }),
-      ];
+  const redisOff =
+    mode === "vm" && (cfg.redis_enabled === false || (Array.isArray(cfg.clusters) && rawClusters.length === 0));
+  const clusters: ClusterDraft[] = redisOff
+    ? []
+    : rawClusters.length
+      ? rawClusters.map(clusterDraftFromConfig)
+      : [
+          clusterDraftFromConfig({
+            name: undefined,
+            nodes: Number(cfg.clustersize) || 3,
+            machine_type: str(cfg.machine_type),
+            rof_nvme_disks: Number(cfg.rof_nvme_disks) || 0,
+            rs_version: str(cfg.rs_version) || DEFAULT_RS_VERSION,
+            rec_nodes: Number(cfg.rec_nodes) || 3,
+          }),
+        ];
   const zones = strArray(cfg.region_zones);
   return {
     ...prev,
     name: str(cfg.name),
     youremail: str(cfg.youremail),
     skip_deletion: Boolean(cfg.skip_deletion),
+    redis_enabled: !redisOff,
     project: str(cfg.project),
     credentialsFile,
     region_name: str(cfg.region_name),
@@ -319,6 +325,7 @@ function WizardInner() {
     name: "",
     youremail: "",
     skip_deletion: false,
+    redis_enabled: true,
     project: "",
     credentialsFile: "",
     region_name: "",
@@ -553,6 +560,7 @@ function WizardInner() {
       mode: form.mode,
       youremail: form.youremail,
       skip_deletion: form.skip_deletion,
+      redis_enabled: form.mode === "vm" ? form.redis_enabled : true,
       project: form.project,
       credentialsFile: form.credentialsFile,
       region_name: form.region_name,
@@ -595,6 +603,34 @@ function WizardInner() {
     if (applications.length) base.applications = applications;
 
     if (form.mode === "vm") {
+      if (!form.redis_enabled) {
+        Object.assign(base, {
+          redis_enabled: false,
+          clusters: [],
+          clustersize: 0,
+          RS_admin: form.RS_admin,
+          app: Number(form.app),
+          app_machine_types: form.app > 0 ? form.app_machine_types.slice(0, form.app) : undefined,
+          memviz_enabled: form.app > 0 ? form.memviz_enabled : false,
+          app_expose_http: form.app > 0 ? form.app_expose_http : false,
+          app_expose_https: form.app > 0 ? form.app_expose_https : false,
+          app_disk_gib: form.app > 0 ? form.app_disk_gib.slice(0, form.app) : undefined,
+          app_extra_ports:
+            form.app > 0 && form.app_extra_ports.trim() ? form.app_extra_ports.trim() : undefined,
+          dns_managed_zone: form.dns_managed_zone,
+          dns_zone_dns_name: form.dns_zone_dns_name,
+        });
+        const loadBalancers = form.load_balancers
+          .map((lb) => ({
+            name: lb.name.trim(),
+            target: lb.target_kind === "vms" ? "app" : lb.target,
+            target_kind: lb.target_kind,
+            ports: parsePorts(lb.ports),
+          }))
+          .filter((lb) => lb.ports.length && lb.target)
+          .map((lb) => ({ ...lb, name: lb.name || `${lb.target}-lb` }));
+        if (loadBalancers.length) base.load_balancers = loadBalancers;
+      } else {
       const clusters = form.clusters;
       const first = clusters[0] || blankCluster(form.machine_type);
       Object.assign(base, {
@@ -633,6 +669,7 @@ function WizardInner() {
         .filter((lb) => lb.ports.length && lb.target)
         .map((lb) => ({ ...lb, name: lb.name || `${lb.target}-lb` }));
       if (loadBalancers.length) base.load_balancers = loadBalancers;
+      }
     } else {
       Object.assign(base, {
         gke_clustersize: Number(form.gke_clustersize),
@@ -675,6 +712,15 @@ function WizardInner() {
       );
     }
     if (step === 2) {
+      if (form.mode === "vm" && !form.redis_enabled) {
+        if (!form.app && !form.applications.some((a) => a.name.trim())) return false;
+        if (form.app > 0) {
+          if (form.app_machine_types.length < form.app) return false;
+          if (form.app_machine_types.slice(0, form.app).some((t) => !t)) return false;
+          if (!extraPortsLooksValid(form.app_extra_ports)) return false;
+        }
+        return true;
+      }
       const slugs = form.clusters.map((c) => clusterSlug(c.name));
       const required = form.clusters.length > 1;
       if (slugs.some((slug, i) => (required || form.clusters[i].name.trim()) && (!slug || !/^[a-z]/.test(slug) || slug === "app" || slug === "gke"))) {
@@ -715,14 +761,16 @@ function WizardInner() {
       });
       rows.push({
         label: "Redis clusters",
-        value: form.clusters
-          .map(
-            (c, i) =>
-              `${c.name.trim() ? `${clusterSlug(c.name) || c.name} ` : form.clusters.length > 1 ? `C${i + 1} ` : ""}${c.nodes} × ${c.machine_type || "?"} · ${c.rs_version}${
-                c.rof_nvme_disks > 0 ? ` · ${c.rof_nvme_disks} NVMe` : ""
-              }`,
-          )
-          .join("; "),
+        value: form.redis_enabled
+          ? form.clusters
+              .map(
+                (c, i) =>
+                  `${c.name.trim() ? `${clusterSlug(c.name) || c.name} ` : form.clusters.length > 1 ? `C${i + 1} ` : ""}${c.nodes} × ${c.machine_type || "?"} · ${c.rs_version}${
+                    c.rof_nvme_disks > 0 ? ` · ${c.rof_nvme_disks} NVMe` : ""
+                  }`,
+              )
+              .join("; ")
+          : "None — application VMs only",
       });
       rows.push({
         label: "App VMs",
@@ -1016,14 +1064,21 @@ function WizardInner() {
             >
               <h3>VM deployment</h3>
               <p>
-                Redis Enterprise on Compute Engine. Optionally add companion App VMs (same VPC and
-                DNS zone) for clients or memtier.
+                Redis Enterprise on Compute Engine, or application VMs only. Optionally add companion
+                App VMs (same VPC and DNS zone).
               </p>
             </button>
             <button
               type="button"
               className={`mode-card ${form.mode === "gke" ? "selected" : ""}`}
-              onClick={() => update("mode", "gke")}
+              onClick={() =>
+                setForm((prev) => ({
+                  ...prev,
+                  mode: "gke",
+                  redis_enabled: true,
+                  clusters: prev.clusters.length ? prev.clusters : [blankCluster(prev.machine_type)],
+                }))
+              }
             >
               <h3>GKE deployment</h3>
               <p>
@@ -1036,6 +1091,27 @@ function WizardInner() {
 
         {step === 2 && form.mode === "vm" && (
           <div className="grid grid-2">
+            <label className="design-check-row" style={{ gridColumn: "1 / -1" }}>
+              <input
+                type="checkbox"
+                checked={form.redis_enabled}
+                onChange={(e) => {
+                  const on = e.target.checked;
+                  setForm((prev) => ({
+                    ...prev,
+                    redis_enabled: on,
+                    clusters: on ? (prev.clusters.length ? prev.clusters : [blankCluster(prev.machine_type)]) : [],
+                  }));
+                  setPreflightResult(null);
+                }}
+              />
+              Include Redis Enterprise cluster
+              <span className="hint" style={{ flexBasis: "100%", margin: 0 }}>
+                Turn this off to deploy only application VMs on the VPC and DNS zone.
+              </span>
+            </label>
+            {form.redis_enabled ? (
+            <>
             <label>
               How many Redis clusters?
               <select
@@ -1231,6 +1307,18 @@ function WizardInner() {
             ))}
 
             <label>
+              Redis Enterprise admin
+              <input value={form.RS_admin} onChange={(e) => update("RS_admin", e.target.value)} />
+            </label>
+            </>
+            ) : (
+              <p className="hint" style={{ gridColumn: "1 / -1" }}>
+                Add companion App VMs or a custom application below. This deploy will not create Redis
+                Enterprise nodes.
+              </p>
+            )}
+
+            <label>
               Zones
               <div className="zone-picker">
                 {(selectedRegion?.zoneSuffixes || []).map((z) => {
@@ -1255,11 +1343,6 @@ function WizardInner() {
                 })}
               </div>
               <span className="hint">Nodes are spread across selected zones for rack awareness</span>
-            </label>
-
-            <label>
-              Redis Enterprise admin
-              <input value={form.RS_admin} onChange={(e) => update("RS_admin", e.target.value)} />
             </label>
 
             <label>
@@ -1302,7 +1385,9 @@ function WizardInner() {
             </label>
 
             <div className="companion-block">
-              <h3 className="companion-title">Companion App VMs (optional)</h3>
+              <h3 className="companion-title">
+                {form.redis_enabled ? "Companion App VMs (optional)" : "Application VMs"}
+              </h3>
               <p className="hint" style={{ marginTop: 0 }}>
                 Extra Compute Engine VMs on the same VPC and DNS zone for clients, memtier, or demos.
                 Leave at None if you only need the Redis cluster.

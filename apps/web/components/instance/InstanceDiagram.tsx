@@ -199,6 +199,9 @@ export function InstanceDiagram({
     folder: String(config.folder || ""),
     youremail: String(config.youremail || ""),
     skip_deletion: Boolean(config.skip_deletion),
+    redis_enabled: Array.isArray(config.clusters)
+      ? (config.clusters as unknown[]).length > 0
+      : config.redis_enabled !== false,
     mode,
     RS_admin: String(config.RS_admin || ""),
     operator_chart_version: String(config.operator_chart_version || ""),

@@ -142,6 +142,12 @@ variable "ssh_public_key" {
   type = string
 }
 
+variable "redis_enabled" {
+  type        = bool
+  default     = true
+  description = "When false, skip Redis Enterprise VMs and deploy only application VMs."
+}
+
 variable "clusters" {
   type = list(object({
     name           = optional(string, "")
@@ -150,7 +156,7 @@ variable "clusters" {
     rof_nvme_disks = number
     RS_release     = string
   }))
-  description = "Redis clusters in this deployment. Empty falls back to the legacy single-cluster variables."
+  description = "Redis clusters in this deployment. Empty means no Redis VMs when redis_enabled is false."
   default     = []
 }
 

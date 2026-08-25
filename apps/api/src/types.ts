@@ -150,6 +150,8 @@ export interface CreateInstanceInput {
   youremail: string;
   /** When true, GCP resources get skip_deletion=yes. */
   skip_deletion?: boolean;
+  /** When false, Terraform skips Redis Enterprise and deploys only application VMs. */
+  redis_enabled?: boolean;
   project: string;
   credentialsFile: string;
   region_name?: string;

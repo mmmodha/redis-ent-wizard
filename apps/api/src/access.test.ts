@@ -221,4 +221,41 @@ describe("buildAccessView", () => {
     assert.equal(view.clusters[1].uiUrl, "https://10.1.1.2:8443");
     assert.equal(view.kubectl, "gcloud container clusters get-credentials demo --zone europe-west1-b");
   });
+
+  it("hides a zero-node Redis cluster left over from an app-only deploy", () => {
+    const view = buildAccessView(
+      {
+        admin_username: "admin@redis.io",
+        admin_password: "x",
+        rs_cluster_dns: "cluster.app-only.demo.redislabs.com",
+        nodes_ip: ["1.2.3.4"],
+        clusters: [
+          {
+            index: 1,
+            name_prefix: "app-only",
+            nodes: 0,
+            machine_type: "e2-standard-2",
+            dns: "cluster.app-only.demo.redislabs.com",
+            nodes_ip: ["1.2.3.4"],
+            node1_name: "app-only-1",
+          },
+        ],
+        app_workloads: [
+          {
+            app_name: "deployment-wizard",
+            dns: "deployment-wizard.app-only.demo.redislabs.com",
+            ip: "10.0.0.8",
+            name: "app-only-deployment-wizard",
+            how_to_ssh: "gcloud compute ssh app-only-deployment-wizard --zone europe-west1-b",
+            zone: "europe-west1-b",
+          },
+        ],
+      },
+      { mode: "vm" },
+    );
+    assert.equal(view.clusters.length, 0);
+    assert.equal(view.apps.length, 1);
+    assert.equal(view.apps[0].name, "app-only-deployment-wizard");
+    assert.equal(view.apps[0].ip, "10.0.0.8");
+  });
 });

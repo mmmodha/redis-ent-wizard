@@ -256,6 +256,12 @@ locals {
           iptables -I INPUT -p tcp --dport 22 -j ACCEPT || true
           iptables -I INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT || true
           systemctl enable docker
+          systemctl start docker
+          for i in $(seq 1 30); do
+            docker info >/dev/null 2>&1 && break
+            sleep 2
+          done
+          docker info
           COMPOSE_PLUGIN=""
           for p in /usr/libexec/docker/cli-plugins/docker-compose /usr/lib/docker/cli-plugins/docker-compose; do
             [ -x "$p" ] && COMPOSE_PLUGIN="$p" && break
@@ -295,12 +301,16 @@ locals {
     rm -rf /opt/app
     install -d -o ubuntu -g ubuntu /opt/app
     set -e
+    %{if local.needs_docker~}
+    systemctl start docker
+    for i in $(seq 1 30); do docker info >/dev/null 2>&1 && break; sleep 2; done
+    docker info
+    %{endif~}
     %{if trimspace(var.git_ref) != ""~}
     sudo -u ubuntu env GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=true git clone --depth 1 --branch '${var.git_ref}' '${var.git_url}' /opt/app
     %{else~}
     sudo -u ubuntu env GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=true git clone --depth 1 '${var.git_url}' /opt/app
     %{endif~}
-    set +e
     %{else~}
     mv /tmp/${var.artifact_filename} /opt/app/${var.artifact_filename}
     %{if var.artifact_type == "binary"~}

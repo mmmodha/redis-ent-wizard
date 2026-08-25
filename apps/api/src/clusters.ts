@@ -72,9 +72,12 @@ export function normalizeClusters(input: {
   rof_nvme_disks?: number;
   RS_release?: string;
   rec_nodes?: number;
+  redis_enabled?: boolean;
 }): ClusterSpec[] {
   const mode = input.mode || "vm";
+  if (input.redis_enabled === false) return [];
   const listed = input.clusters;
+  if (Array.isArray(listed) && listed.length === 0) return [];
   if (listed && listed.length > MAX_CLUSTERS) {
     throw new Error("A deployment can have at most 3 Redis clusters");
   }
@@ -163,8 +166,14 @@ export function totalClusterNodes(clusters: ClusterSpec[]): number {
   return clusters.reduce((sum, c) => sum + c.nodes, 0);
 }
 
+export function hasAppCompute(input: { app?: number; applications?: unknown[] }): boolean {
+  const companion = Math.max(0, Math.floor(Number(input.app) || 0));
+  const named = Array.isArray(input.applications) ? input.applications.length : 0;
+  return companion > 0 || named > 0;
+}
+
 export function countRedisClusters(
-  input: Pick<CreateInstanceInput, "mode" | "clusters" | "clustersize" | "rec_nodes">,
+  input: Pick<CreateInstanceInput, "mode" | "clusters" | "clustersize" | "rec_nodes" | "redis_enabled">,
 ): number {
   try {
     return normalizeClusters(input).length;

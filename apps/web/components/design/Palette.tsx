@@ -15,8 +15,20 @@ const ITEMS: PaletteItem[] = [
   { kind: "loadbalancer", label: "Load balancer", icon: "load-balancer", hint: "Drop on VMs or an app" },
 ];
 
-export function Palette({ mode, disabled }: { mode: "vm" | "gke"; disabled?: boolean }) {
-  const items = mode === "gke" ? ITEMS.filter((i) => i.kind !== "vms") : ITEMS;
+export function Palette({
+  mode,
+  redisEnabled = true,
+  disabled,
+}: {
+  mode: "vm" | "gke";
+  redisEnabled?: boolean;
+  disabled?: boolean;
+}) {
+  const items = ITEMS.filter((i) => {
+    if (mode === "gke" && i.kind === "vms") return false;
+    if (!redisEnabled && (i.kind === "cluster" || i.kind === "database")) return false;
+    return true;
+  });
   return (
     <div className={`design-palette ${disabled ? "design-palette-disabled" : ""}`}>
       <p className="page-eyebrow" style={{ margin: "0 0 8px" }}>

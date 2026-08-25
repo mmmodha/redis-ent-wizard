@@ -119,6 +119,7 @@ export type DesignSettings = {
   folder: string;
   youremail: string;
   skip_deletion: boolean;
+  redis_enabled: boolean;
   mode: "vm" | "gke";
   RS_admin: string;
   operator_chart_version: string;
@@ -344,6 +345,7 @@ export function diagramToCreateInput(
     mode: settings.mode,
     youremail: settings.youremail,
     skip_deletion: settings.skip_deletion,
+    redis_enabled: settings.mode === "vm" ? settings.redis_enabled !== false : true,
     project: settings.project,
     credentialsFile: settings.credentialsFile,
     region_name: settings.region_name,
@@ -354,7 +356,9 @@ export function diagramToCreateInput(
   };
 
   if (settings.mode === "vm") {
-    const first = clusters[0];
+    const redisOn = settings.redis_enabled !== false;
+    const clusterNodes = redisOn ? clusters : [];
+    const first = clusterNodes[0];
     // App VMs come from Set-of-VMs nodes; a load balancer on a VMs node opens ports.
     const appCount = vmsNodes.reduce((n, v) => n + Number(v.data.count), 0);
     const appMachineTypes: string[] = [];
@@ -431,11 +435,11 @@ export function diagramToCreateInput(
     }
 
     Object.assign(base, {
-      clustersize: first ? Number(first.data.nodes) : 3,
+      clustersize: first ? Number(first.data.nodes) : 0,
       machine_type: first?.data.machine_type || "",
       rof_nvme_disks: first ? Number(first.data.rof_nvme_disks) : 0,
       rs_version: first?.data.rs_version || "",
-      clusters: clusters.map((c, i) => ({
+      clusters: clusterNodes.map((c, i) => ({
         name: c.data.name.trim() || undefined,
         nodes: Number(c.data.nodes),
         machine_type: c.data.machine_type,
@@ -710,17 +714,20 @@ export function createInputToDiagram(
   );
 
   const rawClusters = Array.isArray(cfg.clusters) ? (cfg.clusters as StoredClusterCfg[]) : [];
-  const clusterCfgs: StoredClusterCfg[] = rawClusters.length
-    ? rawClusters
-    : [
-        {
-          nodes: dnum(cfg.clustersize, 3),
-          machine_type: dstr(cfg.machine_type),
-          rof_nvme_disks: dnum(cfg.rof_nvme_disks, 0),
-          rs_version: dstr(cfg.rs_version),
-          rec_nodes: dnum(cfg.rec_nodes, 3),
-        },
-      ];
+  const redisOff = cfg.redis_enabled === false || (Array.isArray(cfg.clusters) && rawClusters.length === 0);
+  const clusterCfgs: StoredClusterCfg[] = redisOff
+    ? []
+    : rawClusters.length
+      ? rawClusters
+      : [
+          {
+            nodes: dnum(cfg.clustersize, 3),
+            machine_type: dstr(cfg.machine_type),
+            rof_nvme_disks: dnum(cfg.rof_nvme_disks, 0),
+            rs_version: dstr(cfg.rs_version),
+            rec_nodes: dnum(cfg.rec_nodes, 3),
+          },
+        ];
 
   const clusterIds: string[] = [];
   clusterCfgs.forEach((c, i) => {

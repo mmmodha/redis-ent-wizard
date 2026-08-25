@@ -118,6 +118,22 @@ describe("normalizeClusters", () => {
       /1–3|1-3|at most 3/,
     );
   });
+
+  it("keeps an explicit empty cluster list so an app-only deploy skips Redis", () => {
+    const clusters = normalizeClusters({ mode: "vm", clusters: [], clustersize: 3 });
+    assert.deepEqual(clusters, []);
+    assert.equal(countRedisClusters({ mode: "vm", clusters: [] }), 0);
+  });
+
+  it("skips Redis when redis_enabled is false even if legacy size fields are set", () => {
+    const clusters = normalizeClusters({
+      mode: "vm",
+      redis_enabled: false,
+      clustersize: 5,
+      machine_type: "n2-standard-8",
+    });
+    assert.deepEqual(clusters, []);
+  });
 });
 
 describe("normalizeClusterName", () => {

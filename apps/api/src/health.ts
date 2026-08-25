@@ -68,13 +68,17 @@ function expectedNodes(record: InstanceRecord): number {
     const cfg = record.config as Record<string, unknown> | undefined;
     const raw = record.mode === "gke" ? cfg?.rec_nodes : cfg?.clustersize;
     const n = Number(raw);
-    return Number.isFinite(n) && n > 0 ? n : asStringArray(record.endpoints?.nodes_ip).length || 1;
+    return Number.isFinite(n) && n > 0 ? n : asStringArray(record.endpoints?.nodes_ip).length || 0;
   }
 }
 
 type ProbeTarget = { ips: string[]; user: string; pass: string; expected: number; label: string };
 
 function vmTargets(record: InstanceRecord): ProbeTarget[] {
+  const cfg = (record.config || {}) as unknown as CreateInstanceInput;
+  if (totalClusterNodes(normalizeClusters({ ...cfg, mode: record.mode })) === 0) {
+    return [];
+  }
   const user = String(record.endpoints?.admin_username ?? "");
   const clusters = record.endpoints?.clusters;
   if (Array.isArray(clusters) && clusters.length) {
@@ -179,6 +183,16 @@ async function probeOneVm(target: ProbeTarget, now: string): Promise<ClusterHeal
 async function probeVm(record: InstanceRecord): Promise<ClusterHealth> {
   const now = new Date().toISOString();
   const targets = vmTargets(record);
+  if (!targets.length) {
+    return {
+      state: "ready",
+      nodesActive: 0,
+      nodesExpected: 0,
+      uiReachable: false,
+      checkedAt: now,
+      detail: "Application VMs only — no Redis cluster",
+    };
+  }
   const results = await Promise.all(targets.map((t) => probeOneVm(t, now)));
   const nodesActive = results.reduce((n, r) => n + r.nodesActive, 0);
   const nodesExpected = results.reduce((n, r) => n + r.nodesExpected, 0) || expectedNodes(record);

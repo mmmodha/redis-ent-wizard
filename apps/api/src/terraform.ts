@@ -5,6 +5,7 @@ import {
   appendLog,
   getInstance,
   instanceDir,
+  readLog,
   readOutputs,
   upsertInstance,
   writeOutputs,
@@ -13,7 +14,9 @@ import {
 import { probeHealth } from "./health.js";
 import { applyLicenses, createDatabases, hasDatabases, hasLicenses } from "./databases.js";
 import { acquireJobSlot, isJobActive, releaseJobSlot } from "./jobs.js";
-import type { InstanceRecord } from "./types.js";
+import { normalizeClusters } from "./clusters.js";
+import { appWorkloadsSucceeded, progressExtrasFromConfig } from "./progress.js";
+import type { CreateInstanceInput, InstanceRecord } from "./types.js";
 
 const jobs = new Map<string, { kind: "apply" | "destroy" }>();
 
@@ -229,10 +232,31 @@ export async function startApply(id: string, ownerSub = "system"): Promise<void>
       record = (await getInstance(id))!;
       await collectOutputs(id, workDir, record);
       record = (await getInstance(id))!;
+      const redis = normalizeClusters({
+        ...((record.config || {}) as unknown as CreateInstanceInput),
+        mode: record.mode,
+      }).length > 0;
+      appendLog(id, `\n=== APPLY COMPLETE ${new Date().toISOString()} ===\n`);
+      if (!redis) {
+        const extras = progressExtrasFromConfig(
+          (record.config || {}) as Record<string, unknown>,
+          record.mode,
+        );
+        const names = (extras.appWorkloads || []).map((a) => a.name);
+        if (!appWorkloadsSucceeded(readLog(id), names)) {
+          throw new Error(
+            "Terraform finished but the application did not finish setup on the VM. Check the log for APPWL clone/docker/start steps.",
+          );
+        }
+        record.status = "ready";
+        record.updatedAt = new Date().toISOString();
+        await upsertInstance(record);
+        appendLog(id, "Application VMs are provisioned. No Redis cluster to bootstrap.\n");
+        return;
+      }
       record.status = "bootstrapping";
       record.updatedAt = new Date().toISOString();
       await upsertInstance(record);
-      appendLog(id, `\n=== APPLY COMPLETE ${new Date().toISOString()} ===\n`);
       appendLog(
         id,
         "Waiting for Redis Enterprise to install and the cluster to form before reporting ready.\n",

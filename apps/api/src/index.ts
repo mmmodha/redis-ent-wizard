@@ -54,7 +54,7 @@ import {
 } from "./credentials-store.js";
 import { verifyCredentialFile, verifyCredentialJson } from "./credential-verify.js";
 import { normalizeAppDiskGib, normalizeAppMachineTypes, parseAppExtraPorts } from "./app-web.js";
-import { normalizeClusters } from "./clusters.js";
+import { hasAppCompute, normalizeClusters } from "./clusters.js";
 import { buildAccessView } from "./access.js";
 import { GKE_OPERATOR_RELEASES, VM_RS_RELEASES, resolveGkeOperatorChart } from "./rs-releases.js";
 import { audit, listAudit } from "./audit.js";
@@ -128,12 +128,13 @@ const createSchema = z.object({
     .max(63)
     .refine((v) => isValidCreatedBy(v), { message: CREATED_BY_ERROR }),
   skip_deletion: z.boolean().optional(),
+  redis_enabled: z.boolean().optional(),
   project: z.string().min(1),
   credentialsFile: z.string().min(1),
   region_name: z.string().optional(),
   env: z.string().optional(),
   folder: z.string().max(60).optional(),
-  clustersize: z.number().int().min(1).max(9).optional(),
+  clustersize: z.number().int().min(0).max(9).optional(),
   machine_type: z.string().optional(),
   RS_release: z.string().optional(),
   RS_admin: z.string().optional(),
@@ -166,7 +167,7 @@ const createSchema = z.object({
         license: z.string().max(20000).optional(),
       }),
     )
-    .min(1)
+    .min(0)
     .max(3)
     .optional(),
   applications: z.array(applicationSchema).max(8).optional(),
@@ -753,14 +754,25 @@ app.post("/instances", async (req, reply) => {
   try {
     const clusters = normalizeClusters(input);
     input.clusters = clusters;
-    input.clustersize = clusters[0].nodes;
-    input.machine_type = clusters[0].machine_type;
-    input.rof_nvme_disks = clusters[0].rof_nvme_disks;
-    input.RS_release = clusters[0].RS_release;
-    input.rs_version = clusters[0].rs_version;
-    if (input.mode === "gke") {
-      input.rec_nodes = clusters[0].rec_nodes;
-      input.operator_chart_version = resolveGkeOperatorChart(input.operator_chart_version);
+    input.redis_enabled = clusters.length > 0;
+    if (clusters.length) {
+      input.clustersize = clusters[0].nodes;
+      input.machine_type = clusters[0].machine_type;
+      input.rof_nvme_disks = clusters[0].rof_nvme_disks;
+      input.RS_release = clusters[0].RS_release;
+      input.rs_version = clusters[0].rs_version;
+      if (input.mode === "gke") {
+        input.rec_nodes = clusters[0].rec_nodes;
+        input.operator_chart_version = resolveGkeOperatorChart(input.operator_chart_version);
+      }
+    } else if (input.mode === "gke") {
+      return reply.code(400).send({
+        error: "GKE deploys need a Redis Enterprise cluster. Use VM mode to deploy only application VMs.",
+      });
+    } else if (!hasAppCompute(input)) {
+      return reply.code(400).send({
+        error: "Turn Redis off only when this deploy includes a set of VMs or an application.",
+      });
     }
   } catch (err) {
     return reply.code(400).send({
