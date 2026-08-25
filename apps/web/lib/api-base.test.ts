@@ -3,9 +3,9 @@ import { describe, it } from "node:test";
 import { resolveApiBase } from "./api-base.js";
 
 describe("resolveApiBase", () => {
-  it("uses relative URLs in the browser when the public API is same-origin", () => {
-    assert.equal(resolveApiBase({ isBrowser: true, publicUrl: "same-origin" }), "");
-    assert.equal(resolveApiBase({ isBrowser: true, publicUrl: "/" }), "");
+  it("uses the /api prefix in the browser so Next.js pages are not stolen by the API", () => {
+    assert.equal(resolveApiBase({ isBrowser: true, publicUrl: "same-origin" }), "/api");
+    assert.equal(resolveApiBase({ isBrowser: true, publicUrl: "/" }), "/api");
   });
 
   it("keeps localhost for local Next.js when no public URL is set", () => {

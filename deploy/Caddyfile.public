@@ -1,6 +1,8 @@
 (app) {
-	@api path /health /auth/* /credentials* /instances* /gcp* /preflight /folders /owners /admin* /releases* /artifacts*
+	# Next.js owns /credentials and /instances/* ; Fastify is only under /api.
+	@api path /api*
 	handle @api {
+		uri strip_prefix /api
 		reverse_proxy api:4000 {
 			flush_interval -1
 		}

@@ -4,8 +4,9 @@
 :443 {
 	tls /certs/cert.pem /certs/key.pem
 
-	@api path /health /auth/* /credentials* /instances* /gcp* /preflight /folders /owners /admin* /releases* /artifacts*
+	@api path /api*
 	handle @api {
+		uri strip_prefix /api
 		reverse_proxy api:4000 {
 			flush_interval -1
 		}

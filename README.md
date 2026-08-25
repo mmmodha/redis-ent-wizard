@@ -169,7 +169,7 @@ HTTP_PORT=8080 docker compose up --build
 - **`.env` file:** `HTTP_PORT=8080` next to `docker-compose.yml` (do not commit `.env`)
 - **Wizard / systemd:** command `HTTP_PORT=8080 docker compose up --build`, and open **8080** on the VM firewall
 
-Rebuild (`--build`) after pulling this change so the web image uses same-origin API calls. Do not map 3001 or 4000 on the host.
+Rebuild (`--build`) after pulling this change so the web image uses same-origin API calls under `/api`. Caddy sends `/api/*` to Fastify and everything else (including `/credentials` and `/instances/...`) to the UI.
 
 You do **not** need a `.env` file for credentials — drop JSON keys into `data/credentials/` (local/`AUTH_DISABLED`) or use **Credentials → Add your JSON** when signed in. See `.env.example` and [docs/ENTERPRISE.md](docs/ENTERPRISE.md) for Okta, Postgres, quotas, and TLS.
 

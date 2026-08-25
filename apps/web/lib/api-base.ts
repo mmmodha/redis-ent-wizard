@@ -8,6 +8,6 @@ export function resolveApiBase(opts: {
   if (!opts.isBrowser) {
     return opts.internalUrl || (sameOrigin ? "http://localhost:4000" : publicUrl) || "http://localhost:4000";
   }
-  if (sameOrigin) return "";
+  if (sameOrigin) return "/api";
   return publicUrl || "http://localhost:4000";
 }
