@@ -164,12 +164,10 @@ Compose publishes **one** host port. The UI and API stay on the Docker network; 
 HTTP_PORT=8080 docker compose up --build
 ```
 
-| | |
-| --- | --- |
-| Default | `8080` if `HTTP_PORT` is unset |
-| Shell | `HTTP_PORT=8080 docker compose up --build` |
-| `.env` file | `HTTP_PORT=8080` next to `docker-compose.yml` (do not commit `.env`) |
-| Wizard / systemd | command `HTTP_PORT=8080 docker compose up --build`, and open **8080** on the VM firewall |
+- **Default:** `8080` if `HTTP_PORT` is unset
+- **Shell:** `HTTP_PORT=8080 docker compose up --build`
+- **`.env` file:** `HTTP_PORT=8080` next to `docker-compose.yml` (do not commit `.env`)
+- **Wizard / systemd:** command `HTTP_PORT=8080 docker compose up --build`, and open **8080** on the VM firewall
 
 Rebuild (`--build`) after pulling this change so the web image uses same-origin API calls. Do not map 3001 or 4000 on the host.
 
