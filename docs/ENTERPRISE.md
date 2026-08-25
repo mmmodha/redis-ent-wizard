@@ -45,6 +45,14 @@ docker compose --profile enterprise up --build
 
 Legacy `data/instances.json` is migrated into Postgres when the table is empty.
 
+## Public HTTP port
+
+```bash
+HTTP_PORT=8080 docker compose up --build
+```
+
+Caddy publishes only that host port. The web image is built with `NEXT_PUBLIC_API_URL=same-origin`. Put `HTTP_PORT=8080` in `.env` instead of prefixing the command if you prefer.
+
 ## TLS
 
 ```bash

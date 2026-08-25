@@ -841,7 +841,7 @@ function ApplicationForm({
               onChange={(e) => set<ApplicationData>({ command: e.target.value })}
               placeholder={
                 data.artifact.kind === "git" && data.artifact.runInDocker
-                  ? "docker compose up -d"
+                  ? "HTTP_PORT=8080 docker compose up --build"
                   : "empty = stage only"
               }
             />

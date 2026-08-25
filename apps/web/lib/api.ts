@@ -1,8 +1,11 @@
+import { resolveApiBase } from "./api-base";
+
 function apiBase(): string {
-  if (typeof window === "undefined") {
-    return process.env.API_INTERNAL_URL || process.env.NEXT_PUBLIC_API_URL || "http://localhost:4000";
-  }
-  return process.env.NEXT_PUBLIC_API_URL || "http://localhost:4000";
+  return resolveApiBase({
+    isBrowser: typeof window !== "undefined",
+    publicUrl: process.env.NEXT_PUBLIC_API_URL,
+    internalUrl: process.env.API_INTERNAL_URL,
+  });
 }
 
 function authHeaders(extra?: HeadersInit): HeadersInit {

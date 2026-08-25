@@ -32,9 +32,10 @@ For **GKE** add `roles/container.clusterAdmin`, and `roles/iam.serviceAccountUse
 git clone https://github.com/mmmodha/redis-ent-wizard.git
 cd redis-ent-wizard
 docker compose up --build
+# or pick the host port: HTTP_PORT=8080 docker compose up --build
 ```
 
-Open **http://localhost:3000**
+Open **http://localhost:8080**
 
 You do **not** need to copy the SA JSON onto disk. Go to **Credentials → Add your JSON**, paste the key, **Save**, then **Verify**. The wizard’s credentials dropdown will list it.
 
@@ -42,10 +43,17 @@ Optional alternative: `cp /path/to/your-sa.json data/credentials/sa.json` and sk
 
 | Port | Service |
 | --- | --- |
-| 3000 | UI |
-| 4000 | API |
+| `HTTP_PORT` (default **8080**) | UI + API (Caddy) |
 
-No `.env` is required for a local test. `AUTH_DISABLED=true` is the Compose default.
+No `.env` is required for a local test. `AUTH_DISABLED=true` is the Compose default. Put `HTTP_PORT=8080` in `.env` if you want Compose to read it without a prefix on the command.
+
+### VM / firewall: one public port
+
+```bash
+HTTP_PORT=8080 docker compose up --build
+```
+
+Open **http://\<vm-ip\>:8080**. Firewall: **22** and that port only. The VM still needs `~/.ssh/google_compute_engine` so Terraform can SSH to cluster/app VMs it creates.
 
 ### Smoke test in the UI
 
@@ -139,14 +147,31 @@ Every create runs a preflight against the GCP APIs (also enforced server-side, s
 # 1. Copy your GCP SA key
 cp /path/to/sa.json data/credentials/sa.json
 
-# 2. Start the stack
-docker compose up --build
+# 2. Start the stack (host port: HTTP_PORT, default 8080)
+HTTP_PORT=8080 docker compose up --build
 
 # 3. Open the UI
-open http://localhost:3000
+open http://localhost:8080
 ```
 
-API listens on `http://localhost:4000`.
+Caddy serves the UI and API on that one port.
+
+## HTTP_PORT
+
+Compose publishes **one** host port. The UI and API stay on the Docker network; Caddy on `edge` is what you open in a browser.
+
+```bash
+HTTP_PORT=8080 docker compose up --build
+```
+
+| | |
+| --- | --- |
+| Default | `8080` if `HTTP_PORT` is unset |
+| Shell | `HTTP_PORT=8080 docker compose up --build` |
+| `.env` file | `HTTP_PORT=8080` next to `docker-compose.yml` (do not commit `.env`) |
+| Wizard / systemd | command `HTTP_PORT=8080 docker compose up --build`, and open **8080** on the VM firewall |
+
+Rebuild (`--build`) after pulling this change so the web image uses same-origin API calls. Do not map 3001 or 4000 on the host.
 
 You do **not** need a `.env` file for credentials — drop JSON keys into `data/credentials/` (local/`AUTH_DISABLED`) or use **Credentials → Add your JSON** when signed in. See `.env.example` and [docs/ENTERPRISE.md](docs/ENTERPRISE.md) for Okta, Postgres, quotas, and TLS.
 

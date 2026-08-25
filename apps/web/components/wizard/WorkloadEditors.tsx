@@ -554,7 +554,7 @@ export function ApplicationsEditor({
                     onChange={(e) => patch(i, { command: e.target.value })}
                     placeholder={
                       app.artifact.kind === "git" && app.artifact.runInDocker
-                        ? "docker compose up -d"
+                        ? "HTTP_PORT=8080 docker compose up --build"
                         : "empty = stage only"
                     }
                   />
