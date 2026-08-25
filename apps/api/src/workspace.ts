@@ -136,6 +136,8 @@ function buildVmApplications(
     artifact_local_path: app.artifactLocalPath || "",
     artifact_type: app.artifact?.type || "binary",
     artifact_filename: app.artifactFilename || (app.artifact?.type === "jar" ? "app.jar" : "app"),
+    git_url: app.artifact?.kind === "git" ? app.artifact.ref : "",
+    git_ref: app.artifact?.kind === "git" ? app.artifact.branch || "" : "",
     command: app.command || "",
     vm_count: app.vm_count ?? 1,
     machine_type: app.machine_type || "e2-standard-2",
@@ -348,6 +350,8 @@ variable "applications" {
     artifact_local_path = string
     artifact_type       = string
     artifact_filename   = string
+    git_url             = string
+    git_ref             = string
     command             = string
     vm_count            = number
     machine_type        = string

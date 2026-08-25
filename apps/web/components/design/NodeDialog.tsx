@@ -5,8 +5,10 @@ import { MachineTypePicker } from "@/components/MachineTypePicker";
 import { uploadArtifact, type MachineTypeInfo, type RsReleaseInfo } from "@/lib/api";
 import {
   APP_REQUIREMENTS,
+  ARTIFACT_SOURCE_OPTIONS,
   DB_MODULES,
   EVICTION_POLICIES,
+  withGitSourceRequirements,
   type ApplicationData,
   type ClusterData,
   type DatabaseData,
@@ -15,6 +17,9 @@ import {
   type RootData,
   type VmsData,
 } from "@/lib/diagram";
+import { canEnableDbReplication, dbReplicationHint, effectiveDbReplication } from "@/lib/db-replication";
+import { useDesignContext } from "@/components/design/DesignContext";
+import { clusterTrialShardGate } from "@/lib/trial-shards";
 
 export type DialogTarget = {
   id: string;
@@ -31,6 +36,8 @@ type Props = {
   probeZone: string;
   /** Whether the database's parent cluster has NVMe disks (enables Flex). */
   clusterHasNvme?: boolean;
+  /** Redis node count of the parent cluster (locks HA when < 2). */
+  clusterNodes?: number;
   onSave: (data: DesignNodeData) => void;
   onCancel: () => void;
   onDelete?: () => void;
@@ -51,6 +58,7 @@ export function NodeDialog({
   vmReleases,
   probeZone,
   clusterHasNvme,
+  clusterNodes = 0,
   onSave,
   onCancel,
   onDelete,
@@ -110,7 +118,13 @@ export function NodeDialog({
           ) : null}
 
           {target.type === "database" ? (
-            <DatabaseForm data={draft as DatabaseData} set={set} clusterHasNvme={Boolean(clusterHasNvme)} />
+            <DatabaseForm
+              nodeId={target.id}
+              data={draft as DatabaseData}
+              set={set}
+              clusterHasNvme={Boolean(clusterHasNvme)}
+              clusterNodes={clusterNodes}
+            />
           ) : null}
 
           {target.type === "vms" ? (
@@ -166,7 +180,20 @@ export function NodeDialog({
             <button type="button" className="btn" onClick={onCancel}>
               Cancel
             </button>
-            <button type="button" className="btn btn-primary" onClick={() => onSave(draft)}>
+            <button
+              type="button"
+              className="btn btn-primary"
+              onClick={() => {
+                if (draft.kind === "database") {
+                  onSave({
+                    ...draft,
+                    replication: effectiveDbReplication(Boolean(draft.replication), clusterNodes),
+                  });
+                  return;
+                }
+                onSave(draft);
+              }}
+            >
               Save
             </button>
           </div>
@@ -316,23 +343,42 @@ function ClusterForm({
           rows={4}
           placeholder="optional"
         />
-        <span className="hint">Optional. Leave blank to use the built-in trial license.</span>
+        <span className="hint">Optional. Leave blank to use the 4-shard trial license.</span>
       </label>
     </div>
   );
 }
 
 function DatabaseForm({
+  nodeId,
   data,
   set,
   clusterHasNvme,
+  clusterNodes,
 }: {
+  nodeId: string;
   data: DatabaseData;
   set: <T extends DesignNodeData>(p: Partial<T>) => void;
   clusterHasNvme: boolean;
+  clusterNodes: number;
 }) {
+  const { nodes } = useDesignContext();
+  const parent = nodes.find((n) => n.id === nodes.find((x) => x.id === nodeId)?.parentId);
+  const parentCluster = parent?.data.kind === "cluster" ? (parent.data as ClusterData) : undefined;
+  const siblings = nodes
+    .filter((n) => n.parentId === parent?.id && n.data.kind === "database" && n.id !== nodeId)
+    .map((n) => n.data as DatabaseData);
+  const trial = clusterTrialShardGate({
+    name: parentCluster?.name,
+    license: parentCluster?.license,
+    databases: [...siblings, data],
+    nodes: clusterNodes,
+  });
+  const allowReplication = canEnableDbReplication(clusterNodes);
+  const replicationHint = dbReplicationHint(clusterNodes);
   return (
     <div className="grid">
+      {trial.blocked ? <div className="notice notice-warn">{trial.message}</div> : null}
       <label>
         Database name
         <input
@@ -350,13 +396,17 @@ function DatabaseForm({
           onChange={(e) => set<DatabaseData>({ memory_gb: Number(e.target.value) })}
         />
       </label>
-      <label className="design-check-row">
+      <label
+        className="design-check-row"
+        title={allowReplication ? undefined : replicationHint}
+      >
         <input
           type="checkbox"
-          checked={data.replication}
+          disabled={!allowReplication}
+          checked={allowReplication && data.replication}
           onChange={(e) => set<DatabaseData>({ replication: e.target.checked })}
         />
-        Replication (HA)
+        Replication (HA){allowReplication ? "" : " — needs 2+ nodes on the cluster"}
       </label>
       <label
         className="design-check-row"
@@ -653,15 +703,27 @@ function ApplicationForm({
           <div className="design-field-wide">
             <span className="machine-picker-label">Artifact source</span>
             <div className="design-radio-row">
-              {(["upload", "url", "gcs"] as const).map((k) => (
-                <label key={k} className="design-check-row">
+              {ARTIFACT_SOURCE_OPTIONS.map((opt) => (
+                <label key={opt.kind} className="design-check-row">
                   <input
                     type="radio"
                     name="artifact-kind"
-                    checked={data.artifact.kind === k}
-                    onChange={() => set<ApplicationData>({ artifact: { ...data.artifact, kind: k } })}
+                    checked={data.artifact.kind === opt.kind}
+                    onChange={() =>
+                      set<ApplicationData>({
+                        artifact: {
+                          ...data.artifact,
+                          kind: opt.kind,
+                          runInDocker: opt.kind === "git" ? Boolean(data.artifact.runInDocker) : false,
+                        },
+                        requirements:
+                          opt.kind === "git"
+                            ? withGitSourceRequirements(data.requirements, Boolean(data.artifact.runInDocker))
+                            : data.requirements,
+                      })
+                    }
                   />
-                  {k === "upload" ? "Upload" : k === "url" ? "URL" : "GCS path"}
+                  {opt.label}
                 </label>
               ))}
             </div>
@@ -690,6 +752,52 @@ function ApplicationForm({
                 <span className="hint mono">stored: {data.artifact.ref}</span>
               ) : null}
             </div>
+          ) : data.artifact.kind === "git" ? (
+            <>
+              <label className="design-field-wide">
+                GitHub URL
+                <input
+                  value={data.artifact.ref}
+                  onChange={(e) =>
+                    set<ApplicationData>({
+                      artifact: { ...data.artifact, ref: e.target.value, type: "binary" },
+                    })
+                  }
+                  placeholder="https://github.com/org/repo"
+                />
+              </label>
+              <label>
+                Branch or tag
+                <input
+                  value={data.artifact.branch || ""}
+                  onChange={(e) =>
+                    set<ApplicationData>({
+                      artifact: { ...data.artifact, branch: e.target.value },
+                    })
+                  }
+                  placeholder="default branch"
+                />
+              </label>
+              <label className="design-check-row design-field-wide">
+                <input
+                  type="checkbox"
+                  checked={Boolean(data.artifact.runInDocker)}
+                  onChange={(e) =>
+                    set<ApplicationData>({
+                      artifact: { ...data.artifact, runInDocker: e.target.checked },
+                      requirements: withGitSourceRequirements(data.requirements, e.target.checked),
+                    })
+                  }
+                />
+                Run with Docker
+              </label>
+              <p className="hint design-field-wide">
+                The VM clones this repo into /opt/app and installs git.
+                {data.artifact.runInDocker
+                  ? " Docker is installed so you can run Compose or docker run."
+                  : " Turn on Docker only if the app should run in a container."}
+              </p>
+            </>
           ) : (
             <label className="design-field-wide">
               {data.artifact.kind === "url" ? "Artifact URL" : "GCS path"}
@@ -709,6 +817,7 @@ function ApplicationForm({
             </label>
           )}
 
+          {data.artifact.kind === "git" ? null : (
           <label>
             Artifact type
             <select
@@ -723,15 +832,24 @@ function ApplicationForm({
               <option value="binary">binary</option>
             </select>
           </label>
+          )}
 
           <label className="design-field-wide">
             Command
             <input
               value={data.command}
               onChange={(e) => set<ApplicationData>({ command: e.target.value })}
-              placeholder="empty = stage only"
+              placeholder={
+                data.artifact.kind === "git" && data.artifact.runInDocker
+                  ? "docker compose up -d"
+                  : "empty = stage only"
+              }
             />
-            <span className="hint">Leave empty to stage the artifact without starting it.</span>
+            <span className="hint">
+              {data.artifact.kind === "git"
+                ? "Runs from the cloned repo in /opt/app. Leave empty to clone without starting."
+                : "Leave empty to stage the artifact without starting it."}
+            </span>
           </label>
 
           <label>
@@ -776,12 +894,17 @@ function ApplicationForm({
             <span className="machine-picker-label">Requirements to install</span>
             <div className="design-badges">
               {APP_REQUIREMENTS.map((r) => {
-                const on = data.requirements.includes(r.id);
+                const requiredGit = data.artifact.kind === "git" && r.id === "git";
+                const requiredDocker =
+                  data.artifact.kind === "git" && data.artifact.runInDocker && r.id === "docker";
+                const locked = requiredGit || requiredDocker;
+                const on = data.requirements.includes(r.id) || locked;
                 return (
                   <label key={r.id} className="design-check-row">
                     <input
                       type="checkbox"
                       checked={on}
+                      disabled={locked}
                       onChange={(e) =>
                         set<ApplicationData>({
                           requirements: e.target.checked
@@ -795,7 +918,13 @@ function ApplicationForm({
                 );
               })}
             </div>
-            <span className="hint">Installed with apt before the app starts.</span>
+            <span className="hint">
+              {data.artifact.kind === "git"
+                ? data.artifact.runInDocker
+                  ? "git and Docker are installed automatically for this GitHub source."
+                  : "git is installed automatically to clone the repo."
+                : "Installed with apt before the app starts."}
+            </span>
           </div>
         </>
       ) : (

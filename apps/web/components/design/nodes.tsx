@@ -4,7 +4,9 @@ import { useState } from "react";
 import { Handle, Position, type NodeProps, type NodeTypes } from "@xyflow/react";
 import { BrandIcon, type IconName } from "@/components/design/BrandIcon";
 import { clusterCapacityMB, useDesignContext } from "@/components/design/DesignContext";
+import { clusterCapacityCaption, clusterCapacityClass } from "@/lib/cluster-capacity";
 import { predictedDatabaseEndpoint } from "@/lib/diagram";
+import { clusterRedisNodeCount, effectiveDbReplication } from "@/lib/db-replication";
 import type {
   ApplicationData,
   ClusterData,
@@ -13,11 +15,6 @@ import type {
   RootData,
   VmsData,
 } from "@/lib/diagram";
-
-function fmtGB(mb: number): string {
-  const gb = mb / 1024;
-  return `${gb % 1 === 0 ? gb.toFixed(0) : gb.toFixed(1)} GB`;
-}
 
 function NodeHeader({ icon, title, tag }: { icon: IconName; title: string; tag?: string }) {
   return (
@@ -49,22 +46,25 @@ export function RootNode({ data }: NodeProps) {
 
 export function ClusterNode({ id, data }: NodeProps) {
   const d = data as ClusterData;
-  const { machineTypes, nodes } = useDesignContext();
+  const { machineTypes, nodes, capacityIfUnavailable = "pending" } = useDesignContext();
   const parentId = nodes.find((x) => x.id === id)?.parentId;
   const gke = nodes.some((n) => n.id === parentId && n.data.kind === "gke");
   const count = gke ? d.rec_nodes : d.nodes;
   const cap = clusterCapacityMB(id, count, d.machine_type, machineTypes, nodes);
-  const negative = cap.remainingMB < 0;
+  const catalogReady = Boolean(machineTypes.find((m) => m.name === d.machine_type)?.memoryMb);
+  const capInput = {
+    catalogReady,
+    remainingMB: cap.remainingMB,
+    ifUnavailable: capacityIfUnavailable,
+  };
+  const caption = clusterCapacityCaption(capInput);
+  const capClass = clusterCapacityClass(capInput);
   return (
     <div className="design-cluster">
       <Handle type="target" position={Position.Left} className="design-handle" />
       <NodeHeader icon="cluster" title={d.name.trim() || "Redis cluster"} tag={`${count} nodes`} />
       <div className="design-node-meta mono">{d.machine_type || "machine type"}</div>
-      <div className={`design-cap ${negative ? "design-cap-bad" : ""}`}>
-        {machineTypes.length
-          ? `${negative ? "over by " : "free "}${fmtGB(Math.abs(cap.remainingMB))}`
-          : "capacity pending"}
-      </div>
+      {caption ? <div className={`design-cap ${capClass}`.trim()}>{caption}</div> : null}
     </div>
   );
 }
@@ -77,6 +77,11 @@ export function DatabaseNode({ id, data }: NodeProps) {
   const parentId = nodes.find((n) => n.id === id)?.parentId;
   const clusterIndex = clusters.findIndex((c) => c.id === parentId);
   const clusterNameRaw = ((clusters[clusterIndex]?.data as { name?: string } | undefined)?.name) || "";
+  const parentCluster = clusters[clusterIndex]?.data as ClusterData | undefined;
+  const ha = effectiveDbReplication(
+    Boolean(d.replication),
+    clusterRedisNodeCount(parentCluster, settings?.mode || "vm"),
+  );
   const ep = settings
     ? predictedDatabaseEndpoint(settings, clusterNameRaw, clusterIndex < 0 ? 0 : clusterIndex, d.port)
     : null;
@@ -85,7 +90,10 @@ export function DatabaseNode({ id, data }: NodeProps) {
       <NodeHeader icon="database" title={d.name.trim() || "database"} />
       <div className="design-node-meta mono">{d.memory_gb} GB</div>
       <div className="design-badges">
-        {d.replication ? <span className="design-badge">HA</span> : null}
+        {ha ? <span className="design-badge">HA</span> : null}
+        {d.liveStatus ? (
+          <span className={`design-badge design-badge-live design-badge-${d.liveStatus}`}>{String(d.liveStatus)}</span>
+        ) : null}
         {d.sharding ? <span className="design-badge">{d.shards_count}× sharded</span> : null}
       </div>
       {ep ? (
@@ -142,7 +150,9 @@ export function ApplicationNode({ data }: NodeProps) {
   const d = data as ApplicationData;
   const summary =
     d.artifact && d.artifact.ref
-      ? `${d.artifact.kind}: ${d.artifact.ref}`
+      ? d.artifact.kind === "git"
+        ? `github: ${d.artifact.ref}`
+        : `${d.artifact.kind}: ${d.artifact.ref}`
       : d.image
         ? d.image
         : "no source yet";
@@ -151,6 +161,11 @@ export function ApplicationNode({ data }: NodeProps) {
       <Handle type="target" position={Position.Left} className="design-handle" />
       <NodeHeader icon="application" title={d.name.trim() || "Application"} />
       <div className="design-node-meta mono">{summary}</div>
+      {d.liveStatus ? (
+        <div className="design-badges">
+          <span className={`design-badge design-badge-live design-badge-${d.liveStatus}`}>{String(d.liveStatus)}</span>
+        </div>
+      ) : null}
       <Handle type="source" position={Position.Right} className="design-handle" />
     </div>
   );

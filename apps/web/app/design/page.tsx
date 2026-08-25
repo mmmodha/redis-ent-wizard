@@ -20,6 +20,7 @@ import {
   type Node,
 } from "@xyflow/react";
 
+import Link from "next/link";
 import { CheckList } from "@/components/CheckList";
 import { DeploymentSettings, ownerError, type DesignMeta } from "@/components/design/DeploymentSettings";
 import { DesignProvider, clusterCapacityMB } from "@/components/design/DesignContext";
@@ -33,6 +34,8 @@ import {
   diagramToCreateInput,
   initialNodeStyle,
   layoutDiagram,
+  type ClusterData,
+  type DatabaseData,
   type DesignEdge,
   type DesignNode,
   type DesignNodeData,
@@ -40,6 +43,12 @@ import {
   type DesignSettings,
 } from "@/lib/diagram";
 import { useGcpLookups } from "@/lib/useGcpLookups";
+import { canUseDesignerCanvas, designerLockReason } from "@/lib/designer-gate";
+import {
+  canEnableDbReplication,
+  clusterRedisNodeCount,
+} from "@/lib/db-replication";
+import { clusterTrialShardGate, omitCreateInputDatabases } from "@/lib/trial-shards";
 
 const ROOT_ID = "root";
 const ROOT_SIZE = { width: 960, height: 560 };
@@ -186,6 +195,16 @@ function DesignCanvas() {
     [meta, gcp.settings],
   );
 
+  const validCredential = gcp.credentials.find((c) => c.file === gcp.settings.credentialsFile)?.valid;
+  const canvasReady = canUseDesignerCanvas({
+    credentialsFile: gcp.settings.credentialsFile,
+    credentialValid: validCredential,
+  });
+  const lockReason = designerLockReason({
+    credentialsFile: gcp.settings.credentialsFile,
+    credentialValid: validCredential,
+  });
+
   const nodeById = useCallback((id: string) => nodes.find((n) => n.id === id), [nodes]);
 
   /** Deepest child (of root) whose rect contains the flow point, optionally filtered by kind. */
@@ -210,6 +229,10 @@ function DesignCanvas() {
   const onDrop = useCallback(
     (event: React.DragEvent) => {
       event.preventDefault();
+      if (!canvasReady) {
+        showToast("Select a service account key before adding components.");
+        return;
+      }
       const kind = event.dataTransfer.getData(PALETTE_MIME) as NodeKind;
       if (!kind) return;
 
@@ -218,15 +241,16 @@ function DesignCanvas() {
       let parentId = ROOT_ID;
       let relative = point;
       let lbTargetId: string | undefined;
+      let clusterHost: DesignNode | undefined;
 
       if (kind === "database") {
-        const cluster = nodeAt(point, ["cluster"]);
-        if (!cluster) {
+        clusterHost = nodeAt(point, ["cluster"]);
+        if (!clusterHost) {
           showToast("A database must be dropped inside a Redis cluster.");
           return;
         }
-        parentId = cluster.id;
-        relative = { x: point.x - cluster.position.x, y: point.y - cluster.position.y };
+        parentId = clusterHost.id;
+        relative = { x: point.x - clusterHost.position.x, y: point.y - clusterHost.position.y };
       } else if (kind === "loadbalancer") {
         // A load balancer is an external peer, not nested. If dropped on a set
         // of VMs or an application, link it to that target with an edge.
@@ -249,13 +273,19 @@ function DesignCanvas() {
 
       const id = `${kind}-${idRef.current++}`;
       const style = initialNodeStyle(kind);
+      const data = defaultNodeData(kind, gcp.machineTypes, gcp.vmReleases);
+      if (kind === "database") {
+        (data as DatabaseData).replication = canEnableDbReplication(
+          clusterRedisNodeCount(clusterHost?.data as ClusterData | undefined, meta.mode),
+        );
+      }
       const newNode: DesignNode = {
         id,
         type: kind,
         position: relative,
         parentId,
         extent: "parent",
-        data: defaultNodeData(kind, gcp.machineTypes, gcp.vmReleases),
+        data,
         ...(style ? { style } : {}),
       };
       setNodes((prev) => layoutDiagram(prev.concat(newNode)));
@@ -271,13 +301,16 @@ function DesignCanvas() {
       // Open the editor immediately so the drop captures its fields.
       setDialog({ id, type: kind, data: newNode.data });
     },
-    [screenToFlowPosition, nodeAt, meta.mode, gcp.machineTypes, gcp.vmReleases, setNodes, setEdges, resetPreflight, showToast],
+    [canvasReady, screenToFlowPosition, nodeAt, meta.mode, gcp.machineTypes, gcp.vmReleases, setNodes, setEdges, resetPreflight, showToast],
   );
 
-  const onDragOver = useCallback((event: React.DragEvent) => {
-    event.preventDefault();
-    event.dataTransfer.dropEffect = "move";
-  }, []);
+  const onDragOver = useCallback(
+    (event: React.DragEvent) => {
+      event.preventDefault();
+      event.dataTransfer.dropEffect = canvasReady ? "move" : "none";
+    },
+    [canvasReady],
+  );
 
   const isValidConnection = useCallback(
     (c: Connection | Edge) => {
@@ -297,6 +330,7 @@ function DesignCanvas() {
 
   const onConnect = useCallback(
     (params: Connection) => {
+      if (!canvasReady) return;
       if (!isValidConnection(params)) {
         showToast("Connect an application to a cluster, or a load balancer to a set of VMs or application.");
         return;
@@ -310,15 +344,16 @@ function DesignCanvas() {
       setNodes((prev) => layoutDiagram(prev));
       resetPreflight();
     },
-    [isValidConnection, nodeById, setEdges, setNodes, resetPreflight, showToast],
+    [canvasReady, isValidConnection, nodeById, setEdges, setNodes, resetPreflight, showToast],
   );
 
   const onNodeClick = useCallback(
     (_: React.MouseEvent, node: Node) => {
+      if (!canvasReady) return;
       if (node.data.kind === "network") return; // nothing to edit on the VPC root
       setDialog({ id: node.id, type: node.type || (node.data.kind as string), data: node.data as DesignNodeData });
     },
-    [],
+    [canvasReady],
   );
 
   const removeNode = useCallback(
@@ -348,11 +383,21 @@ function DesignCanvas() {
   const saveDialog = useCallback(
     (data: DesignNodeData) => {
       if (!dialog) return;
-      setNodes((prev) => layoutDiagram(prev.map((n) => (n.id === dialog.id ? { ...n, data } : n))));
+      setNodes((prev) => {
+        let next = prev.map((n) => (n.id === dialog.id ? { ...n, data } : n));
+        if (data.kind === "cluster" && !canEnableDbReplication(clusterRedisNodeCount(data, meta.mode))) {
+          next = next.map((n) =>
+            n.parentId === dialog.id && n.data.kind === "database"
+              ? { ...n, data: { ...n.data, replication: false } }
+              : n,
+          );
+        }
+        return layoutDiagram(next);
+      });
       setDialog(null);
       resetPreflight();
     },
-    [dialog, setNodes, resetPreflight],
+    [dialog, meta.mode, setNodes, resetPreflight],
   );
 
   // Client-side capacity check surfaced before preflight.
@@ -369,11 +414,32 @@ function DesignCanvas() {
       .filter((c) => c.negative);
   }, [nodes, gcp.machineTypes]);
 
+  const trialShardBlocks = useMemo(
+    () =>
+      nodes
+        .filter((n) => n.data.kind === "cluster")
+        .map((n, i) => {
+          const d = n.data as ClusterData;
+          const parentIsGke = nodes.some((p) => p.id === n.parentId && p.data.kind === "gke");
+          const count = parentIsGke ? d.rec_nodes : d.nodes;
+          const dbs = nodes
+            .filter((x) => x.parentId === n.id && x.data.kind === "database")
+            .map((x) => x.data as DatabaseData);
+          return clusterTrialShardGate({
+            name: d.name.trim() || `cluster ${i + 1}`,
+            license: d.license,
+            databases: dbs,
+            nodes: count,
+          });
+        })
+        .filter((g) => g.blocked),
+    [nodes],
+  );
+
   const oe = ownerError(meta.youremail);
   const hasCluster = nodes.some((n) => n.data.kind === "cluster");
-  const validCredential = gcp.credentials.find((c) => c.file === gcp.settings.credentialsFile)?.valid;
   const canValidate = Boolean(
-    meta.name && !oe && gcp.settings.credentialsFile && validCredential && gcp.settings.project && gcp.settings.region_name && hasCluster,
+    meta.name && !oe && canvasReady && gcp.settings.project && gcp.settings.region_name && hasCluster,
   );
 
   const validate = useCallback(async () => {
@@ -393,6 +459,32 @@ function DesignCanvas() {
     setError("");
     try {
       const created = await createInstance(diagramToCreateInput(nodes, edges, settings));
+      router.push(`/instances/${encodeURIComponent(created.id)}`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to create");
+      setSubmitting(false);
+    }
+  }, [nodes, edges, settings, router]);
+
+  const createWithoutDatabases = useCallback(async () => {
+    if (
+      !confirm(
+        "Create the cluster without databases? You can apply a license later and create the databases from the instance page.",
+      )
+    ) {
+      return;
+    }
+    setSubmitting(true);
+    setError("");
+    try {
+      const input = omitCreateInputDatabases(diagramToCreateInput(nodes, edges, settings));
+      const pf = await runPreflight(input);
+      setPreflight(pf);
+      if (!pf.ok) {
+        setSubmitting(false);
+        return;
+      }
+      const created = await createInstance(input);
       router.push(`/instances/${encodeURIComponent(created.id)}`);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to create");
@@ -427,6 +519,16 @@ function DesignCanvas() {
 
       <div className="design-layout">
         <div className="design-canvas-wrap" ref={wrapperRef}>
+          {!canvasReady ? (
+            <div className="design-canvas-lock" role="status">
+              <p className="design-canvas-lock-title">Service account required</p>
+              <p className="design-canvas-lock-body">{lockReason}</p>
+              <p className="hint">
+                Choose a key in Deployment settings above, or{" "}
+                <Link href="/credentials">add one on Credentials</Link>.
+              </p>
+            </div>
+          ) : null}
           <DesignProvider value={{ machineTypes: gcp.machineTypes, nodes, settings }}>
             <ReactFlow
               nodes={nodes}
@@ -438,6 +540,13 @@ function DesignCanvas() {
               onDrop={onDrop}
               onDragOver={onDragOver}
               onNodeClick={onNodeClick}
+              nodesDraggable={canvasReady}
+              nodesConnectable={canvasReady}
+              elementsSelectable={canvasReady}
+              panOnDrag={canvasReady}
+              zoomOnScroll={canvasReady}
+              zoomOnPinch={canvasReady}
+              zoomOnDoubleClick={canvasReady}
               nodeTypes={nodeTypes}
               fitView
               proOptions={{ hideAttribution: true }}
@@ -453,7 +562,7 @@ function DesignCanvas() {
           </DesignProvider>
         </div>
         <div className="design-side">
-          <Palette mode={meta.mode} />
+          <Palette mode={meta.mode} disabled={!canvasReady} />
         </div>
       </div>
 
@@ -461,6 +570,16 @@ function DesignCanvas() {
         <div className="notice notice-warn design-warn">
           Over-committed clusters: {overCommitted.map((c) => c.name).join(", ")}. Reduce database memory or
           add nodes.
+        </div>
+      ) : null}
+
+      {trialShardBlocks.length ? (
+        <div className="notice notice-warn design-warn">
+          {trialShardBlocks.map((g) => (
+            <p key={g.message} style={{ margin: "0 0 8px" }}>
+              {g.message}
+            </p>
+          ))}
         </div>
       ) : null}
 
@@ -499,6 +618,16 @@ function DesignCanvas() {
           >
             {submitting ? "Starting…" : "Apply with Terraform"}
           </button>
+          {trialShardBlocks.length ? (
+            <button
+              type="button"
+              className="btn"
+              disabled={submitting || checking}
+              onClick={() => void createWithoutDatabases()}
+            >
+              Apply without databases
+            </button>
+          ) : null}
         </div>
       </div>
 
@@ -515,6 +644,12 @@ function DesignCanvas() {
             const dbNode = nodes.find((n) => n.id === dialog.id);
             const parent = nodes.find((n) => n.id === dbNode?.parentId);
             return Number((parent?.data as { rof_nvme_disks?: number } | undefined)?.rof_nvme_disks) > 0;
+          })()}
+          clusterNodes={(() => {
+            if (dialog.type !== "database") return 0;
+            const dbNode = nodes.find((n) => n.id === dialog.id);
+            const parent = nodes.find((n) => n.id === dbNode?.parentId);
+            return clusterRedisNodeCount(parent?.data as ClusterData | undefined, meta.mode);
           })()}
           onSave={saveDialog}
           onCancel={() => setDialog(null)}

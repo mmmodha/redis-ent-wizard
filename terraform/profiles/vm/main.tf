@@ -120,6 +120,8 @@ module "app_workload" {
   artifact_local_path = each.value.artifact_local_path
   artifact_type       = each.value.artifact_type
   artifact_filename   = each.value.artifact_filename
+  git_url             = each.value.git_url
+  git_ref             = each.value.git_ref
   command             = each.value.command
   vm_count            = each.value.vm_count
   machine_type        = each.value.machine_type

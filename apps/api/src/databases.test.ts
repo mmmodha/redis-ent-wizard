@@ -59,11 +59,10 @@ describe("hasLicenses / hasDatabases", () => {
 });
 
 describe("buildBdbPayload", () => {
-  it("defaults to single proxy with no oss_cluster (avoids the 406)", () => {
+  it("defaults to single proxy with no oss_cluster", () => {
     const p = buildBdbPayload({ name: "d", memory_gb: 1, sharding: true, shards_count: 9 });
     assert.equal(p.proxy_policy, "single");
     assert.equal(p.oss_cluster, false);
-    assert.equal(p.shard_key_regex, undefined);
     assert.equal(p.shards_placement, "dense");
   });
 
@@ -90,9 +89,17 @@ describe("buildBdbPayload", () => {
     assert.ok(Array.isArray(p.shard_key_regex)); // required for per-shard routing
   });
 
-  it("sharded single-proxy uses standard hashing (no shard_key_regex)", () => {
-    const p = buildBdbPayload({ name: "d", memory_gb: 1, sharding: true, shards_count: 4, proxy_policy: "single" });
+  it("always sends default hash-tag rules when sharding is on (RE 406s without them)", () => {
+    const p = buildBdbPayload({ name: "d", memory_gb: 1, sharding: true, shards_count: 2, proxy_policy: "single" });
     assert.equal(p.proxy_policy, "single");
+    assert.deepEqual(p.shard_key_regex, [
+      { regex: ".*\\{(?<tag>.*)\\}.*" },
+      { regex: "(?<tag>.*)" },
+    ]);
+  });
+
+  it("does not send shard_key_regex when the database is not sharded", () => {
+    const p = buildBdbPayload({ name: "d", memory_gb: 1, sharding: false });
     assert.equal(p.shard_key_regex, undefined);
   });
 
@@ -102,6 +109,13 @@ describe("buildBdbPayload", () => {
     assert.equal(p.bigstore_ram_size, Math.round(100 * GIB * 0.1));
     const noflex = buildBdbPayload({ name: "d", memory_gb: 100 });
     assert.equal(noflex.bigstore, undefined);
+  });
+
+  it("drops replication on a one-node cluster so RE does not 406", () => {
+    const one = buildBdbPayload({ name: "d", memory_gb: 1, replication: true }, 1);
+    assert.equal(one.replication, false);
+    const three = buildBdbPayload({ name: "d", memory_gb: 1, replication: true }, 3);
+    assert.equal(three.replication, true);
   });
 });
 

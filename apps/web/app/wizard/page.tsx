@@ -16,6 +16,8 @@ import {
   type LbDraft,
 } from "@/components/wizard/WorkloadEditors";
 import { parsePorts } from "@/lib/diagram";
+import { canEnableDbReplication, effectiveDbReplication } from "@/lib/db-replication";
+import { clusterTrialShardGate, omitCreateInputDatabases } from "@/lib/trial-shards";
 import Link from "next/link";
 import {
   createInstance,
@@ -81,11 +83,11 @@ function blankCluster(machine = ""): ClusterDraft {
 }
 
 /** Normalize database drafts into the backend shape, mirroring the designer. */
-function databasesToPayload(dbs: DatabaseDraft[]): Record<string, unknown>[] {
+function databasesToPayload(dbs: DatabaseDraft[], clusterNodes: number): Record<string, unknown>[] {
   return dbs.map((d) => ({
     name: d.name.trim() || "db",
     memory_gb: Number(d.memory_gb),
-    replication: Boolean(d.replication),
+    replication: effectiveDbReplication(Boolean(d.replication), clusterNodes),
     sharding: Boolean(d.sharding),
     shards_count: d.sharding ? Number(d.shards_count) : 1,
     eviction_policy: d.eviction_policy,
@@ -203,11 +205,13 @@ function applicationDraftFromConfig(a: Record<string, unknown>): ApplicationDraf
     requirements: strArray(a.requirements),
     artifact: {
       kind:
-        artifact.kind === "url" || artifact.kind === "gcs"
-          ? (artifact.kind as "url" | "gcs")
+        artifact.kind === "url" || artifact.kind === "gcs" || artifact.kind === "git"
+          ? (artifact.kind as "url" | "gcs" | "git")
           : "upload",
       ref: str(artifact.ref),
       type: artifact.type === "binary" ? "binary" : "jar",
+      branch: str(artifact.branch),
+      runInDocker: Boolean(artifact.runInDocker),
     },
     vm_count: Number(a.vm_count) || 1,
     machine_type: str(a.machine_type),
@@ -572,7 +576,13 @@ function WizardInner() {
       if (a.requirements.length) app.requirements = a.requirements;
       if (form.mode === "vm") {
         Object.assign(app, {
-          artifact: { kind: a.artifact.kind, ref: a.artifact.ref, type: a.artifact.type },
+          artifact: {
+            kind: a.artifact.kind,
+            ref: a.artifact.ref,
+            type: a.artifact.type,
+            ...(a.artifact.kind === "git" && a.artifact.branch ? { branch: a.artifact.branch } : {}),
+            ...(a.artifact.kind === "git" ? { runInDocker: Boolean(a.artifact.runInDocker) } : {}),
+          },
           vm_count: Number(a.vm_count),
           machine_type: a.machine_type,
           disk_gib: Number(a.disk_gib),
@@ -599,7 +609,7 @@ function WizardInner() {
           rof_nvme_disks: Number(c.rof_nvme_disks),
           rs_version: c.rs_version,
           license: c.license.trim() || undefined,
-          ...(c.databases.length ? { databases: databasesToPayload(c.databases) } : {}),
+          ...(c.databases.length ? { databases: databasesToPayload(c.databases, Number(c.nodes)) } : {}),
         })),
         RS_admin: form.RS_admin,
         app: Number(form.app),
@@ -634,7 +644,7 @@ function WizardInner() {
           rec_nodes: Number(c.rec_nodes),
           nodes: Number(c.rec_nodes),
           license: c.license.trim() || undefined,
-          ...(c.databases.length ? { databases: databasesToPayload(c.databases) } : {}),
+          ...(c.databases.length ? { databases: databasesToPayload(c.databases, Number(c.rec_nodes)) } : {}),
         })),
       });
     }
@@ -786,17 +796,41 @@ function WizardInner() {
     }
   }, [payload]);
 
+  const trialShardBlocks = useMemo(
+    () =>
+      form.clusters
+        .map((c) =>
+          clusterTrialShardGate({
+            name: c.name,
+            license: c.license,
+            databases: c.databases,
+            nodes: form.mode === "gke" ? c.rec_nodes : c.nodes,
+          }),
+        )
+        .filter((g) => g.blocked),
+    [form.clusters, form.mode],
+  );
+
   useEffect(() => {
     if (step === 3 && !preflightResult && !checking) {
       void runChecks();
     }
   }, [step, preflightResult, checking, runChecks]);
 
-  async function submit() {
+  async function submit(omitDatabases = false) {
     setSubmitting(true);
     setError("");
     try {
-      const created = await createInstance(payload());
+      const body = omitDatabases ? omitCreateInputDatabases(payload()) : payload();
+      if (omitDatabases) {
+        const pf = await runPreflight(body);
+        setPreflightResult(pf);
+        if (!pf.ok) {
+          setSubmitting(false);
+          return;
+        }
+      }
+      const created = await createInstance(body);
       router.push(`/instances/${encodeURIComponent(created.id)}`);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to create");
@@ -1065,7 +1099,13 @@ function WizardInner() {
                     onChange={(e) => {
                       const nodes = Number(e.target.value);
                       setForm((prev) => {
-                        const clusters = prev.clusters.map((c, idx) => (idx === i ? { ...c, nodes } : c));
+                        const clusters = prev.clusters.map((c, idx) => {
+                          if (idx !== i) return c;
+                          const databases = canEnableDbReplication(nodes)
+                            ? c.databases
+                            : c.databases.map((d) => ({ ...d, replication: false }));
+                          return { ...c, nodes, databases };
+                        });
                         return {
                           ...prev,
                           clusters,
@@ -1172,11 +1212,13 @@ function WizardInner() {
                     rows={4}
                     placeholder="optional"
                   />
-                  <span className="hint">Leave blank to use the built-in trial license.</span>
+                  <span className="hint">Leave blank to use the 4-shard trial license.</span>
                 </label>
                 <DatabaseEditor
                   databases={cluster.databases}
+                  license={cluster.license}
                   clusterHasNvme={cluster.rof_nvme_disks > 0}
+                  clusterNodes={cluster.nodes}
                   onChange={(databases) => {
                     setForm((prev) => ({
                       ...prev,
@@ -1547,9 +1589,13 @@ function WizardInner() {
                     onChange={(e) => {
                       const rec_nodes = Number(e.target.value);
                       setForm((prev) => {
-                        const clusters = prev.clusters.map((c, idx) =>
-                          idx === i ? { ...c, rec_nodes, nodes: rec_nodes } : c,
-                        );
+                        const clusters = prev.clusters.map((c, idx) => {
+                          if (idx !== i) return c;
+                          const databases = canEnableDbReplication(rec_nodes)
+                            ? c.databases
+                            : c.databases.map((d) => ({ ...d, replication: false }));
+                          return { ...c, rec_nodes, nodes: rec_nodes, databases };
+                        });
                         const sum = clusters.reduce((n, c) => n + c.rec_nodes, 0);
                         return {
                           ...prev,
@@ -1581,11 +1627,13 @@ function WizardInner() {
                     rows={4}
                     placeholder="optional"
                   />
-                  <span className="hint">Leave blank to use the built-in trial license.</span>
+                  <span className="hint">Leave blank to use the 4-shard trial license.</span>
                 </label>
                 <DatabaseEditor
                   databases={cluster.databases}
+                  license={cluster.license}
                   clusterHasNvme={cluster.rof_nvme_disks > 0}
+                  clusterNodes={cluster.rec_nodes}
                   onChange={(databases) => {
                     setForm((prev) => ({
                       ...prev,
@@ -1679,6 +1727,16 @@ function WizardInner() {
                 Fix the failed checks above before applying. Nothing has been created yet.
               </div>
             ) : null}
+
+            {trialShardBlocks.length ? (
+              <div className="notice notice-warn" style={{ marginTop: 16 }}>
+                {trialShardBlocks.map((g) => (
+                  <p key={g.message} style={{ margin: "0 0 8px" }}>
+                    {g.message}
+                  </p>
+                ))}
+              </div>
+            ) : null}
           </div>
         )}
 
@@ -1705,11 +1763,29 @@ function WizardInner() {
               className="btn btn-primary"
               type="button"
               disabled={submitting || checking || !preflightResult?.ok}
-              onClick={submit}
+              onClick={() => void submit()}
             >
               {submitting ? "Starting…" : "Apply with Terraform"}
             </button>
           )}
+          {step === steps.length - 1 && trialShardBlocks.length ? (
+            <button
+              className="btn"
+              type="button"
+              disabled={submitting || checking}
+              onClick={() => {
+                if (
+                  confirm(
+                    "Create the cluster without databases? You can apply a license later and create the databases from the instance page.",
+                  )
+                ) {
+                  void submit(true);
+                }
+              }}
+            >
+              Apply without databases
+            </button>
+          ) : null}
         </div>
       </div>
     </div>

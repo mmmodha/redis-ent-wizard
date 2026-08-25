@@ -8,12 +8,15 @@ type DesignContextValue = {
   machineTypes: MachineTypeInfo[];
   nodes: DesignNode[];
   settings: DesignSettings | null;
+  /** Designer shows a loading placeholder; instance diagrams hide until RAM is known. */
+  capacityIfUnavailable?: "pending" | "hide";
 };
 
 const DesignContext = createContext<DesignContextValue>({
   machineTypes: [],
   nodes: [],
   settings: null,
+  capacityIfUnavailable: "pending",
 });
 
 export const DesignProvider = DesignContext.Provider;

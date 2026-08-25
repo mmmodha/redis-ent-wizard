@@ -80,6 +80,7 @@ export type Instance = {
   region: string;
   ownerEmail: string;
   credentialsId?: string;
+  credentialsFile?: string;
   folder?: string;
   busy?: boolean;
   endpoints?: Record<string, unknown>;
@@ -356,6 +357,19 @@ export async function listDnsZones(
   const qs = new URLSearchParams({ credentialsFile, project });
   return jsonOrThrow(
     await fetch(`${apiBase()}/gcp/dns-zones?${qs}`, { cache: "no-store", headers: authHeaders() }),
+  );
+}
+
+export async function reconcileDatabases(
+  id: string,
+  body?: { clusters?: Array<{ name?: string; databases: Record<string, unknown>[] }> },
+): Promise<{ ok: boolean; databaseStates: DatabaseState[]; licenseStates: LicenseState[] }> {
+  return jsonOrThrow(
+    await fetch(`${apiBase()}/instances/${encodeURIComponent(id)}/databases/reconcile`, {
+      method: "POST",
+      headers: authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify(body ?? {}),
+    }),
   );
 }
 

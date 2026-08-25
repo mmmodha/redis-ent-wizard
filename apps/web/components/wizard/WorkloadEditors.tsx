@@ -5,10 +5,14 @@ import { MachineTypePicker } from "@/components/MachineTypePicker";
 import { uploadArtifact, type MachineTypeInfo } from "@/lib/api";
 import {
   APP_REQUIREMENTS,
+  ARTIFACT_SOURCE_OPTIONS,
   DB_MODULES,
   EVICTION_POLICIES,
+  withGitSourceRequirements,
   type ArtifactSource,
 } from "@/lib/diagram";
+import { canEnableDbReplication, dbReplicationHint } from "@/lib/db-replication";
+import { clusterTrialShardGate } from "@/lib/trial-shards";
 
 type Mode = "vm" | "gke";
 
@@ -58,11 +62,11 @@ export type LbDraft = {
   ports: string;
 };
 
-export function blankDatabase(): DatabaseDraft {
+export function blankDatabase(clusterNodes = 3): DatabaseDraft {
   return {
     name: "",
     memory_gb: 1,
-    replication: true,
+    replication: canEnableDbReplication(clusterNodes),
     sharding: false,
     shards_count: 2,
     eviction_policy: "noeviction",
@@ -131,17 +135,25 @@ export function DatabaseEditor({
   databases,
   onChange,
   clusterHasNvme,
+  clusterNodes,
+  license,
 }: {
   databases: DatabaseDraft[];
   onChange: (dbs: DatabaseDraft[]) => void;
   clusterHasNvme: boolean;
+  clusterNodes: number;
+  license?: string;
 }) {
+  const allowReplication = canEnableDbReplication(clusterNodes);
+  const replicationHint = dbReplicationHint(clusterNodes);
+  const trial = clusterTrialShardGate({ license, databases, nodes: clusterNodes });
   const patch = (i: number, p: Partial<DatabaseDraft>) =>
     onChange(databases.map((d, idx) => (idx === i ? { ...d, ...p } : d)));
 
   return (
     <div className="wiz-field-wide">
       <span className="machine-picker-label">Databases</span>
+      {trial.blocked ? <div className="notice notice-warn">{trial.message}</div> : null}
       {databases.map((db, i) => (
         <div className="wiz-workload-card" key={`db-${i}`}>
           <div className="wiz-workload-head">
@@ -172,13 +184,17 @@ export function DatabaseEditor({
                 onChange={(e) => patch(i, { memory_gb: Number(e.target.value) })}
               />
             </label>
-            <label className="wiz-check-row">
+            <label
+              className="wiz-check-row"
+              title={allowReplication ? undefined : replicationHint}
+            >
               <input
                 type="checkbox"
-                checked={db.replication}
+                disabled={!allowReplication}
+                checked={allowReplication && db.replication}
                 onChange={(e) => patch(i, { replication: e.target.checked })}
               />
-              Replication (HA)
+              Replication (HA){allowReplication ? "" : " · needs 2+ nodes"}
             </label>
             <label className="wiz-check-row">
               <input
@@ -312,7 +328,7 @@ export function DatabaseEditor({
         </div>
       ))}
       <div>
-        <button type="button" className="btn" onClick={() => onChange([...databases, blankDatabase()])}>
+        <button type="button" className="btn" onClick={() => onChange([...databases, blankDatabase(clusterNodes)])}>
           Add database
         </button>
       </div>
@@ -407,15 +423,27 @@ export function ApplicationsEditor({
                 <div className="wiz-field-wide">
                   <span className="machine-picker-label">Artifact source</span>
                   <div className="wiz-radio-row">
-                    {(["upload", "url", "gcs"] as const).map((k) => (
-                      <label key={k} className="wiz-check-row">
+                    {ARTIFACT_SOURCE_OPTIONS.map((opt) => (
+                      <label key={opt.kind} className="wiz-check-row">
                         <input
                           type="radio"
                           name={`artifact-kind-${i}`}
-                          checked={app.artifact.kind === k}
-                          onChange={() => patch(i, { artifact: { ...app.artifact, kind: k } })}
+                          checked={app.artifact.kind === opt.kind}
+                          onChange={() =>
+                            patch(i, {
+                              artifact: {
+                                ...app.artifact,
+                                kind: opt.kind,
+                                runInDocker: opt.kind === "git" ? Boolean(app.artifact.runInDocker) : false,
+                              },
+                              requirements:
+                                opt.kind === "git"
+                                  ? withGitSourceRequirements(app.requirements, Boolean(app.artifact.runInDocker))
+                                  : app.requirements,
+                            })
+                          }
                         />
-                        {k === "upload" ? "Upload" : k === "url" ? "URL" : "GCS path"}
+                        {opt.label}
                       </label>
                     ))}
                   </div>
@@ -439,6 +467,50 @@ export function ApplicationsEditor({
                       <span className="hint mono">stored: {app.artifact.ref}</span>
                     ) : null}
                   </div>
+                ) : app.artifact.kind === "git" ? (
+                  <>
+                    <label className="wiz-field-wide">
+                      GitHub URL
+                      <input
+                        value={app.artifact.ref}
+                        onChange={(e) =>
+                          patch(i, {
+                            artifact: { ...app.artifact, ref: e.target.value, type: "binary" },
+                          })
+                        }
+                        placeholder="https://github.com/org/repo"
+                      />
+                    </label>
+                    <label>
+                      Branch or tag
+                      <input
+                        value={app.artifact.branch || ""}
+                        onChange={(e) =>
+                          patch(i, { artifact: { ...app.artifact, branch: e.target.value } })
+                        }
+                        placeholder="default branch"
+                      />
+                    </label>
+                    <label className="wiz-check-row wiz-field-wide">
+                      <input
+                        type="checkbox"
+                        checked={Boolean(app.artifact.runInDocker)}
+                        onChange={(e) =>
+                          patch(i, {
+                            artifact: { ...app.artifact, runInDocker: e.target.checked },
+                            requirements: withGitSourceRequirements(app.requirements, e.target.checked),
+                          })
+                        }
+                      />
+                      Run with Docker
+                    </label>
+                    <p className="hint wiz-field-wide">
+                      The VM clones this repo into /opt/app and installs git.
+                      {app.artifact.runInDocker
+                        ? " Docker is installed so you can run Compose or docker run."
+                        : " Turn on Docker only if the app should run in a container."}
+                    </p>
+                  </>
                 ) : (
                   <label className="wiz-field-wide">
                     {app.artifact.kind === "url" ? "Artifact URL" : "GCS path"}
@@ -458,6 +530,7 @@ export function ApplicationsEditor({
                   </label>
                 )}
 
+                {app.artifact.kind === "git" ? null : (
                 <label>
                   Artifact type
                   <select
@@ -472,15 +545,24 @@ export function ApplicationsEditor({
                     <option value="binary">binary</option>
                   </select>
                 </label>
+                )}
 
                 <label className="wiz-field-wide">
                   Command
                   <input
                     value={app.command}
                     onChange={(e) => patch(i, { command: e.target.value })}
-                    placeholder="empty = stage only"
+                    placeholder={
+                      app.artifact.kind === "git" && app.artifact.runInDocker
+                        ? "docker compose up -d"
+                        : "empty = stage only"
+                    }
                   />
-                  <span className="hint">Leave empty to stage the artifact without starting it.</span>
+                  <span className="hint">
+                    {app.artifact.kind === "git"
+                      ? "Runs from the cloned repo in /opt/app. Leave empty to clone without starting."
+                      : "Leave empty to stage the artifact without starting it."}
+                  </span>
                 </label>
 
                 <label>
@@ -525,12 +607,17 @@ export function ApplicationsEditor({
                   <span className="machine-picker-label">Requirements to install</span>
                   <div className="wiz-badges">
                     {APP_REQUIREMENTS.map((r) => {
-                      const on = app.requirements.includes(r.id);
+                      const requiredGit = app.artifact.kind === "git" && r.id === "git";
+                      const requiredDocker =
+                        app.artifact.kind === "git" && app.artifact.runInDocker && r.id === "docker";
+                      const locked = requiredGit || requiredDocker;
+                      const on = app.requirements.includes(r.id) || locked;
                       return (
                         <label key={r.id} className="wiz-check-row">
                           <input
                             type="checkbox"
                             checked={on}
+                            disabled={locked}
                             onChange={(e) =>
                               patch(i, {
                                 requirements: e.target.checked
@@ -544,7 +631,13 @@ export function ApplicationsEditor({
                       );
                     })}
                   </div>
-                  <span className="hint">Installed with apt before the app starts.</span>
+                  <span className="hint">
+                    {app.artifact.kind === "git"
+                      ? app.artifact.runInDocker
+                        ? "git and Docker are installed automatically for this GitHub source."
+                        : "git is installed automatically to clone the repo."
+                      : "Installed with apt before the app starts."}
+                  </span>
                 </div>
               </>
             ) : (

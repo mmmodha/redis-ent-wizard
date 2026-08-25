@@ -147,17 +147,19 @@ export function capacityFor(
 
 // --- creation -------------------------------------------------------------
 
-export function buildBdbPayload(db: DatabaseSpec): Record<string, unknown> {
+export function buildBdbPayload(db: DatabaseSpec, clusterNodes?: number): Record<string, unknown> {
   const sharded = Boolean(db.sharding);
   const ossCluster = Boolean(db.oss_cluster);
   const memorySize = Math.max(0, Math.round((Number(db.memory_gb) || 0) * GIB));
   // The OSS Cluster API requires an all-master-shards (or all-nodes) proxy —
   // RE rejects oss_cluster + single with a 406 — so enabling OSS forces it.
   const proxyPolicy = ossCluster || db.proxy_policy === "all-master-shards" ? "all-master-shards" : "single";
+  // Replica shards need two nodes in the same cluster; a 1-node cluster 406s.
+  const replication = Boolean(db.replication) && (clusterNodes === undefined || clusterNodes >= 2);
   const payload: Record<string, unknown> = {
     name: db.name,
     memory_size: memorySize,
-    replication: Boolean(db.replication),
+    replication,
     eviction_policy: db.eviction_policy || "noeviction",
     sharding: sharded,
     type: "redis",
@@ -168,12 +170,7 @@ export function buildBdbPayload(db: DatabaseSpec): Record<string, unknown> {
   };
   if (sharded) {
     payload.shards_count = Math.max(1, Math.floor(Number(db.shards_count) || 1));
-  }
-  // A sharded database served through per-shard endpoints (all-master-shards,
-  // whether or not the OSS Cluster API is on) needs an explicit hashing policy;
-  // RE rejects it as "missing shard_key_regex" otherwise. Single-proxy sharded
-  // databases use standard hashing and need none.
-  if (sharded && proxyPolicy === "all-master-shards") {
+    // RE 8.x: "When true, shard hashing rules must be provided by shard_key_regex".
     payload.shard_key_regex = [
       { regex: ".*\\{(?<tag>.*)\\}.*" },
       { regex: "(?<tag>.*)" },
@@ -257,11 +254,15 @@ export async function createDatabases(record: InstanceRecord): Promise<DatabaseS
         continue;
       }
       try {
+        const nodeCount =
+          record.mode === "gke"
+            ? Number(rawClusters[i]?.rec_nodes ?? rawClusters[i]?.nodes) || 1
+            : Number(rawClusters[i]?.nodes ?? rawClusters[i]?.rec_nodes) || 1;
         const res = await reRequest(
           `${base}/v1/bdbs`,
           "POST",
           { user: target.user, pass: target.pass },
-          buildBdbPayload(db),
+          buildBdbPayload(db, nodeCount),
         );
         if (res.status >= 200 && res.status < 300) {
           let bdb: BdbObj | undefined;

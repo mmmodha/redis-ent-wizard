@@ -59,9 +59,6 @@ export function ProgressTracker({
   // Degraded means the cluster stopped short of ready, so it must not look like work in flight.
   const stalled = failed || status === "degraded";
   const running = !stalled && progress.percent < 100;
-  // Terraform has finished creating everything once the cluster is forming or up.
-  const settled =
-    progress.percent >= 100 || status === "bootstrapping" || status === "degraded";
   const barClass = [
     "bar-fill",
     stalled
@@ -127,9 +124,9 @@ export function ProgressTracker({
           <div className="section-heading">
             {progress.operation === "destroy"
               ? "Resources being deleted"
-              : settled
+              : progress.percent >= 100
                 ? "Resources"
-                : "Resources being created"}
+                : "In progress"}
           </div>
           <SectionList sections={sections} />
         </div>

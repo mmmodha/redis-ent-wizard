@@ -44,13 +44,17 @@ export interface DatabaseSpec {
   flex?: boolean;
 }
 
-export type ArtifactKind = "upload" | "url" | "gcs";
+export type ArtifactKind = "upload" | "url" | "gcs" | "git";
 
 export interface ApplicationArtifact {
   kind: ArtifactKind;
-  /** Upload id, https URL, or gs:// path depending on kind. */
+  /** Upload id, https URL, gs:// path, or GitHub repo URL depending on kind. */
   ref: string;
   type: "jar" | "binary";
+  /** Optional git branch or tag; used when kind is git. */
+  branch?: string;
+  /** When kind is git, install Docker on the VM and run the command with it. */
+  runInDocker?: boolean;
 }
 
 /**

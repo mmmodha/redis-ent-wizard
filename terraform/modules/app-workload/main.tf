@@ -62,6 +62,18 @@ variable "artifact_filename" {
   default     = "app.bin"
 }
 
+variable "git_url" {
+  type        = string
+  description = "When set, clone this GitHub repo onto the VM instead of copying a local artifact."
+  default     = ""
+}
+
+variable "git_ref" {
+  type        = string
+  description = "Optional git branch or tag to clone."
+  default     = ""
+}
+
 variable "command" {
   type        = string
   description = "Command to run the app; empty means stage only (no systemd service)."
@@ -126,6 +138,10 @@ locals {
   )
   command_set = trimspace(var.command) != ""
   env_file    = join("\n", [for k, v in var.env : "${k}=${v}"])
+  is_git      = trimspace(var.git_url) != ""
+  needs_docker = contains(var.requirements, "docker")
+  deploy_source = local.is_git ? "${path.module}/placeholder.txt" : var.artifact_local_path
+  deploy_dest   = local.is_git ? "/tmp/placeholder.txt" : "/tmp/${var.artifact_filename}"
 
   # Requirement ids handled by install_requirement in the setup script.
   requirements_csv = join(",", var.requirements)
@@ -134,21 +150,29 @@ locals {
   # already pick a Java requirement (openjdk-25/21/17) themselves.
   java_requirements     = ["openjdk-25", "openjdk-21", "openjdk-17"]
   has_java_requirement  = length(setintersection(toset(var.requirements), toset(local.java_requirements))) > 0
-  jar_needs_default_jre = var.artifact_type == "jar" && !local.has_java_requirement
+  jar_needs_default_jre = !local.is_git && var.artifact_type == "jar" && !local.has_java_requirement
 
   unit_file = <<-UNIT
     [Unit]
     Description=app workload
-    After=network.target
+    After=network.target${local.needs_docker ? " docker.service" : ""}
+    %{if local.needs_docker~}
+    Wants=docker.service
+    %{endif~}
+    StartLimitIntervalSec=0
 
     [Service]
     Type=simple
     User=ubuntu
+    %{if local.needs_docker~}
+    Group=docker
+    %{endif~}
     WorkingDirectory=/opt/app
     EnvironmentFile=/opt/app/app.env
     ExecStart=/usr/bin/env bash -lc 'cd /opt/app && ${var.command}'
     Restart=always
     RestartSec=5
+    TimeoutStartSec=0
 
     [Install]
     WantedBy=multi-user.target
@@ -159,9 +183,12 @@ locals {
   setup_script = <<-SETUP
     #!/bin/bash
     set +e
+    set -x
     export DEBIAN_FRONTEND=noninteractive
+    export NEEDRESTART_MODE=a
+    export NEEDRESTART_SUSPEND=1
+    export GIT_TERMINAL_PROMPT=0
     mkdir -p /opt/app
-    mv /tmp/${var.artifact_filename} /opt/app/${var.artifact_filename}
 
     # Install a single requirement id on Ubuntu 22.04 (jammy). Unknown ids are
     # logged and skipped so a stray id never fails the whole deploy.
@@ -211,6 +238,32 @@ locals {
           apt-get -y update
           apt-get -y install git
           ;;
+        docker)
+          echo "=== APPWL ${var.app_name} STEP docker ==="
+          install -d -m 0755 /etc/apt/keyrings
+          curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+          chmod a+r /etc/apt/keyrings/docker.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu jammy stable" > /etc/apt/sources.list.d/docker.list
+          # Do not start docker during dpkg: its iptables rewrite drops Terraform's
+          # SSH session ("exited without exit status" after a long hang).
+          printf '#!/bin/sh\nexit 101\n' > /usr/sbin/policy-rc.d
+          chmod +x /usr/sbin/policy-rc.d
+          apt-get -y update
+          SYSTEMD_OFFLINE=1 apt-get -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold install \
+            docker-ce docker-ce-cli containerd.io docker-compose-plugin
+          rm -f /usr/sbin/policy-rc.d
+          usermod -aG docker ubuntu
+          iptables -I INPUT -p tcp --dport 22 -j ACCEPT || true
+          iptables -I INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT || true
+          systemctl enable docker
+          COMPOSE_PLUGIN=""
+          for p in /usr/libexec/docker/cli-plugins/docker-compose /usr/lib/docker/cli-plugins/docker-compose; do
+            [ -x "$p" ] && COMPOSE_PLUGIN="$p" && break
+          done
+          if [ -n "$COMPOSE_PLUGIN" ]; then
+            ln -sfn "$COMPOSE_PLUGIN" /usr/local/bin/docker-compose
+          fi
+          ;;
         *)
           echo "install_requirement: unknown requirement id '$id', skipping"
           ;;
@@ -237,8 +290,22 @@ locals {
     apt-get -y update
     apt-get -y install openjdk-21-jre-headless || apt-get -y install openjdk-17-jre-headless || apt-get -y install default-jre-headless
     %{endif~}
+    %{if local.is_git~}
+    echo "=== APPWL ${var.app_name} STEP clone ==="
+    rm -rf /opt/app
+    install -d -o ubuntu -g ubuntu /opt/app
+    set -e
+    %{if trimspace(var.git_ref) != ""~}
+    sudo -u ubuntu env GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=true git clone --depth 1 --branch '${var.git_ref}' '${var.git_url}' /opt/app
+    %{else~}
+    sudo -u ubuntu env GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=true git clone --depth 1 '${var.git_url}' /opt/app
+    %{endif~}
+    set +e
+    %{else~}
+    mv /tmp/${var.artifact_filename} /opt/app/${var.artifact_filename}
     %{if var.artifact_type == "binary"~}
     chmod +x /opt/app/${var.artifact_filename}
+    %{endif~}
     %{endif~}
     mv /tmp/app.env /opt/app/app.env
     chown -R ubuntu:ubuntu /opt/app
@@ -254,13 +321,16 @@ locals {
     fi
     %{endif~}
     %{if local.command_set~}
+    echo "=== APPWL ${var.app_name} STEP start ==="
     mv /tmp/appworkload.service /etc/systemd/system/appworkload.service
     systemctl daemon-reload
     systemctl enable appworkload
-    systemctl restart appworkload
+    # Do not block Terraform SSH on a long `docker compose --build`.
+    systemctl restart --no-block appworkload
     %{else~}
     echo "no command set; artifact staged in /opt/app" > /opt/app/app.log
     %{endif~}
+    echo "=== APPWL ${var.app_name} DONE ==="
   SETUP
 }
 
@@ -318,7 +388,7 @@ resource "null_resource" "deploy" {
 
   triggers = {
     instance = google_compute_instance.vm[count.index].id
-    artifact = try(filemd5(var.artifact_local_path), "none")
+    artifact = local.is_git ? "${var.git_url}#${var.git_ref}" : try(filemd5(var.artifact_local_path), "none")
     command  = var.command
     env      = local.env_file
   }
@@ -328,12 +398,12 @@ resource "null_resource" "deploy" {
     host        = google_compute_instance.vm[count.index].network_interface[0].access_config[0].nat_ip
     user        = "ubuntu"
     private_key = try(file(pathexpand(var.ssh_private_key_path)), null)
-    timeout     = "5m"
+    timeout     = "20m"
   }
 
   provisioner "file" {
-    source      = var.artifact_local_path
-    destination = "/tmp/${var.artifact_filename}"
+    source      = local.deploy_source
+    destination = local.deploy_dest
   }
 
   provisioner "file" {
@@ -352,7 +422,9 @@ resource "null_resource" "deploy" {
   }
 
   provisioner "remote-exec" {
-    inline = ["sudo bash /tmp/appwl-setup.sh"]
+    inline = [
+      "sudo env NEEDRESTART_SUSPEND=1 DEBIAN_FRONTEND=noninteractive bash -x /tmp/appwl-setup.sh",
+    ]
   }
 }
 

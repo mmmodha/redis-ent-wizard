@@ -59,6 +59,45 @@ function normalizeEnv(raw: unknown): Record<string, string> {
   return out;
 }
 
+/**
+ * Accepts a GitHub https URL (repo, .git, /tree/branch, or #branch) and
+ * returns a clone URL plus optional branch. SSH remotes and other hosts are rejected.
+ */
+export function parseGitHubSource(ref: string): { cloneUrl: string; branch: string } | null {
+  const raw = String(ref ?? "").trim();
+  if (!raw) return null;
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== "https:") return null;
+  if (url.hostname !== "github.com" && url.hostname !== "www.github.com") return null;
+  const parts = url.pathname.replace(/^\/+|\/+$/g, "").split("/").filter(Boolean);
+  if (parts.length < 2) return null;
+  const owner = parts[0];
+  let repo = parts[1];
+  if (!owner || !repo) return null;
+  if (repo.endsWith(".git")) repo = repo.slice(0, -4);
+  if (!/^[A-Za-z0-9_.-]+$/.test(owner) || !/^[A-Za-z0-9_.-]+$/.test(repo)) return null;
+  let branch = url.hash ? decodeURIComponent(url.hash.slice(1)).trim() : "";
+  if (!branch && parts[2] === "tree" && parts.length >= 4) {
+    branch = parts.slice(3).join("/");
+  }
+  if (branch && !/^[A-Za-z0-9._/\-]+$/.test(branch)) return null;
+  return { cloneUrl: `https://github.com/${owner}/${repo}.git`, branch };
+}
+
+function withGitSourceRequirements(reqs: string[], runInDocker: boolean): string[] {
+  const extra = runInDocker ? ["git", "docker"] : ["git"];
+  const out = [...reqs];
+  for (const id of extra) {
+    if (!out.includes(id)) out.push(id);
+  }
+  return out.slice(0, 20);
+}
+
 /** Validate + clamp the applications list for a deployment. Pure (no I/O). */
 export function normalizeApplications(input: {
   mode?: DeploymentMode;
@@ -88,10 +127,10 @@ export function normalizeApplications(input: {
 
     if (mode === "vm") {
       if (!raw.artifact || !raw.artifact.ref) {
-        throw new Error(`Application "${name}" needs an artifact (upload, url, or gcs)`);
+        throw new Error(`Application "${name}" needs an artifact (upload, url, gcs, or git)`);
       }
       const kind = raw.artifact.kind;
-      if (kind !== "upload" && kind !== "url" && kind !== "gcs") {
+      if (kind !== "upload" && kind !== "url" && kind !== "gcs" && kind !== "git") {
         throw new Error(`Application "${name}" has an invalid artifact kind`);
       }
       if (kind === "url" && !/^https?:\/\//i.test(raw.artifact.ref)) {
@@ -99,6 +138,19 @@ export function normalizeApplications(input: {
       }
       if (kind === "gcs" && !raw.artifact.ref.startsWith("gs://")) {
         throw new Error(`Application "${name}" gcs artifact must start with gs://`);
+      }
+      let artifactRef = String(raw.artifact.ref);
+      let artifactBranch = String(raw.artifact.branch ?? "").trim();
+      let vmRequirements = requirements;
+      const runInDocker = kind === "git" && Boolean(raw.artifact.runInDocker);
+      if (kind === "git") {
+        const parsed = parseGitHubSource(artifactRef);
+        if (!parsed) {
+          throw new Error(`Application "${name}" git artifact must be an https GitHub URL`);
+        }
+        artifactRef = parsed.cloneUrl;
+        artifactBranch = artifactBranch || parsed.branch;
+        vmRequirements = withGitSourceRequirements(requirements, runInDocker);
       }
       return {
         name,
@@ -108,13 +160,15 @@ export function normalizeApplications(input: {
         connectClusters,
         artifact: {
           kind,
-          ref: String(raw.artifact.ref),
+          ref: artifactRef,
           type: raw.artifact.type === "jar" ? "jar" : "binary",
+          ...(kind === "git" && artifactBranch ? { branch: artifactBranch } : {}),
+          ...(kind === "git" ? { runInDocker } : {}),
         },
         vm_count: clampInt(raw.vm_count, 1, MAX_APP_VMS, 1),
         machine_type: String(raw.machine_type || DEFAULT_APP_MACHINE).trim() || DEFAULT_APP_MACHINE,
         disk_gib: clampInt(raw.disk_gib, 0, 65536, 0),
-        requirements,
+        requirements: vmRequirements,
         // Preserve already-resolved artifact fields so re-normalization is idempotent.
         artifactLocalPath: raw.artifactLocalPath,
         artifactFilename: raw.artifactFilename,
@@ -188,6 +242,11 @@ export async function resolveApplicationArtifacts(
       app.artifactLocalPath = dest;
       app.artifactFilename = meta.filename;
       app.artifact.type = meta.type;
+      continue;
+    }
+
+    if (kind === "git") {
+      // The VM clones the repo; Terraform does not copy a local artifact.
       continue;
     }
 

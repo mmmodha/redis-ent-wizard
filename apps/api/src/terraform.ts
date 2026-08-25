@@ -44,17 +44,24 @@ export function watchBootstrap(id: string): void {
         const current = await getInstance(id);
         if (!current) return;
 
-        const nextStatus = health.state === "ready" ? "ready" : "bootstrapping";
+        const alreadyReady = current.status === "ready";
         await upsertInstance({
           ...current,
-          status: nextStatus,
+          status: alreadyReady ? "ready" : "bootstrapping",
           health,
           updatedAt: new Date().toISOString(),
         });
 
         if (health.state === "ready") {
-          appendLog(id, `\n=== CLUSTER READY ${new Date().toISOString()} — ${health.detail} ===\n`);
-          await provisionClusterResources(id);
+          if (!alreadyReady) {
+            appendLog(id, `\n=== CLUSTER READY ${new Date().toISOString()} — ${health.detail} ===\n`);
+            await provisionClusterResources(id);
+            appendLog(id, `\n=== CLUSTER RESOURCES COMPLETE ${new Date().toISOString()} ===\n`);
+            const latest = await getInstance(id);
+            if (latest && latest.status !== "destroying" && latest.status !== "destroyed" && latest.status !== "failed") {
+              await upsertInstance({ ...latest, status: "ready", updatedAt: new Date().toISOString() });
+            }
+          }
           return;
         }
 

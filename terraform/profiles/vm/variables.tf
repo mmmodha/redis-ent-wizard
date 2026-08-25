@@ -166,6 +166,8 @@ variable "applications" {
     artifact_local_path = string
     artifact_type       = string
     artifact_filename   = string
+    git_url             = string
+    git_ref             = string
     command             = string
     vm_count            = number
     machine_type        = string

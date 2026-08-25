@@ -1,4 +1,5 @@
 import type { Edge, Node } from "@xyflow/react";
+import { effectiveDbReplication, clusterRedisNodeCount } from "./db-replication";
 
 /**
  * Node data model for the visual designer. Each variant carries an index
@@ -66,9 +67,11 @@ export type VmsData = {
 };
 
 export type ArtifactSource = {
-  kind: "upload" | "url" | "gcs";
+  kind: "upload" | "url" | "gcs" | "git";
   ref: string;
   type: "jar" | "binary";
+  branch?: string;
+  runInDocker?: boolean;
 };
 
 export type ApplicationData = {
@@ -147,7 +150,24 @@ export const APP_REQUIREMENTS = [
   { id: "python3-pip", label: "pip (Python)" },
   { id: "build-essential", label: "build-essential" },
   { id: "git", label: "git" },
+  { id: "docker", label: "Docker" },
 ] as const;
+
+export const ARTIFACT_SOURCE_OPTIONS = [
+  { kind: "upload", label: "Upload" },
+  { kind: "url", label: "URL" },
+  { kind: "gcs", label: "GCS" },
+  { kind: "git", label: "GitHub" },
+] as const;
+
+export function withGitSourceRequirements(reqs: string[], runInDocker: boolean): string[] {
+  const extra = runInDocker ? ["git", "docker"] : ["git"];
+  const out = runInDocker ? [...reqs] : reqs.filter((id) => id !== "docker");
+  for (const id of extra) {
+    if (!out.includes(id)) out.push(id);
+  }
+  return out;
+}
 
 export const DB_MODULES = [
   { id: "search", label: "search" },
@@ -258,13 +278,15 @@ export function diagramToCreateInput(
   const clusterNameById = new Map<string, string>();
   clusters.forEach((c, i) => clusterNameById.set(c.id, clusterName(c, i)));
 
-  const databasesFor = (clusterId: string) =>
-    databases
+  const databasesFor = (clusterId: string) => {
+    const cluster = clusters.find((c) => c.id === clusterId);
+    const nodeCount = clusterRedisNodeCount(cluster?.data, settings.mode);
+    return databases
       .filter((d) => d.parentId === clusterId)
       .map((d) => ({
         name: d.data.name.trim() || "db",
         memory_gb: Number(d.data.memory_gb),
-        replication: Boolean(d.data.replication),
+        replication: effectiveDbReplication(Boolean(d.data.replication), nodeCount),
         sharding: Boolean(d.data.sharding),
         shards_count: d.data.sharding ? Number(d.data.shards_count) : 1,
         eviction_policy: d.data.eviction_policy,
@@ -276,6 +298,7 @@ export function diagramToCreateInput(
         oss_cluster: Boolean(d.data.oss_cluster),
         flex: Boolean(d.data.flex),
       }));
+  };
 
   const applications = apps.map((a) => {
     const connectClusters = edges
@@ -296,6 +319,10 @@ export function diagramToCreateInput(
           kind: a.data.artifact.kind,
           ref: a.data.artifact.ref,
           type: a.data.artifact.type,
+          ...(a.data.artifact.kind === "git" && a.data.artifact.branch
+            ? { branch: a.data.artifact.branch }
+            : {}),
+          ...(a.data.artifact.kind === "git" ? { runInDocker: Boolean(a.data.artifact.runInDocker) } : {}),
         },
         requirements: a.data.requirements,
         vm_count: Number(a.data.vm_count),
@@ -473,24 +500,25 @@ export const ROOT_SIZE = { width: 960, height: 560 };
 const DIAGRAM_DEFAULT_RS_VERSION = "8.2.0-46";
 
 /**
- * Layout constants on the Redis 4-pt grid. `PAD` is the inner padding of a
+ * Layout constants on the Redis 8px grid. `PAD` is the inner padding of a
  * container, `GAP` the space between siblings, and the header heights reserve
- * room for each container's own title row so children never overlap it.
+ * room for each container's own title, machine line, and capacity so child
+ * boxes never overlap that chrome.
  */
 export const LAYOUT = {
-  PAD: 16,
-  GAP: 12,
-  CLUSTER_HEADER: 72,
+  PAD: 32,
+  GAP: 24,
+  CLUSTER_HEADER: 120,
   ROOT_HEADER: 64,
 } as const;
 
 /** Deterministic sizes for each node kind. Containers may grow past these. */
 export const NODE_SIZE: Record<string, { width: number; height: number }> = {
-  database: { width: 210, height: 140 },
+  database: { width: 248, height: 192 },
   loadbalancer: { width: 200, height: 72 },
-  cluster: { width: 250, height: 120 },
-  vms: { width: 230, height: 120 },
-  application: { width: 230, height: 120 },
+  cluster: { width: 312, height: 128 },
+  vms: { width: 232, height: 120 },
+  application: { width: 232, height: 120 },
 };
 
 /** Initial style for a freshly dropped node, if the kind has a preset size. */
@@ -648,7 +676,7 @@ type StoredAppCfg = {
   env?: Record<string, unknown>;
   connectClusters?: unknown[];
   requirements?: unknown[];
-  artifact?: { kind?: string; ref?: string; type?: string };
+  artifact?: { kind?: string; ref?: string; type?: string; branch?: string; runInDocker?: boolean };
   vm_count?: number;
   machine_type?: string;
   disk_gib?: number;
@@ -789,6 +817,8 @@ export function createInputToDiagram(
           kind: (a.artifact?.kind as ArtifactSource["kind"]) || "upload",
           ref: dstr(a.artifact?.ref),
           type: (a.artifact?.type as ArtifactSource["type"]) || "jar",
+          branch: dstr(a.artifact?.branch),
+          runInDocker: Boolean(a.artifact?.runInDocker),
         },
         vm_count: dnum(a.vm_count, 1),
         machine_type: dstr(a.machine_type),

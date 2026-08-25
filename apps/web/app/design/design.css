@@ -62,7 +62,7 @@
 .design-field-wide {
   grid-column: 1 / -1;
   display: grid;
-  gap: 6px;
+  gap: 8px;
 }
 
 @media (max-width: 900px) {
@@ -80,11 +80,47 @@
 }
 
 .design-canvas-wrap {
+  position: relative;
   height: 620px;
   border: 1px solid var(--panel-border);
   border-radius: var(--radius);
   background: var(--panel-bg);
   overflow: hidden;
+}
+
+.design-canvas-lock {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  display: grid;
+  place-content: center;
+  gap: 8px;
+  padding: calc(var(--space) * 3);
+  text-align: center;
+  pointer-events: auto;
+  background: color-mix(in srgb, var(--panel-bg) 88%, transparent);
+  color: var(--redis-text-primary);
+}
+
+.design-canvas-lock-title {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.design-canvas-lock-body {
+  margin: 0;
+  color: var(--redis-text-secondary);
+}
+
+.design-palette-disabled .design-palette-item {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.design-palette-disabled .design-palette-item:hover {
+  border-color: var(--border-soft);
+  color: var(--redis-text-primary);
 }
 
 .design-side {
@@ -115,8 +151,8 @@
 .design-palette-item {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 10px 12px;
+  gap: 8px;
+  padding: 8px;
   border: 1px solid var(--border-soft);
   border-left: 3px solid var(--redis-hyper);
   border-radius: var(--radius);
@@ -126,7 +162,7 @@
   font-weight: 500;
   cursor: grab;
   user-select: none;
-  transition: border-color 0.15s ease, color 0.15s ease;
+  transition: var(--redis-transition);
 }
 
 .design-palette-item:hover {
@@ -143,6 +179,17 @@
   display: none;
 }
 
+.design-canvas-wrap .react-flow {
+  background: var(--panel-bg);
+}
+
+.design-canvas-wrap .react-flow__controls {
+  box-shadow: none;
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
 .design-canvas-wrap .react-flow__controls-button {
   background: var(--input-bg);
   border-bottom: 1px solid var(--border-soft);
@@ -157,7 +204,7 @@
 
 /* The load balancing link stands apart from application to cluster edges. */
 .design-canvas-wrap .react-flow__edge.design-edge-lb .react-flow__edge-path {
-  stroke: var(--warning);
+  stroke: var(--redis-text-link);
   stroke-width: 2.5;
   stroke-dasharray: 6 4;
 }
@@ -187,12 +234,13 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 8px 10px;
+  padding: 8px;
+  flex-shrink: 0;
 }
 
 .design-root-head {
   border-bottom: 1px dashed var(--redis-border-muted);
-  color: var(--redis-text-muted);
+  color: var(--redis-text-secondary);
   font-size: 12px;
   text-transform: uppercase;
   letter-spacing: 0.04em;
@@ -201,19 +249,24 @@
 .design-node-title {
   font-weight: 600;
   font-size: 13px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .design-node-tag {
   margin-left: auto;
   font-size: 11px;
-  color: var(--redis-text-muted);
+  color: var(--redis-text-secondary);
 }
 
 .design-node-meta {
-  padding: 0 10px;
+  padding: 0 8px;
   font-size: 11px;
-  color: var(--redis-text-muted);
+  color: var(--redis-text-secondary);
   word-break: break-word;
+  flex-shrink: 0;
 }
 
 .design-cluster,
@@ -227,6 +280,10 @@
   border-radius: var(--radius);
   background: var(--redis-bg-primary);
   color: var(--redis-text-primary);
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .design-cluster {
@@ -235,8 +292,8 @@
 
 .design-db {
   border-left: 3px solid var(--redis-text-link);
-  min-width: 150px;
-  overflow: hidden;
+  gap: 8px;
+  padding-bottom: 8px;
 }
 
 .design-vms {
@@ -248,14 +305,24 @@
 }
 
 .design-lb {
-  border-left: 3px solid var(--warning);
+  border-left: 3px solid var(--redis-text-link);
 }
 
 .design-cap {
-  margin: 6px 10px 8px;
+  margin: 8px;
   font-family: var(--redis-font-mono);
   font-size: 11px;
-  color: var(--success);
+  color: var(--redis-text-secondary);
+  flex-shrink: 0;
+}
+
+.design-cap-free {
+  display: inline-block;
+  width: fit-content;
+  padding: 2px 8px;
+  border-radius: var(--radius);
+  background: var(--redis-volt);
+  color: var(--status-pass-fg, #091a23);
 }
 
 .design-cap-bad {
@@ -266,23 +333,25 @@
 .design-badges {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
-  padding: 4px 10px 8px;
+  gap: 8px;
+  padding: 0 8px;
+  flex-shrink: 0;
 }
 
 .design-badge {
   font-size: 10px;
   padding: 2px 8px;
-  border-radius: 999px;
+  border-radius: var(--radius);
   border: 1px solid var(--border-soft);
-  color: var(--redis-text-muted);
+  color: var(--redis-text-secondary);
 }
 
 .design-db-endpoint {
-  margin: 0 10px 8px;
+  margin: 0 8px;
   font-size: 10px;
-  color: var(--redis-text-muted);
+  color: var(--redis-text-secondary);
   line-height: 1.3;
+  flex-shrink: 0;
 }
 
 .design-db-endpoint-value {
@@ -302,14 +371,15 @@
 }
 
 .design-db-copy {
-  margin-top: 4px;
+  margin-top: 8px;
   font-family: var(--redis-font-body);
-  font-size: 9px;
-  padding: 1px 6px;
-  border-radius: 4px;
+  font-size: 10px;
+  padding: 0 8px;
+  min-height: 24px;
+  border-radius: var(--radius);
   border: 1px solid var(--border-soft);
   background: transparent;
-  color: var(--redis-text-muted);
+  color: var(--redis-text-secondary);
   cursor: pointer;
 }
 
@@ -335,7 +405,7 @@
   color: var(--redis-deep-hyper);
   font-size: 13px;
   font-weight: 500;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+  box-shadow: 0 4px 12px rgba(9, 26, 35, 0.16);
 }
 
 /* Modal */
@@ -357,14 +427,14 @@
   border: 1px solid var(--panel-border);
   border-radius: var(--radius);
   background: var(--redis-bg-primary);
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.25);
+  box-shadow: 0 12px 40px rgba(9, 26, 35, 0.28);
 }
 
 .design-modal-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 14px 16px;
+  padding: 16px;
   border-bottom: 1px solid var(--border-soft);
 }
 
@@ -374,8 +444,8 @@
 }
 
 .design-modal-x {
-  min-height: 32px;
-  min-width: 32px;
+  min-height: 44px;
+  min-width: 44px;
   border: none;
   background: transparent;
   color: var(--redis-text-muted);
@@ -398,13 +468,13 @@
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 14px 16px;
+  padding: 16px;
   border-top: 1px solid var(--border-soft);
 }
 
 .design-modal-foot-right {
   display: flex;
-  gap: 10px;
+  gap: 8px;
 }
 
 .design-check-row {
@@ -415,16 +485,109 @@
   font-size: 13px;
   color: var(--redis-text-secondary);
   font-weight: 500;
+  width: auto;
+}
+
+.design-check-row input[type="checkbox"],
+.design-check-row input[type="radio"] {
+  width: 16px;
+  height: 16px;
+  min-width: 16px;
+  min-height: 16px;
+  padding: 0;
+  margin: 0;
 }
 
 .design-radio-row {
   display: flex;
-  gap: 16px;
   flex-wrap: wrap;
+  align-items: stretch;
+  gap: 8px;
+}
+
+.design-radio-row .design-check-row {
+  min-height: 44px;
+  padding: 0 12px;
+  flex: 1 1 0;
+  min-width: 0;
+  justify-content: flex-start;
+  box-sizing: border-box;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius);
+  background: var(--panel-bg);
+}
+
+.design-radio-row .design-check-row:has(input:checked) {
+  border-color: var(--redis-hyper);
+  color: var(--redis-text-primary);
 }
 
 .design-env-row {
   display: grid;
   grid-template-columns: 1fr 1fr auto;
   gap: 8px;
+}
+
+.design-badge-failed {
+  border-color: var(--redis-hyper);
+  color: var(--redis-hyper);
+}
+
+.design-badge-active,
+.design-badge-ready {
+  border-color: var(--redis-text-secondary);
+  color: var(--redis-text-secondary);
+}
+
+.instance-diagram-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(260px, 320px);
+  gap: calc(var(--space) * 2);
+}
+
+.instance-diagram-canvas {
+  height: 520px;
+}
+
+.instance-spec {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+}
+
+.instance-spec h3 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.instance-spec-empty {
+  color: var(--redis-text-secondary);
+  margin: 0;
+}
+
+.instance-spec dl {
+  margin: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.instance-spec dt {
+  font-family: var(--redis-font-mono);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--redis-text-secondary);
+}
+
+.instance-spec dd {
+  margin: 0;
+  font-size: 14px;
+  word-break: break-word;
+}
+
+@media (max-width: 900px) {
+  .instance-diagram-layout {
+    grid-template-columns: 1fr;
+  }
 }

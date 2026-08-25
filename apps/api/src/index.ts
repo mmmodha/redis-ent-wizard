@@ -28,8 +28,9 @@ import {
 import { normalizeApplications, resolveApplicationArtifacts } from "./applications.js";
 import { probeHealth } from "./health.js";
 import { writeInstanceWorkspace } from "./workspace.js";
-import { computeProgress, clusterNamesFromConfig } from "./progress.js";
+import { computeProgress, progressExtrasFromConfig } from "./progress.js";
 import { preflight } from "./preflight.js";
+import { clusterTrialShardGate } from "./trial-shards.js";
 import {
   GcpApiError,
   listDnsZones,
@@ -91,9 +92,11 @@ const applicationSchema = z.object({
   connectClusters: z.array(z.string().max(40)).max(3).optional(),
   artifact: z
     .object({
-      kind: z.enum(["upload", "url", "gcs"]),
+      kind: z.enum(["upload", "url", "gcs", "git"]),
       ref: z.string().min(1).max(2048),
       type: z.enum(["jar", "binary"]),
+      branch: z.string().max(200).optional(),
+      runInDocker: z.boolean().optional(),
     })
     .optional(),
   vm_count: z.number().int().min(1).max(10).optional(),
@@ -197,7 +200,7 @@ async function decorate(inst: InstanceRecord) {
     inst.mode,
     operationStartedAt(inst),
     inst.health,
-    { clusterNames: clusterNamesFromConfig(inst.config, inst.mode) },
+    progressExtrasFromConfig(inst.config, inst.mode),
   );
   const cfg = (inst.config || {}) as Record<string, unknown>;
   const access = buildAccessView(endpoints, {
@@ -493,7 +496,7 @@ app.get<{ Params: { id: string } }>("/instances/:id/progress", async (req, reply
     inst.mode,
     operationStartedAt(inst),
     inst.health,
-    { clusterNames: clusterNamesFromConfig(inst.config, inst.mode) },
+    progressExtrasFromConfig(inst.config, inst.mode),
   );
 });
 
@@ -525,7 +528,10 @@ app.post<{ Params: { id: string } }>("/instances/:id/health", async (req, reply)
   return health;
 });
 
-app.post<{ Params: { id: string } }>("/instances/:id/databases/reconcile", async (req, reply) => {
+app.post<{
+  Params: { id: string };
+  Body: { clusters?: Array<{ name?: string; databases: unknown[] }> };
+}>("/instances/:id/databases/reconcile", async (req, reply) => {
   const user = requireUser(req);
   const inst = await getInstance(req.params.id);
   if (!inst) return reply.code(404).send({ error: "not found" });
@@ -535,10 +541,57 @@ app.post<{ Params: { id: string } }>("/instances/:id/databases/reconcile", async
     return httpError(reply, err);
   }
   if (inst.status !== "ready" && inst.status !== "degraded" && inst.status !== "bootstrapping") {
-    return reply.code(409).send({ error: `instance is ${inst.status}; databases can only be reconciled once the cluster is up` });
+    return reply.code(409).send({
+      error: `instance is ${inst.status}; databases can only be reconciled once the cluster is up`,
+    });
+  }
+  const parsed = z
+    .object({
+      clusters: z
+        .array(
+          z.object({
+            name: z.string().optional(),
+            databases: z.array(databaseSchema),
+          }),
+        )
+        .optional(),
+    })
+    .safeParse(req.body ?? {});
+  if (!parsed.success) {
+    return reply.code(400).send({ error: parsed.error.issues[0]?.message || "invalid database update" });
+  }
+  let current = inst;
+  if (parsed.data.clusters?.length) {
+    const cfg = { ...(inst.config || {}) } as Record<string, unknown>;
+    const raw = Array.isArray(cfg.clusters)
+      ? (cfg.clusters as Record<string, unknown>[]).map((c) => ({ ...c }))
+      : [];
+    for (let i = 0; i < parsed.data.clusters.length; i++) {
+      const row = parsed.data.clusters[i];
+      let idx = row.name
+        ? raw.findIndex((c) => String(c.name || "") === row.name)
+        : i;
+      if (idx < 0) idx = Math.min(i, Math.max(0, raw.length - 1));
+      if (!raw[idx]) continue;
+      const gate = clusterTrialShardGate({
+        name: String(raw[idx].name || row.name || ""),
+        license: String(raw[idx].license || ""),
+        databases: row.databases,
+        nodes: Number(raw[idx].nodes || raw[idx].rec_nodes || 1),
+      });
+      if (gate.blocked) {
+        return reply.code(400).send({ error: gate.message });
+      }
+      raw[idx] = { ...raw[idx], databases: row.databases };
+    }
+    current = await upsertInstance({
+      ...inst,
+      config: { ...cfg, clusters: raw },
+      updatedAt: new Date().toISOString(),
+    });
   }
   await audit(user, "instance.reconcile_databases", "instance", inst.id);
-  await provisionClusterResources(inst.id);
+  await provisionClusterResources(current.id);
   const updated = await getInstance(inst.id);
   return {
     ok: true,
@@ -589,7 +642,7 @@ app.get<{ Params: { id: string }; Querystring: { access_token?: string } }>(
               current.mode,
               operationStartedAt(current),
               current.health,
-              { clusterNames: clusterNamesFromConfig(current.config, current.mode) },
+              progressExtrasFromConfig(current.config, current.mode),
             )
           : undefined,
       })}\n\n`,

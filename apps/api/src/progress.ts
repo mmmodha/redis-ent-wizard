@@ -33,8 +33,16 @@ export interface Progress {
   elapsedSeconds?: number;
 }
 
+export type AppWorkloadPlan = {
+  name: string;
+  steps: string[];
+};
+
 export type ProgressContext = {
   clusterNames?: string[];
+  databaseCount?: number;
+  licenseCount?: number;
+  appWorkloads?: AppWorkloadPlan[];
 };
 
 export function clusterNamesFromConfig(
@@ -46,6 +54,53 @@ export function clusterNamesFromConfig(
   } catch {
     return [];
   }
+}
+
+export function progressExtrasFromConfig(
+  config: Record<string, unknown> | undefined,
+  mode: DeploymentMode,
+): ProgressContext {
+  const cfg = config || {};
+  let databaseCount = 0;
+  let licenseCount = 0;
+  try {
+    const clusters = normalizeClusters({ ...cfg, mode });
+    const raw = Array.isArray(cfg.clusters) ? (cfg.clusters as Record<string, unknown>[]) : [];
+    clusters.forEach((_, i) => {
+      const row = raw[i] || {};
+      const dbs = Array.isArray(row.databases) ? row.databases : [];
+      databaseCount += dbs.length;
+      if (String(row.license || "").trim()) licenseCount += 1;
+    });
+  } catch {
+    const raw = Array.isArray(cfg.clusters) ? (cfg.clusters as Record<string, unknown>[]) : [];
+    for (const row of raw) {
+      databaseCount += Array.isArray(row.databases) ? row.databases.length : 0;
+      if (String(row.license || "").trim()) licenseCount += 1;
+    }
+  }
+
+  const appWorkloads: AppWorkloadPlan[] = [];
+  const apps = Array.isArray(cfg.applications) ? (cfg.applications as Record<string, unknown>[]) : [];
+  for (const app of apps) {
+    const name = String(app.name || "").trim();
+    if (!name) continue;
+    const artifact = (app.artifact || {}) as Record<string, unknown>;
+    const reqs = Array.isArray(app.requirements) ? app.requirements.map(String) : [];
+    const steps: string[] = [];
+    if (artifact.kind === "git" || reqs.includes("git")) steps.push("clone");
+    if (artifact.runInDocker === true || reqs.includes("docker")) steps.push("docker");
+    if (String(app.command || "").trim()) steps.push("start");
+    if (!steps.length) continue;
+    appWorkloads.push({ name, steps });
+  }
+
+  return {
+    clusterNames: clusterNamesFromConfig(cfg, mode),
+    databaseCount,
+    licenseCount,
+    appWorkloads,
+  };
 }
 
 // Ordered so the UI reflects the rough order Terraform works through them.
@@ -225,6 +280,8 @@ const PHASE_LABELS: Record<string, string> = {
   bootstrap: "Installing Redis Enterprise",
   operator: "Installing Redis Enterprise Operator",
   rec: "Waiting for Redis Enterprise Cluster",
+  licenses: "Applying Redis licenses",
+  databases: "Creating Redis databases",
   ready: "Ready",
   degraded: "Cluster did not fully form",
   destroy_plan: "Planning teardown",
@@ -233,9 +290,20 @@ const PHASE_LABELS: Record<string, string> = {
   failed: "Failed",
 };
 
-const APPLY_ORDER_VM = ["init", "plan", "create", "bootstrap", "ready"];
-const APPLY_ORDER_GKE = ["init", "plan", "create", "operator", "rec", "ready"];
 const DESTROY_ORDER = ["init", "plan", "destroy", "destroyed"];
+
+function applyStepDefs(
+  mode: DeploymentMode,
+  extras?: ProgressContext,
+): { id: string; label: string }[] {
+  const base = mode === "gke" ? APPLY_STEPS_GKE : APPLY_STEPS_VM;
+  const extra: { id: string; label: string }[] = [];
+  if ((extras?.licenseCount ?? 0) > 0) extra.push({ id: "licenses", label: "Apply Redis licenses" });
+  if ((extras?.databaseCount ?? 0) > 0) extra.push({ id: "databases", label: "Create Redis databases" });
+  if (!extra.length) return base;
+  const readyIdx = base.findIndex((s) => s.id === "ready");
+  return [...base.slice(0, readyIdx), ...extra, ...base.slice(readyIdx)];
+}
 
 function lastMatch(log: string, re: RegExp): string | undefined {
   const matches = log.match(re);
@@ -367,6 +435,7 @@ function applyProgress(
   mode: DeploymentMode,
   failed: boolean,
   health?: ClusterHealth,
+  extras?: ProgressContext,
 ): Omit<Progress, "elapsedSeconds" | "operation" | "sections"> {
   const planMatch = /Plan: (\d+) to add/.exec(text);
   const resourcesTotal = planMatch ? Number(planMatch[1]) : 0;
@@ -377,13 +446,24 @@ function applyProgress(
     ? creating.trim().split(":")[0].replace(/^module\.stack\./, "")
     : undefined;
 
-  // Terraform finishing is not readiness: the software install happens after.
   const settleStep = mode === "gke" ? "rec" : "bootstrap";
   const degraded = status === "degraded";
+  const hasLicenses = (extras?.licenseCount ?? 0) > 0;
+  const hasDatabases = (extras?.databaseCount ?? 0) > 0;
+  const resourcesComplete = /=== CLUSTER RESOURCES COMPLETE/.test(text);
+  const clusterReadyMarked = /=== CLUSTER READY/.test(text) || health?.state === "ready";
+  const creatingDatabases = /=== CREATING DATABASES/.test(text);
+  const applyingLicenses = /=== APPLYING LICENSES/.test(text);
 
   let phase: string;
-  if (status === "ready") {
+  if (status === "ready" || resourcesComplete) {
     phase = "ready";
+  } else if (hasDatabases && creatingDatabases) {
+    phase = "databases";
+  } else if (hasLicenses && (applyingLicenses || (clusterReadyMarked && !creatingDatabases))) {
+    phase = "licenses";
+  } else if (hasDatabases && clusterReadyMarked) {
+    phase = "databases";
   } else if (status === "bootstrapping" || degraded) {
     phase = settleStep;
   } else if (/Apply complete/.test(text)) {
@@ -402,8 +482,8 @@ function applyProgress(
     phase = "queued";
   }
 
-  const defs = mode === "gke" ? APPLY_STEPS_GKE : APPLY_STEPS_VM;
-  const order = mode === "gke" ? APPLY_ORDER_GKE : APPLY_ORDER_VM;
+  const defs = applyStepDefs(mode, extras);
+  const order = defs.map((s) => s.id);
   const steps = buildSteps(defs, order, phase, failed || degraded, "ready");
 
   const createStep = steps.find((s) => s.id === "create");
@@ -416,18 +496,36 @@ function applyProgress(
     settle.detail = health.detail;
   }
 
+  const dbHits = [...text.matchAll(/database \S+\/\S+ (ready|FAILED)/g)];
+  const dbStep = steps.find((s) => s.id === "databases");
+  if (dbStep && hasDatabases) {
+    dbStep.detail = `${Math.min(dbHits.length, extras?.databaseCount || 0)} of ${extras?.databaseCount} databases`;
+  }
+
+  const licHits = [...text.matchAll(/license (?:applied|FAILED)/g)];
+  const licStep = steps.find((s) => s.id === "licenses");
+  if (licStep && hasLicenses) {
+    licStep.detail = `${Math.min(licHits.length, extras?.licenseCount || 0)} of ${extras?.licenseCount} licenses`;
+  }
+
+  const postBootstrap = hasLicenses || hasDatabases;
   let percent: number;
   if (phase === "ready") {
     percent = 100;
+  } else if (phase === "databases") {
+    const total = Math.max(1, extras?.databaseCount || 1);
+    percent = 86 + Math.min(1, dbHits.length / total) * 10;
+  } else if (phase === "licenses") {
+    const total = Math.max(1, extras?.licenseCount || 1);
+    percent = 78 + Math.min(1, licHits.length / total) * 6;
   } else if (phase === settleStep) {
-    // Reserve the last stretch of the bar for the install/cluster-forming wait.
     const ratio =
       health && health.nodesExpected > 0
         ? Math.min(1, health.nodesActive / health.nodesExpected)
         : 0;
-    percent = 80 + ratio * 18;
+    percent = postBootstrap ? 55 + ratio * 22 : 80 + ratio * 18;
   } else if (phase === "create" && resourcesTotal > 0) {
-    percent = 25 + Math.min(1, resourcesDone / resourcesTotal) * (mode === "gke" ? 40 : 65);
+    percent = 25 + Math.min(1, resourcesDone / resourcesTotal) * (postBootstrap ? 28 : mode === "gke" ? 40 : 65);
   } else {
     percent = { queued: 2, init: 8, plan: 15, create: 25, operator: 70 }[phase] ?? 5;
   }
@@ -443,6 +541,68 @@ function applyProgress(
   };
 }
 
+function databaseSection(text: string, extras?: ProgressContext, failed?: boolean): ResourceSection | undefined {
+  const total = extras?.databaseCount ?? 0;
+  if (total <= 0) return undefined;
+  const hits = [...text.matchAll(/database (\S+)\/(\S+) (ready|FAILED)/g)];
+  const done = Math.min(hits.length, total);
+  const anyFailed = hits.some((m) => m[3] === "FAILED");
+  const started = /=== CREATING DATABASES/.test(text) || hits.length > 0;
+  let state: StepState = "pending";
+  if (failed && started) state = "failed";
+  else if (done >= total && total > 0) state = anyFailed ? "failed" : "done";
+  else if (started) state = "active";
+  return {
+    id: "databases",
+    label: "Redis databases",
+    total,
+    done,
+    state,
+    current: started && state === "active" ? hits[hits.length - 1]?.[0] : undefined,
+  };
+}
+
+function appWorkloadSections(
+  text: string,
+  extras?: ProgressContext,
+  failed?: boolean,
+  complete?: boolean,
+): ResourceSection[] {
+  const plans = extras?.appWorkloads ?? [];
+  if (!plans.length) return [];
+  const seen = new Map<string, Set<string>>();
+  const finished = new Set<string>();
+  for (const m of text.matchAll(/=== APPWL (\S+) STEP (\S+) ===/g)) {
+    const name = m[1];
+    const step = m[2];
+    if (!seen.has(name)) seen.set(name, new Set());
+    seen.get(name)!.add(step);
+  }
+  for (const m of text.matchAll(/=== APPWL (\S+) DONE ===/g)) {
+    finished.add(m[1]);
+  }
+  return plans.map((plan) => {
+    const id = `appwl-${plan.name}`;
+    const total = plan.steps.length;
+    const got = seen.get(plan.name) || new Set();
+    const done = finished.has(plan.name) || complete ? total : Math.min(got.size, total);
+    const started = got.size > 0 || finished.has(plan.name);
+    let state: StepState = "pending";
+    if (failed && started) state = "failed";
+    else if (done >= total) state = "done";
+    else if (started) state = "active";
+    const currentStep = plan.steps.find((s) => !got.has(s));
+    return {
+      id,
+      label: `Application ${plan.name}`,
+      total,
+      done,
+      state,
+      current: state === "active" && currentStep ? currentStep : undefined,
+    };
+  });
+}
+
 export function computeProgress(
   log: string,
   status: InstanceStatus,
@@ -452,7 +612,6 @@ export function computeProgress(
   ctx?: ProgressContext,
 ): Progress {
   const op = lastOperation(stripAnsi(log));
-  // A destroying/destroyed status is authoritative even before the marker lands.
   const kind: OperationKind =
     status === "destroying" || status === "destroyed" ? "destroy" : op.kind;
   const failed = status === "failed";
@@ -461,10 +620,8 @@ export function computeProgress(
   const core =
     kind === "destroy"
       ? destroyProgress(op.text, status, failed)
-      : applyProgress(op.text, status, mode, failed, health);
+      : applyProgress(op.text, status, mode, failed, health, ctx);
 
-  // Freeze the timer once the run has finished so it reports duration, not age.
-  // While the cluster is still forming the work is ongoing, so the clock keeps running.
   const startedMs = new Date(op.startedAt ?? startedAt ?? "").getTime();
   const endedMs = op.finishedAt && !settling ? new Date(op.finishedAt).getTime() : Date.now();
   const elapsedSeconds = Number.isNaN(startedMs)
@@ -476,7 +633,6 @@ export function computeProgress(
     complete ? { ...s, state: "done" as StepState, current: undefined } : s,
   );
 
-  // The software install is invisible to Terraform, so it is reported from live probes.
   if (kind === "apply" && health && status !== "failed") {
     const clusterDone = health.state === "ready";
     sections.push({
@@ -487,6 +643,15 @@ export function computeProgress(
       state: clusterDone ? "done" : status === "degraded" ? "failed" : "active",
       current: clusterDone ? undefined : health.detail,
     });
+  }
+
+  const dbs = databaseSection(op.text, ctx, failed);
+  if (dbs) {
+    sections.push(complete ? { ...dbs, state: dbs.state === "failed" ? "failed" : "done", current: undefined } : dbs);
+  }
+
+  for (const app of appWorkloadSections(op.text, ctx, failed, complete)) {
+    sections.push(complete && app.state !== "failed" ? { ...app, state: "done", current: undefined } : app);
   }
 
   return {

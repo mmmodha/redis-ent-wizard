@@ -4,6 +4,8 @@ import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { AccessPanel } from "@/components/AccessPanel";
+import { InstanceDiagram } from "@/components/instance/InstanceDiagram";
+import { DatabaseRetryPanel } from "@/components/instance/DatabaseRetryPanel";
 import { ProgressTracker } from "@/components/ProgressTracker";
 import { StatusBadge } from "@/components/StatusBadge";
 import {
@@ -18,6 +20,7 @@ import {
   type Instance,
   type Progress,
 } from "@/lib/api";
+import { instanceCredentialsRef } from "@/lib/cluster-capacity";
 
 function asClusters(cfg: Record<string, unknown> | undefined): Array<Record<string, unknown>> {
   if (Array.isArray(cfg?.clusters) && cfg.clusters.length) {
@@ -377,10 +380,10 @@ export default function InstanceDetailPage() {
   const showLbPanel = loadBalancers.length > 0;
   const dbStatusColor = (status: string) =>
     status === "active" || status === "applied"
-      ? "var(--success)"
+      ? "var(--redis-text-secondary)"
       : status === "failed"
-        ? "var(--redis-hyper)"
-        : "var(--redis-text-muted)";
+        ? "var(--redis-deep-hyper)"
+        : "var(--redis-text-secondary)";
   const showDbPanel = databases.length > 0 || licenses.length > 0 || configuredDbCount > 0;
   const showAppPanel = vmWorkloads.length > 0 || gkeAppServices.length > 0 || configuredAppCount > 0;
 
@@ -399,6 +402,25 @@ export default function InstanceDetailPage() {
 
       {error ? <div className="error">{error}</div> : null}
 
+      {inst?.config ? (
+        <div className="panel" style={{ marginBottom: 24 }}>
+          <h2 style={{ marginTop: 0 }}>Deployment</h2>
+          <p className="hint" style={{ marginTop: 0 }}>
+            The topology that was applied. Click a node for machine size, databases, GitHub/Docker settings, and live
+            endpoints.
+          </p>
+          <InstanceDiagram
+            config={inst.config}
+            mode={inst.mode}
+            databaseStates={inst.databaseStates}
+            endpoints={inst.endpoints}
+            credentialsFile={instanceCredentialsRef(inst)}
+            project={inst.project}
+            region={inst.region}
+          />
+        </div>
+      ) : null}
+
       <div className="grid grid-2" style={{ marginBottom: 24 }}>
         <div className="panel">
           <div className="progress-head" style={{ marginTop: 0 }}>
@@ -413,9 +435,11 @@ export default function InstanceDetailPage() {
               <div style={{ flex: 1 }}>
                 <div className="health-row">
                   <strong>
-                    {settling
+                    {settling && inst.health.state !== "ready"
                       ? "Redis Enterprise is still coming up"
-                      : "Redis Enterprise cluster is up"}
+                      : settling
+                        ? "Cluster is up — finishing databases and application setup"
+                        : "Redis Enterprise cluster is up"}
                   </strong>
                   <span className="mono">
                     {inst.health.nodesActive}/{inst.health.nodesExpected} nodes
@@ -615,6 +639,9 @@ export default function InstanceDetailPage() {
               ))}
             </div>
           )}
+          {inst && databases.some((d) => d.status === "failed") ? (
+            <DatabaseRetryPanel inst={inst} states={databases} onError={setError} />
+          ) : null}
           {licenses.length ? (
             <div style={{ marginTop: 16 }}>
               <h3 style={{ margin: "0 0 8px" }}>License</h3>

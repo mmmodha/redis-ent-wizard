@@ -15,10 +15,10 @@ const ITEMS: PaletteItem[] = [
   { kind: "loadbalancer", label: "Load balancer", icon: "load-balancer", hint: "Drop on VMs or an app" },
 ];
 
-export function Palette({ mode }: { mode: "vm" | "gke" }) {
+export function Palette({ mode, disabled }: { mode: "vm" | "gke"; disabled?: boolean }) {
   const items = mode === "gke" ? ITEMS.filter((i) => i.kind !== "vms") : ITEMS;
   return (
-    <div className="design-palette">
+    <div className={`design-palette ${disabled ? "design-palette-disabled" : ""}`}>
       <p className="page-eyebrow" style={{ margin: "0 0 8px" }}>
         Components
       </p>
@@ -27,12 +27,17 @@ export function Palette({ mode }: { mode: "vm" | "gke" }) {
           <div
             key={item.kind}
             className="design-palette-item"
-            draggable
+            draggable={!disabled}
+            aria-disabled={disabled || undefined}
             onDragStart={(e) => {
+              if (disabled) {
+                e.preventDefault();
+                return;
+              }
               e.dataTransfer.setData(PALETTE_MIME, item.kind);
               e.dataTransfer.effectAllowed = "move";
             }}
-            title={item.hint}
+            title={disabled ? "Select a service account key first" : item.hint}
           >
             <BrandIcon name={item.icon} size={18} />
             <span>{item.label}</span>

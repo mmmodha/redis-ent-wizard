@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { normalizeApplicationName, normalizeApplications } from "./applications.js";
+import {
+  normalizeApplicationName,
+  normalizeApplications,
+  parseGitHubSource,
+} from "./applications.js";
 import type { Application } from "./types.js";
 
 describe("normalizeApplicationName", () => {
@@ -48,6 +52,64 @@ describe("normalizeApplications (vm)", () => {
     );
   });
 
+  it("accepts a GitHub repo and installs git by default without Docker", () => {
+    const [app] = normalizeApplications({
+      mode: "vm",
+      applications: [
+        vmApp({
+          artifact: { kind: "git", ref: "https://github.com/acme/demo", type: "binary" },
+          requirements: ["python3"],
+        }),
+      ],
+    });
+    assert.equal(app.artifact?.kind, "git");
+    assert.equal(app.artifact?.ref, "https://github.com/acme/demo.git");
+    assert.equal(app.artifact?.runInDocker, false);
+    assert.deepEqual(app.requirements, ["python3", "git"]);
+  });
+
+  it("installs Docker when the GitHub source is set to run in Docker", () => {
+    const [app] = normalizeApplications({
+      mode: "vm",
+      applications: [
+        vmApp({
+          artifact: {
+            kind: "git",
+            ref: "https://github.com/acme/demo.git",
+            type: "binary",
+            runInDocker: true,
+          },
+        }),
+      ],
+    });
+    assert.equal(app.artifact?.runInDocker, true);
+    assert.ok(app.requirements?.includes("git"));
+    assert.ok(app.requirements?.includes("docker"));
+  });
+
+  it("keeps an explicit GitHub branch", () => {
+    const [app] = normalizeApplications({
+      mode: "vm",
+      applications: [
+        vmApp({
+          artifact: { kind: "git", ref: "https://github.com/acme/demo.git", type: "binary", branch: "release" },
+        }),
+      ],
+    });
+    assert.equal(app.artifact?.branch, "release");
+  });
+
+  it("rejects a git artifact that is not a GitHub https URL", () => {
+    assert.throws(
+      () =>
+        normalizeApplications({
+          mode: "vm",
+          applications: [vmApp({ artifact: { kind: "git", ref: "https://example.com/app.jar", type: "binary" } })],
+        }),
+      /GitHub/,
+    );
+  });
+
   it("rejects duplicate names", () => {
     assert.throws(() =>
       normalizeApplications({ mode: "vm", applications: [vmApp(), vmApp()] }),
@@ -65,5 +127,28 @@ describe("normalizeApplications (gke)", () => {
     assert.equal(app.replicas, 20);
     assert.equal(app.expose, "lb");
     assert.throws(() => normalizeApplications({ mode: "gke", applications: [{ name: "svc" }] }));
+  });
+});
+
+describe("parseGitHubSource", () => {
+  it("normalizes owner/repo URLs and GitHub tree links", () => {
+    assert.deepEqual(parseGitHubSource("https://github.com/acme/demo"), {
+      cloneUrl: "https://github.com/acme/demo.git",
+      branch: "",
+    });
+    assert.deepEqual(parseGitHubSource("https://github.com/acme/demo.git#develop"), {
+      cloneUrl: "https://github.com/acme/demo.git",
+      branch: "develop",
+    });
+    assert.deepEqual(parseGitHubSource("https://github.com/acme/demo/tree/feature/foo"), {
+      cloneUrl: "https://github.com/acme/demo.git",
+      branch: "feature/foo",
+    });
+  });
+
+  it("rejects non-GitHub refs", () => {
+    assert.equal(parseGitHubSource("https://gitlab.com/acme/demo.git"), null);
+    assert.equal(parseGitHubSource("git@github.com:acme/demo.git"), null);
+    assert.equal(parseGitHubSource(""), null);
   });
 });

@@ -17,6 +17,7 @@ import {
 } from "./gcp.js";
 import { normalizeApplications } from "./applications.js";
 import { capacityFor } from "./databases.js";
+import { clusterTrialShardGate } from "./trial-shards.js";
 import { LOCAL_SSD_GIB, maxLocalSsdsForMachineType } from "./nvme.js";
 import {
   describeAppWebExposure,
@@ -708,6 +709,21 @@ export async function preflight(
           ),
         );
         continue;
+      }
+      const trial = clusterTrialShardGate({
+        name: clusters[i].name,
+        license: String(rawClusters[i]?.license || ""),
+        databases: dbs,
+        nodes: clusters[i].nodes,
+      });
+      if (trial.blocked) {
+        checks.push(
+          fail(
+            clusters.length > 1 ? `trial_shards_${i}` : "trial_shards",
+            "Trial license shards",
+            trial.message,
+          ),
+        );
       }
       const machineType = mode === "vm" ? clusters[i].machine_type : input.gke_machine_type || "e2-standard-8";
       try {
