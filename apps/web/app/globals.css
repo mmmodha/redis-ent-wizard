@@ -533,8 +533,15 @@ input:invalid {
   background: var(--redis-text-muted);
 }
 
+.status-ready {
+  padding: 2px 8px;
+  border-radius: var(--radius);
+  background: var(--status-pass-bg);
+  color: var(--status-pass-fg);
+}
+
 .status-ready .status-dot {
-  background: var(--success);
+  background: var(--status-pass-fg);
 }
 
 .status-destroyed .status-dot {

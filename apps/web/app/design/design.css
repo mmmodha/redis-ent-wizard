@@ -535,8 +535,9 @@
 
 .design-badge-active,
 .design-badge-ready {
-  border-color: var(--redis-text-secondary);
-  color: var(--redis-text-secondary);
+  background: var(--redis-volt);
+  border-color: var(--redis-volt);
+  color: var(--status-pass-fg, #091a23);
 }
 
 .instance-diagram-layout {

@@ -21,6 +21,7 @@ import {
   type Progress,
 } from "@/lib/api";
 import { instanceCredentialsRef } from "@/lib/cluster-capacity";
+import { statusToneColor } from "@/lib/status-tone";
 
 function asClusters(cfg: Record<string, unknown> | undefined): Array<Record<string, unknown>> {
   if (Array.isArray(cfg?.clusters) && cfg.clusters.length) {
@@ -378,12 +379,7 @@ export default function InstanceDetailPage() {
     }
   });
   const showLbPanel = loadBalancers.length > 0;
-  const dbStatusColor = (status: string) =>
-    status === "active" || status === "applied"
-      ? "var(--redis-text-secondary)"
-      : status === "failed"
-        ? "var(--redis-deep-hyper)"
-        : "var(--redis-text-secondary)";
+  const dbStatusColor = (status: string) => statusToneColor(status);
   const showDbPanel = databases.length > 0 || licenses.length > 0 || configuredDbCount > 0;
   const showAppPanel = vmWorkloads.length > 0 || gkeAppServices.length > 0 || configuredAppCount > 0;
 

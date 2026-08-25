@@ -1,19 +1,15 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { DEFAULT_THEME, THEME_STORAGE_KEY, type Theme } from "@/lib/theme";
 
-type Theme = "light" | "dark";
-
-export const THEME_STORAGE_KEY = "rew-theme";
-
-// Mirrors the pre-paint script in layout.tsx, which has already set data-theme.
 function currentTheme(): Theme {
-  if (typeof document === "undefined") return "light";
-  return document.documentElement.dataset.theme === "dark" ? "dark" : "light";
+  if (typeof document === "undefined") return DEFAULT_THEME;
+  return document.documentElement.dataset.theme === "light" ? "light" : "dark";
 }
 
 export function ThemeToggle() {
-  const [theme, setTheme] = useState<Theme>("light");
+  const [theme, setTheme] = useState<Theme>(DEFAULT_THEME);
   const [mounted, setMounted] = useState(false);
 
   useEffect(() => {

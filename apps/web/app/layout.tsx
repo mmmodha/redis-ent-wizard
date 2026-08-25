@@ -11,12 +11,12 @@ export const metadata: Metadata = {
   },
 };
 
-// Runs before first paint so the stored theme does not flash the wrong palette.
-const THEME_INIT = `(function(){try{var s=localStorage.getItem("rew-theme");var d=s?s==="dark":window.matchMedia("(prefers-color-scheme: dark)").matches;document.documentElement.dataset.theme=d?"dark":"light";}catch(e){document.documentElement.dataset.theme="light";}})();`;
+// Must match resolveTheme() in lib/theme.ts (inline so it runs before first paint).
+const THEME_INIT = `(function(){try{var s=localStorage.getItem("rew-theme");document.documentElement.dataset.theme=s==="light"?"light":"dark";}catch(e){document.documentElement.dataset.theme="dark";}})();`;
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en" suppressHydrationWarning>
+    <html lang="en" data-theme="dark" suppressHydrationWarning>
       <head>
         <script dangerouslySetInnerHTML={{ __html: THEME_INIT }} />
         <link rel="preconnect" href="https://fonts.googleapis.com" />
