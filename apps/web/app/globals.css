@@ -1384,6 +1384,19 @@ input[type="radio"] {
   margin-top: calc(var(--space) * 2);
 }
 
+.sa-setup-fields {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  gap: 16px;
+  align-items: end;
+}
+
+.sa-setup-script {
+  max-height: 360px;
+  overflow: auto;
+  font-family: var(--redis-font-mono);
+}
+
 textarea.mono {
   font-family: var(--redis-font-mono);
   font-size: 12px;
@@ -1568,6 +1581,10 @@ textarea.mono {
 }
 
 @media (max-width: 720px) {
+  .sa-setup-fields {
+    grid-template-columns: 1fr;
+  }
+
   .brand-sub {
     display: none;
   }

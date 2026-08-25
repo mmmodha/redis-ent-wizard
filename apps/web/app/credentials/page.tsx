@@ -12,12 +12,17 @@ import {
   type CredentialVerifyResult,
 } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
+import { saKeySetupScript } from "@/lib/sa-key-setup";
 
 export default function CredentialsPage() {
   const { user, config, login, ready } = useAuth();
   const [list, setList] = useState<Credential[]>([]);
   const [name, setName] = useState("");
   const [json, setJson] = useState("");
+  const [setupProject, setSetupProject] = useState("");
+  const [setupSaId, setSetupSaId] = useState("rew-wizard");
+  const [setupGke, setSetupGke] = useState(false);
+  const [copiedSetup, setCopiedSetup] = useState(false);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [verifying, setVerifying] = useState(false);
@@ -95,8 +100,8 @@ export default function CredentialsPage() {
           <p className="page-eyebrow">GCP</p>
           <h2 className="page-title">Credentials</h2>
           <p className="page-sub">
-            Add your GCP service account JSON, then verify it has the IAM permissions the wizard
-            needs for VM or GKE deploys.
+            If you do not have a key yet, copy the commands below into Cloud Shell. Then paste the
+            JSON here, save, and verify.
           </p>
         </div>
         <Link className="btn" href="/wizard">
@@ -105,6 +110,72 @@ export default function CredentialsPage() {
       </div>
 
       {error ? <div className="error">{error}</div> : null}
+
+      <div className="panel" style={{ marginBottom: 16 }}>
+        <h3 style={{ marginTop: 0 }}>Create a JSON key</h3>
+        <p className="hint" style={{ marginTop: 0 }}>
+          Run these as a project admin (IAM Admin). They create a least-privilege service account —
+          not Owner or Compute Admin — write a JSON key, and print it so you can paste it below.
+          Delete the file after you save it here.
+        </p>
+        <div className="sa-setup-fields">
+          <label>
+            GCP project ID
+            <input
+              value={setupProject}
+              onChange={(e) => setSetupProject(e.target.value)}
+              placeholder="YOUR_PROJECT_ID"
+              autoComplete="off"
+            />
+          </label>
+          <label>
+            Service account ID
+            <input
+              value={setupSaId}
+              onChange={(e) => setSetupSaId(e.target.value)}
+              placeholder="rew-wizard"
+              autoComplete="off"
+            />
+          </label>
+          <label className="wiz-check-row" style={{ alignSelf: "end", paddingBottom: 8 }}>
+            <input
+              type="checkbox"
+              checked={setupGke}
+              onChange={(e) => setSetupGke(e.target.checked)}
+            />
+            Include GKE roles
+          </label>
+        </div>
+        <div className="cred-form-actions" style={{ marginTop: 8, marginBottom: 8 }}>
+          <button
+            className="btn btn-primary"
+            type="button"
+            onClick={async () => {
+              const script = saKeySetupScript({
+                projectId: setupProject,
+                saId: setupSaId,
+                includeGke: setupGke,
+              });
+              try {
+                await navigator.clipboard.writeText(script);
+                setCopiedSetup(true);
+                window.setTimeout(() => setCopiedSetup(false), 2000);
+              } catch {
+                setError("Could not copy — select the commands below and copy them yourself.");
+              }
+            }}
+          >
+            {copiedSetup ? "Copied" : "Copy commands"}
+          </button>
+        </div>
+        <pre className="check-guide sa-setup-script" tabIndex={0}>
+          {saKeySetupScript({
+            projectId: setupProject,
+            saId: setupSaId,
+            includeGke: setupGke,
+          })}
+        </pre>
+      </div>
 
       <div className="grid grid-2">
         <div className="panel">
