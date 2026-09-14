@@ -119,7 +119,6 @@ export type DesignSettings = {
   folder: string;
   youremail: string;
   skip_deletion: boolean;
-  redis_enabled: boolean;
   mode: "vm" | "gke";
   RS_admin: string;
   operator_chart_version: string;
@@ -345,7 +344,8 @@ export function diagramToCreateInput(
     mode: settings.mode,
     youremail: settings.youremail,
     skip_deletion: settings.skip_deletion,
-    redis_enabled: settings.mode === "vm" ? settings.redis_enabled !== false : true,
+    // Redis intent is derived from the canvas: a cluster node present ⇒ deploy Redis.
+    redis_enabled: settings.mode === "vm" ? clusters.length > 0 : true,
     project: settings.project,
     credentialsFile: settings.credentialsFile,
     region_name: settings.region_name,
@@ -356,8 +356,7 @@ export function diagramToCreateInput(
   };
 
   if (settings.mode === "vm") {
-    const redisOn = settings.redis_enabled !== false;
-    const clusterNodes = redisOn ? clusters : [];
+    const clusterNodes = clusters;
     const first = clusterNodes[0];
     // App VMs come from Set-of-VMs nodes; a load balancer on a VMs node opens ports.
     const appCount = vmsNodes.reduce((n, v) => n + Number(v.data.count), 0);

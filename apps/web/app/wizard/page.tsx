@@ -158,7 +158,6 @@ type WizardForm = {
   name: string;
   youremail: string;
   skip_deletion: boolean;
-  redis_enabled: boolean;
   project: string;
   credentialsFile: string;
   region_name: string;
@@ -262,7 +261,6 @@ function formFromConfig(
     name: str(cfg.name),
     youremail: str(cfg.youremail),
     skip_deletion: Boolean(cfg.skip_deletion),
-    redis_enabled: !redisOff,
     project: str(cfg.project),
     credentialsFile,
     region_name: str(cfg.region_name),
@@ -325,7 +323,6 @@ function WizardInner() {
     name: "",
     youremail: "",
     skip_deletion: false,
-    redis_enabled: true,
     project: "",
     credentialsFile: "",
     region_name: "",
@@ -560,7 +557,7 @@ function WizardInner() {
       mode: form.mode,
       youremail: form.youremail,
       skip_deletion: form.skip_deletion,
-      redis_enabled: form.mode === "vm" ? form.redis_enabled : true,
+      redis_enabled: form.mode === "vm" ? form.clusters.length > 0 : true,
       project: form.project,
       credentialsFile: form.credentialsFile,
       region_name: form.region_name,
@@ -603,7 +600,7 @@ function WizardInner() {
     if (applications.length) base.applications = applications;
 
     if (form.mode === "vm") {
-      if (!form.redis_enabled) {
+      if (form.clusters.length === 0) {
         Object.assign(base, {
           redis_enabled: false,
           clusters: [],
@@ -712,7 +709,7 @@ function WizardInner() {
       );
     }
     if (step === 2) {
-      if (form.mode === "vm" && !form.redis_enabled) {
+      if (form.mode === "vm" && form.clusters.length === 0) {
         if (!form.app && !form.applications.some((a) => a.name.trim())) return false;
         if (form.app > 0) {
           if (form.app_machine_types.length < form.app) return false;
@@ -761,7 +758,7 @@ function WizardInner() {
       });
       rows.push({
         label: "Redis clusters",
-        value: form.redis_enabled
+        value: form.clusters.length > 0
           ? form.clusters
               .map(
                 (c, i) =>
@@ -1075,7 +1072,6 @@ function WizardInner() {
                 setForm((prev) => ({
                   ...prev,
                   mode: "gke",
-                  redis_enabled: true,
                   clusters: prev.clusters.length ? prev.clusters : [blankCluster(prev.machine_type)],
                 }))
               }
@@ -1091,27 +1087,6 @@ function WizardInner() {
 
         {step === 2 && form.mode === "vm" && (
           <div className="grid grid-2">
-            <label className="design-check-row" style={{ gridColumn: "1 / -1" }}>
-              <input
-                type="checkbox"
-                checked={form.redis_enabled}
-                onChange={(e) => {
-                  const on = e.target.checked;
-                  setForm((prev) => ({
-                    ...prev,
-                    redis_enabled: on,
-                    clusters: on ? (prev.clusters.length ? prev.clusters : [blankCluster(prev.machine_type)]) : [],
-                  }));
-                  setPreflightResult(null);
-                }}
-              />
-              Include Redis Enterprise cluster
-              <span className="hint" style={{ flexBasis: "100%", margin: 0 }}>
-                Turn this off to deploy only application VMs on the VPC and DNS zone.
-              </span>
-            </label>
-            {form.redis_enabled ? (
-            <>
             <label>
               How many Redis clusters?
               <select
@@ -1123,21 +1098,30 @@ function WizardInner() {
                     const clusters = Array.from({ length: next }, (_, i) =>
                       prev.clusters[i] || { ...blankCluster(fallback), machine_type: fallback },
                     );
-                    return { ...prev, clusters, clustersize: clusters[0].nodes, machine_type: clusters[0].machine_type };
+                    return {
+                      ...prev,
+                      clusters,
+                      clustersize: clusters[0]?.nodes ?? prev.clustersize,
+                      machine_type: clusters[0]?.machine_type ?? prev.machine_type,
+                    };
                   });
                   setPreflightResult(null);
                 }}
               >
+                <option value={0}>0 — application VMs only (no Redis)</option>
                 <option value={1}>1 cluster</option>
                 <option value={2}>2 clusters</option>
                 <option value={3}>3 clusters</option>
               </select>
               <span className="hint">
                 One VPC and DNS zone for the whole deployment. Each cluster can be a different size
-                and Redis version. Shared App VMs are below.
+                and Redis version. Pick 0 to deploy only application VMs. Shared App VMs are below.
               </span>
             </label>
             <div />
+
+            {form.clusters.length > 0 ? (
+            <>
 
             {form.clusters.map((cluster, i) => (
               <div className="cluster-card" key={`redis-cluster-${i}`}>
@@ -1386,7 +1370,7 @@ function WizardInner() {
 
             <div className="companion-block">
               <h3 className="companion-title">
-                {form.redis_enabled ? "Companion App VMs (optional)" : "Application VMs"}
+                {form.clusters.length > 0 ? "Companion App VMs (optional)" : "Application VMs"}
               </h3>
               <p className="hint" style={{ marginTop: 0 }}>
                 Extra Compute Engine VMs on the same VPC and DNS zone for clients, memtier, or demos.

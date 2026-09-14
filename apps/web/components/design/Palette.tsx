@@ -17,16 +17,13 @@ const ITEMS: PaletteItem[] = [
 
 export function Palette({
   mode,
-  redisEnabled = true,
   disabled,
 }: {
   mode: "vm" | "gke";
-  redisEnabled?: boolean;
   disabled?: boolean;
 }) {
   const items = ITEMS.filter((i) => {
     if (mode === "gke" && i.kind === "vms") return false;
-    if (!redisEnabled && (i.kind === "cluster" || i.kind === "database")) return false;
     return true;
   });
   return (
