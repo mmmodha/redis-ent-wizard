@@ -383,7 +383,7 @@ function blankForm(): WizardForm {
     clustersize: 3,
     machine_type: "",
     rof_nvme_disks: 0,
-    clusters: [blankCluster()],
+    clusters: [],
     applications: [],
     load_balancers: [],
     storage_buckets: [],
@@ -437,7 +437,7 @@ export function WizardView({
   onConfigChange: (config: Record<string, unknown>) => void;
   onUploadingChange: (uploading: boolean) => void;
 }) {
-  const { machineTypes, vmReleases, gkeReleases, loading, probeZone } = gcp;
+  const { machineTypes, vmReleases, loading, probeZone } = gcp;
   const step = 2 as const; // the shell owns settings + review; this is the workload step.
 
   const [form, setForm] = useState<WizardForm>(() =>
@@ -802,51 +802,48 @@ export function WizardView({
     <div className="wizard-view">
         {step === 2 && form.mode === "vm" && (
           <div className="grid grid-2">
-            <label>
-              How many Redis clusters?
-              <select
-                value={form.clusters.length}
-                onChange={(e) => {
-                  const next = Number(e.target.value);
-                  setForm((prev) => {
-                    const fallback = prev.clusters[0]?.machine_type || prev.machine_type;
-                    const clusters = Array.from({ length: next }, (_, i) =>
-                      prev.clusters[i] || { ...blankCluster(fallback), machine_type: fallback },
-                    );
-                    return {
-                      ...prev,
-                      clusters,
-                      clustersize: clusters[0]?.nodes ?? prev.clustersize,
-                      machine_type: clusters[0]?.machine_type ?? prev.machine_type,
-                    };
-                  });
-                  setPreflightResult(null);
-                }}
-              >
-                <option value={0}>0 — application VMs only (no Redis)</option>
-                <option value={1}>1 cluster</option>
-                <option value={2}>2 clusters</option>
-                <option value={3}>3 clusters</option>
-              </select>
-              <span className="hint">
-                One VPC and DNS zone for the whole deployment. Each cluster can be a different size
-                and Redis version. Pick 0 to deploy only application VMs. Shared App VMs are below.
-              </span>
-            </label>
-            <div />
+            <div style={{ gridColumn: "1 / -1" }}>
+              <h3 className="companion-title" style={{ margin: 0 }}>
+                Redis clusters (optional)
+              </h3>
+              <p className="hint" style={{ marginTop: 4 }}>
+                One VPC and DNS zone for the whole deployment. Each cluster can be a different size and
+                Redis version. Add none to deploy only application VMs; up to 3 clusters.
+              </p>
+            </div>
 
             {form.clusters.length > 0 ? (
             <>
 
             {form.clusters.map((cluster, i) => (
               <div className="cluster-card" key={`redis-cluster-${i}`}>
-                <h3 className="companion-title">
-                  {cluster.name.trim()
-                    ? clusterSlug(cluster.name) || `Redis cluster ${i + 1}`
-                    : form.clusters.length > 1
-                      ? `Redis cluster ${i + 1}`
-                      : "Redis cluster"}
-                </h3>
+                <div className="wiz-workload-head">
+                  <h3 className="companion-title" style={{ margin: 0 }}>
+                    {cluster.name.trim()
+                      ? clusterSlug(cluster.name) || `Redis cluster ${i + 1}`
+                      : form.clusters.length > 1
+                        ? `Redis cluster ${i + 1}`
+                        : "Redis cluster"}
+                  </h3>
+                  <button
+                    type="button"
+                    className="btn"
+                    onClick={() => {
+                      setForm((prev) => {
+                        const clusters = prev.clusters.filter((_, idx) => idx !== i);
+                        return {
+                          ...prev,
+                          clusters,
+                          clustersize: clusters[0]?.nodes ?? prev.clustersize,
+                          machine_type: clusters[0]?.machine_type ?? prev.machine_type,
+                        };
+                      });
+                      setPreflightResult(null);
+                    }}
+                  >
+                    Remove
+                  </button>
+                </div>
                 <label>
                   Cluster name
                   <input
@@ -1008,10 +1005,35 @@ export function WizardView({
             </>
             ) : (
               <p className="hint" style={{ gridColumn: "1 / -1" }}>
-                Add companion App VMs or a custom application below. This deploy will not create Redis
-                Enterprise nodes.
+                No Redis clusters yet — add one below, or add companion App VMs / a custom application to
+                deploy without Redis Enterprise nodes.
               </p>
             )}
+
+            <div style={{ gridColumn: "1 / -1" }}>
+              <button
+                type="button"
+                className="btn"
+                disabled={form.clusters.length >= 3}
+                onClick={() => {
+                  setForm((prev) => {
+                    const clusters = [
+                      ...prev.clusters,
+                      blankCluster(prev.clusters[0]?.machine_type || prev.machine_type),
+                    ];
+                    return {
+                      ...prev,
+                      clusters,
+                      clustersize: clusters[0]?.nodes ?? prev.clustersize,
+                      machine_type: clusters[0]?.machine_type ?? prev.machine_type,
+                    };
+                  });
+                  setPreflightResult(null);
+                }}
+              >
+                Add Redis cluster
+              </button>
+            </div>
 
             <div className="companion-block">
               <h3 className="companion-title">
@@ -1290,63 +1312,46 @@ export function WizardView({
 
         {step === 2 && form.mode === "gke" && (
           <div className="grid grid-2">
-            <label>
-              How many Redis clusters?
-              <select
-                value={form.clusters.length}
-                onChange={(e) => {
-                  const next = Number(e.target.value);
-                  setForm((prev) => {
-                    const clusters = Array.from(
-                      { length: next },
-                      (_, i) => prev.clusters[i] || blankCluster(prev.gke_machine_type),
-                    );
-                    const sum = clusters.reduce((n, c) => n + c.rec_nodes, 0);
-                    return {
-                      ...prev,
-                      clusters,
-                      rec_nodes: clusters[0].rec_nodes,
-                      gke_clustersize: Math.max(prev.gke_clustersize, sum),
-                    };
-                  });
-                  setPreflightResult(null);
-                }}
-              >
-                <option value={1}>1 REC</option>
-                <option value={2}>2 RECs</option>
-                <option value={3}>3 RECs</option>
-              </select>
-              <span className="hint">
-                One GKE cluster and one operator. Each REC can have a different node count. Redis
-                version is the operator chart (shared).
-              </span>
-            </label>
-            <label>
-              Operator / Redis version
-              <select
-                value={form.operator_chart_version}
-                onChange={(e) => update("operator_chart_version", e.target.value)}
-              >
-                {(gkeReleases.length
-                  ? gkeReleases
-                  : [{ id: "latest", label: "Latest operator chart", chartVersion: "" }]
-                ).map((r) => (
-                  <option key={r.id} value={r.id}>
-                    {r.label}
-                  </option>
-                ))}
-              </select>
-            </label>
+            <div style={{ gridColumn: "1 / -1" }}>
+              <h3 className="companion-title" style={{ margin: 0 }}>
+                Redis Enterprise clusters
+              </h3>
+              <p className="hint" style={{ marginTop: 4 }}>
+                One GKE cluster and one operator. Add at least one REC to deploy; each can have a
+                different node count. The Redis version is the operator chart (in Deployment settings).
+              </p>
+            </div>
 
             {form.clusters.map((cluster, i) => (
               <div className="cluster-card" key={`rec-${i}`}>
-                <h3 className="companion-title">
-                  {cluster.name.trim()
-                    ? clusterSlug(cluster.name) || `REC ${i + 1}`
-                    : form.clusters.length > 1
-                      ? `REC ${i + 1}`
-                      : "Redis Enterprise cluster"}
-                </h3>
+                <div className="wiz-workload-head">
+                  <h3 className="companion-title" style={{ margin: 0 }}>
+                    {cluster.name.trim()
+                      ? clusterSlug(cluster.name) || `REC ${i + 1}`
+                      : form.clusters.length > 1
+                        ? `REC ${i + 1}`
+                        : "Redis Enterprise cluster"}
+                  </h3>
+                  <button
+                    type="button"
+                    className="btn"
+                    onClick={() => {
+                      setForm((prev) => {
+                        const clusters = prev.clusters.filter((_, idx) => idx !== i);
+                        const sum = clusters.reduce((n, c) => n + c.rec_nodes, 0);
+                        return {
+                          ...prev,
+                          clusters,
+                          rec_nodes: clusters[0]?.rec_nodes ?? prev.rec_nodes,
+                          gke_clustersize: Math.max(prev.gke_clustersize, sum),
+                        };
+                      });
+                      setPreflightResult(null);
+                    }}
+                  >
+                    Remove
+                  </button>
+                </div>
                 <label>
                   Cluster name
                   <input
@@ -1429,6 +1434,29 @@ export function WizardView({
                 />
               </div>
             ))}
+
+            <div style={{ gridColumn: "1 / -1" }}>
+              <button
+                type="button"
+                className="btn"
+                disabled={form.clusters.length >= 3}
+                onClick={() => {
+                  setForm((prev) => {
+                    const clusters = [...prev.clusters, blankCluster(prev.gke_machine_type)];
+                    const sum = clusters.reduce((n, c) => n + c.rec_nodes, 0);
+                    return {
+                      ...prev,
+                      clusters,
+                      rec_nodes: clusters[0]?.rec_nodes ?? prev.rec_nodes,
+                      gke_clustersize: Math.max(prev.gke_clustersize, sum),
+                    };
+                  });
+                  setPreflightResult(null);
+                }}
+              >
+                Add REC cluster
+              </button>
+            </div>
 
             <label>
               GKE nodes
