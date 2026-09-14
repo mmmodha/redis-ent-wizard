@@ -48,6 +48,8 @@ type Props = {
   onSave: (data: DesignNodeData) => void;
   onCancel: () => void;
   onDelete?: () => void;
+  /** Notifies the parent whenever an artifact upload starts/finishes. */
+  onUploadingChange?: (uploading: boolean) => void;
 };
 
 const NVME_OPTIONS = [0, 1, 2, 4, 8];
@@ -69,6 +71,7 @@ export function NodeDialog({
   onSave,
   onCancel,
   onDelete,
+  onUploadingChange,
 }: Props) {
   const [draft, setDraft] = useState<DesignNodeData>(target.data);
   const [uploadError, setUploadError] = useState("");
@@ -77,6 +80,11 @@ export function NodeDialog({
   useEffect(() => {
     setDraft(target.data);
   }, [target]);
+
+  useEffect(() => {
+    onUploadingChange?.(uploading);
+    return () => onUploadingChange?.(false);
+  }, [uploading, onUploadingChange]);
 
   function set<T extends DesignNodeData>(patch: Partial<T>) {
     setDraft((prev) => ({ ...prev, ...patch }) as DesignNodeData);

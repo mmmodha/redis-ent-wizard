@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { MachineTypePicker } from "@/components/MachineTypePicker";
 import { uploadArtifact, type MachineTypeInfo } from "@/lib/api";
 import {
@@ -673,6 +673,7 @@ export function ApplicationsEditor({
   pubsubNames = [],
   bigqueryNames = [],
   cloudsqlNames = [],
+  onUploadingChange,
 }: {
   applications: ApplicationDraft[];
   onChange: (apps: ApplicationDraft[]) => void;
@@ -689,9 +690,17 @@ export function ApplicationsEditor({
   pubsubNames?: string[];
   bigqueryNames?: string[];
   cloudsqlNames?: string[];
+  /** Notifies the parent whenever an artifact upload starts/finishes. */
+  onUploadingChange?: (uploading: boolean) => void;
 }) {
   const [uploading, setUploading] = useState<Record<number, boolean>>({});
   const [uploadErrors, setUploadErrors] = useState<Record<number, string>>({});
+
+  const anyUploading = Object.values(uploading).some(Boolean);
+  useEffect(() => {
+    onUploadingChange?.(anyUploading);
+    return () => onUploadingChange?.(false);
+  }, [anyUploading, onUploadingChange]);
 
   const patch = (i: number, p: Partial<ApplicationDraft>) =>
     onChange(applications.map((a, idx) => (idx === i ? { ...a, ...p } : a)));
