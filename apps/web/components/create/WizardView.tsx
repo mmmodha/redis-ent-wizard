@@ -8,6 +8,7 @@ import {
   ApplicationsEditor,
   BigqueryEditor,
   CloudSqlEditor,
+  CollapsibleSection,
   DatabaseEditor,
   LoadBalancerEditor,
   PubsubEditor,
@@ -802,16 +803,17 @@ export function WizardView({
     <div className="wizard-view">
         {step === 2 && form.mode === "vm" && (
           <div className="grid grid-2">
-            <div style={{ gridColumn: "1 / -1" }}>
-              <h3 className="companion-title" style={{ margin: 0 }}>
-                Redis clusters (optional)
-              </h3>
-              <p className="hint" style={{ marginTop: 4 }}>
-                One VPC and DNS zone for the whole deployment. Each cluster can be a different size and
-                Redis version. Add none to deploy only application VMs; up to 3 clusters.
-              </p>
-            </div>
-
+            <CollapsibleSection
+              title="Redis clusters (optional)"
+              noun={{ one: "Redis cluster", many: "Redis clusters" }}
+              names={form.clusters.map((c, i) => clusterSlug(c.name) || `Redis cluster ${i + 1}`)}
+              intro={
+                <p className="hint" style={{ marginTop: 4 }}>
+                  One VPC and DNS zone for the whole deployment. Each cluster can be a different size and
+                  Redis version. Add none to deploy only application VMs; up to 3 clusters.
+                </p>
+              }
+            >
             {form.clusters.length > 0 ? (
             <>
 
@@ -1034,6 +1036,7 @@ export function WizardView({
                 Add Redis cluster
               </button>
             </div>
+            </CollapsibleSection>
 
             <div className="companion-block">
               <h3 className="companion-title">
@@ -1312,16 +1315,17 @@ export function WizardView({
 
         {step === 2 && form.mode === "gke" && (
           <div className="grid grid-2">
-            <div style={{ gridColumn: "1 / -1" }}>
-              <h3 className="companion-title" style={{ margin: 0 }}>
-                Redis Enterprise clusters
-              </h3>
-              <p className="hint" style={{ marginTop: 4 }}>
-                One GKE cluster and one operator. Add at least one REC to deploy; each can have a
-                different node count. The Redis version is the operator chart (in Deployment settings).
-              </p>
-            </div>
-
+            <CollapsibleSection
+              title="Redis Enterprise clusters"
+              noun={{ one: "REC", many: "RECs" }}
+              names={form.clusters.map((c, i) => clusterSlug(c.name) || `REC ${i + 1}`)}
+              intro={
+                <p className="hint" style={{ marginTop: 4 }}>
+                  One GKE cluster and one operator. Add at least one REC to deploy; each can have a
+                  different node count. The Redis version is the operator chart (in Deployment settings).
+                </p>
+              }
+            >
             {form.clusters.map((cluster, i) => (
               <div className="cluster-card" key={`rec-${i}`}>
                 <div className="wiz-workload-head">
@@ -1457,6 +1461,7 @@ export function WizardView({
                 Add REC cluster
               </button>
             </div>
+            </CollapsibleSection>
 
             <label>
               GKE nodes

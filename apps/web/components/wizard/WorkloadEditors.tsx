@@ -292,6 +292,63 @@ export function databaseDraftFromConfig(d: Record<string, unknown>): DatabaseDra
   };
 }
 
+/**
+ * A component section that collapses to a one-line summary once it holds one or
+ * more instances: "3 Applications (Loadgen, Gatling, Seeder)". With no instances
+ * it stays open (just the title + "Add …" body) and shows no toggle.
+ */
+export function CollapsibleSection({
+  title,
+  noun,
+  names,
+  intro,
+  children,
+  defaultOpen = true,
+}: {
+  /** Heading shown when expanded, e.g. "Applications (optional)". */
+  title: string;
+  /** Instance noun for the collapsed summary, e.g. { one: "Application", many: "Applications" }. */
+  noun: { one: string; many: string };
+  /** Instance names (blank names should already be defaulted by the caller). */
+  names: string[];
+  intro?: React.ReactNode;
+  children: React.ReactNode;
+  defaultOpen?: boolean;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  const count = names.length;
+  const collapsible = count > 0;
+  const isOpen = collapsible ? open : true;
+  const summary = `${count} ${count === 1 ? noun.one : noun.many} (${names.join(", ")})`;
+  return (
+    <div className="companion-block">
+      {collapsible ? (
+        <button
+          type="button"
+          className="companion-toggle"
+          aria-expanded={isOpen}
+          onClick={() => setOpen((o) => !o)}
+        >
+          <span className={`companion-caret${isOpen ? " open" : ""}`} aria-hidden>
+            ▸
+          </span>
+          <h3 className="companion-title" style={{ margin: 0 }}>
+            {isOpen ? title : summary}
+          </h3>
+        </button>
+      ) : (
+        <h3 className="companion-title">{title}</h3>
+      )}
+      {isOpen ? (
+        <>
+          {intro}
+          {children}
+        </>
+      ) : null}
+    </div>
+  );
+}
+
 /** A checkbox multi-select of connectable provider names. */
 function ConnectPicker({
   label,
@@ -720,14 +777,18 @@ export function ApplicationsEditor({
   }
 
   return (
-    <div className="companion-block">
-      <h3 className="companion-title">Applications (optional)</h3>
-      <p className="hint" style={{ marginTop: 0 }}>
-        {mode === "vm"
-          ? "Stage or run your own workloads on dedicated VMs and connect them to a cluster."
-          : "Deploy your own container workloads into the GKE cluster alongside Redis."}
-      </p>
-
+    <CollapsibleSection
+      title="Applications (optional)"
+      noun={{ one: "Application", many: "Applications" }}
+      names={applications.map((a, i) => a.name.trim() || `Application ${i + 1}`)}
+      intro={
+        <p className="hint" style={{ marginTop: 0 }}>
+          {mode === "vm"
+            ? "Stage or run your own workloads on dedicated VMs and connect them to a cluster."
+            : "Deploy your own container workloads into the GKE cluster alongside Redis."}
+        </p>
+      }
+    >
       {applications.map((app, i) => (
         <div className="wiz-workload-card" key={`app-${i}`}>
           <div className="wiz-workload-head">
@@ -1187,7 +1248,7 @@ export function ApplicationsEditor({
           Add application
         </button>
       </div>
-    </div>
+    </CollapsibleSection>
   );
 }
 
@@ -1205,12 +1266,16 @@ export function LoadBalancerEditor({
     onChange(loadBalancers.map((lb, idx) => (idx === i ? { ...lb, ...p } : lb)));
 
   return (
-    <div className="companion-block">
-      <h3 className="companion-title">Load balancers (optional)</h3>
-      <p className="hint" style={{ marginTop: 0 }}>
-        Internal load balancers fronting an application or the set of App VMs.
-      </p>
-
+    <CollapsibleSection
+      title="Load balancers (optional)"
+      noun={{ one: "Load balancer", many: "Load balancers" }}
+      names={loadBalancers.map((lb, i) => lb.name.trim() || `Load balancer ${i + 1}`)}
+      intro={
+        <p className="hint" style={{ marginTop: 0 }}>
+          Internal load balancers fronting an application or the set of App VMs.
+        </p>
+      }
+    >
       {loadBalancers.map((lb, i) => (
         <div className="wiz-workload-card" key={`lb-${i}`}>
           <div className="wiz-workload-head">
@@ -1288,7 +1353,7 @@ export function LoadBalancerEditor({
           Add load balancer
         </button>
       </div>
-    </div>
+    </CollapsibleSection>
   );
 }
 
@@ -1306,12 +1371,17 @@ export function StorageEditor({
     onChange(buckets.map((b, idx) => (idx === i ? { ...b, ...p } : b)));
 
   return (
-    <div className="companion-block">
-      <h3 className="companion-title">Cloud Storage (optional)</h3>
-      <p className="hint" style={{ marginTop: 0 }}>
-        Object storage buckets. Connect an application or the Set-of-VMs group to a bucket to inject its
-        name/URL and grant access.
-      </p>
+    <CollapsibleSection
+      title="Cloud Storage (optional)"
+      noun={{ one: "bucket", many: "buckets" }}
+      names={buckets.map((b, i) => b.name.trim() || `Bucket ${i + 1}`)}
+      intro={
+        <p className="hint" style={{ marginTop: 0 }}>
+          Object storage buckets. Connect an application or the Set-of-VMs group to a bucket to inject its
+          name/URL and grant access.
+        </p>
+      }
+    >
       {buckets.map((b, i) => (
         <div className="wiz-workload-card" key={`bucket-${i}`}>
           <div className="wiz-workload-head">
@@ -1374,7 +1444,7 @@ export function StorageEditor({
           Add bucket
         </button>
       </div>
-    </div>
+    </CollapsibleSection>
   );
 }
 
@@ -1390,12 +1460,17 @@ export function PubsubEditor({
     onChange(topics.map((t, idx) => (idx === i ? { ...t, ...p } : t)));
 
   return (
-    <div className="companion-block">
-      <h3 className="companion-title">Pub/Sub (optional)</h3>
-      <p className="hint" style={{ marginTop: 0 }}>
-        Topics (and optional subscriptions). Connect an application or the Set-of-VMs group to inject the
-        topic/subscription names and grant publish/subscribe.
-      </p>
+    <CollapsibleSection
+      title="Pub/Sub (optional)"
+      noun={{ one: "topic", many: "topics" }}
+      names={topics.map((t, i) => t.name.trim() || `Topic ${i + 1}`)}
+      intro={
+        <p className="hint" style={{ marginTop: 0 }}>
+          Topics (and optional subscriptions). Connect an application or the Set-of-VMs group to inject the
+          topic/subscription names and grant publish/subscribe.
+        </p>
+      }
+    >
       {topics.map((t, i) => (
         <div className="wiz-workload-card" key={`topic-${i}`}>
           <div className="wiz-workload-head">
@@ -1434,7 +1509,7 @@ export function PubsubEditor({
           Add topic
         </button>
       </div>
-    </div>
+    </CollapsibleSection>
   );
 }
 
@@ -1452,12 +1527,17 @@ export function BigqueryEditor({
     onChange(datasets.map((d, idx) => (idx === i ? { ...d, ...p } : d)));
 
   return (
-    <div className="companion-block">
-      <h3 className="companion-title">BigQuery (optional)</h3>
-      <p className="hint" style={{ marginTop: 0 }}>
-        Datasets for analytics. Connect an application or the Set-of-VMs group to inject the dataset id and
-        grant dataset + jobUser access.
-      </p>
+    <CollapsibleSection
+      title="BigQuery (optional)"
+      noun={{ one: "dataset", many: "datasets" }}
+      names={datasets.map((d, i) => d.name.trim() || `Dataset ${i + 1}`)}
+      intro={
+        <p className="hint" style={{ marginTop: 0 }}>
+          Datasets for analytics. Connect an application or the Set-of-VMs group to inject the dataset id and
+          grant dataset + jobUser access.
+        </p>
+      }
+    >
       {datasets.map((d, i) => (
         <div className="wiz-workload-card" key={`dataset-${i}`}>
           <div className="wiz-workload-head">
@@ -1495,7 +1575,7 @@ export function BigqueryEditor({
           Add dataset
         </button>
       </div>
-    </div>
+    </CollapsibleSection>
   );
 }
 
@@ -1513,13 +1593,18 @@ export function CloudSqlEditor({
     onChange(instances.map((d, idx) => (idx === i ? { ...d, ...p } : d)));
 
   return (
-    <div className="companion-block">
-      <h3 className="companion-title">Cloud SQL (optional)</h3>
-      <p className="hint" style={{ marginTop: 0 }}>
-        Managed Postgres/MySQL instances{region ? ` in ${region}` : ""}. Connect an application or the
-        Set-of-VMs group to inject the connection details and grant the Cloud SQL client role. The user
-        password is generated and injected on VMs.
-      </p>
+    <CollapsibleSection
+      title="Cloud SQL (optional)"
+      noun={{ one: "instance", many: "instances" }}
+      names={instances.map((d, i) => d.name.trim() || `Instance ${i + 1}`)}
+      intro={
+        <p className="hint" style={{ marginTop: 0 }}>
+          Managed Postgres/MySQL instances{region ? ` in ${region}` : ""}. Connect an application or the
+          Set-of-VMs group to inject the connection details and grant the Cloud SQL client role. The user
+          password is generated and injected on VMs.
+        </p>
+      }
+    >
       {instances.map((d, i) => (
         <div className="wiz-workload-card" key={`sql-${i}`}>
           <div className="wiz-workload-head">
@@ -1573,7 +1658,7 @@ export function CloudSqlEditor({
           Add instance
         </button>
       </div>
-    </div>
+    </CollapsibleSection>
   );
 }
 
