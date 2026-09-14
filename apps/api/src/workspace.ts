@@ -435,6 +435,7 @@ function buildCloudSql(input: CreateInstanceInput, prefix: string): Record<strin
     db_user: s.db_user,
     connectivity: s.connectivity,
     grant_client: connected.has(s.name),
+    cdc_enabled: s.cdc_enabled,
   }));
 }
 
@@ -912,6 +913,7 @@ variable "cloud_sql_instances" {
     db_user          = string
     connectivity     = string
     grant_client     = bool
+    cdc_enabled      = bool
   }))
   default = []
 }
@@ -994,6 +996,7 @@ variable "cloud_sql_instances" {
     db_user          = string
     connectivity     = string
     grant_client     = bool
+    cdc_enabled      = bool
   }))
   default = []
 }

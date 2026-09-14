@@ -264,6 +264,7 @@ variable "cloud_sql_instances" {
     db_user          = string
     connectivity     = string
     grant_client     = bool
+    cdc_enabled      = bool
   }))
   description = "Cloud SQL instances provisioned for this deployment."
   default     = []

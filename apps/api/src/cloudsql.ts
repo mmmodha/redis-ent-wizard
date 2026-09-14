@@ -50,6 +50,7 @@ export function normalizeCloudSql(input: { cloud_sql_instances?: CloudSqlSpec[] 
       db_user: String(s.db_user ?? "").trim() || "appuser",
       connectivity:
         s.connectivity === "proxy" || s.connectivity === "public" ? s.connectivity : "private",
+      cdc_enabled: Boolean(s.cdc_enabled),
     };
   });
 }

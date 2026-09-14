@@ -43,6 +43,7 @@ describe("normalizeCloudSql", () => {
       db_name: "appdb",
       db_user: "appuser",
       connectivity: "private",
+      cdc_enabled: false,
     });
     assert.equal(out[1].engine, "mysql");
     assert.equal(out[1].connectivity, "proxy");
@@ -57,5 +58,12 @@ describe("normalizeCloudSql", () => {
       cloud_sql_instances: [{ name: "orders", connectivity: "bogus" as never }],
     });
     assert.equal(out[0].connectivity, "private");
+  });
+
+  it("carries the CDC flag through", () => {
+    const out = normalizeCloudSql({
+      cloud_sql_instances: [{ name: "orders", cdc_enabled: true }],
+    });
+    assert.equal(out[0].cdc_enabled, true);
   });
 });

@@ -133,6 +133,7 @@ const cloudSqlSchema = z.object({
   db_name: z.string().max(60).optional(),
   db_user: z.string().max(60).optional(),
   connectivity: z.enum(["private", "proxy", "public"]).optional(),
+  cdc_enabled: z.boolean().optional(),
 });
 
 const bigquerySchema = z.object({

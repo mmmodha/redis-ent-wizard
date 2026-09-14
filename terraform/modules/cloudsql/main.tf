@@ -7,6 +7,7 @@ variable "instances" {
     db_user          = string
     connectivity     = string # "private" | "proxy" | "public"
     grant_client     = bool
+    cdc_enabled      = bool # enable CDC prerequisites (RDI source)
   }))
   description = "Cloud SQL instances to create."
   default     = []
@@ -36,6 +37,18 @@ locals {
   needs_private = anytrue([for s in var.instances : s.connectivity == "private"])
   needs_client  = anytrue([for s in var.instances : s.grant_client])
   labels        = var.youremail != "" ? { created_by = var.youremail } : {}
+
+  # CDC prerequisites per instance, keyed by name. Postgres needs logical
+  # decoding; MySQL needs row-based binlog (binary logging is enabled via
+  # backup_configuration below). Empty when cdc_enabled is false.
+  cdc_flags = {
+    for k, s in local.by_name : k => (
+      !s.cdc_enabled ? {} :
+      startswith(s.database_version, "POSTGRES") ? { "cloudsql.logical_decoding" = "on" } :
+      startswith(s.database_version, "MYSQL") ? { "binlog_row_image" = "FULL" } :
+      {}
+    )
+  }
 }
 
 resource "random_password" "pw" {
@@ -78,6 +91,23 @@ resource "google_sql_database_instance" "instance" {
     tier            = each.value.tier
     user_labels     = local.labels
     disk_autoresize = true
+
+    dynamic "database_flags" {
+      for_each = local.cdc_flags[each.key]
+      content {
+        name  = database_flags.key
+        value = database_flags.value
+      }
+    }
+
+    # MySQL CDC needs binary logging, which requires backups to be enabled.
+    dynamic "backup_configuration" {
+      for_each = each.value.cdc_enabled && startswith(each.value.database_version, "MYSQL") ? [1] : []
+      content {
+        enabled            = true
+        binary_log_enabled = true
+      }
+    }
 
     ip_configuration {
       ipv4_enabled    = each.value.connectivity != "private"

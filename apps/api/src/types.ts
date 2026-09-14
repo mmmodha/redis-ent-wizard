@@ -84,6 +84,12 @@ export interface CloudSqlSpec {
   db_user?: string;
   /** How consumers reach the instance. */
   connectivity?: "private" | "proxy" | "public";
+  /**
+   * Enable change-data-capture prerequisites (Postgres logical decoding /
+   * MySQL binlog). Set automatically when the instance is wired as an RDI
+   * source; may force an instance restart.
+   */
+  cdc_enabled?: boolean;
 }
 
 /** A BigQuery dataset available to workloads. */
