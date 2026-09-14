@@ -136,6 +136,9 @@ export function normalizeApplications(input: {
     const connectStorage = Array.isArray(raw.connectStorage)
       ? raw.connectStorage.map((c) => String(c)).filter(Boolean)
       : [];
+    const connectPubsub = Array.isArray(raw.connectPubsub)
+      ? raw.connectPubsub.map((c) => String(c)).filter(Boolean)
+      : [];
 
     if (mode === "vm") {
       if (!raw.artifact || !raw.artifact.ref) {
@@ -174,6 +177,7 @@ export function normalizeApplications(input: {
         connectLoadBalancers,
         connectApps,
         connectStorage,
+        connectPubsub,
         artifact: {
           kind,
           ref: artifactRef,
@@ -205,6 +209,7 @@ export function normalizeApplications(input: {
       connectLoadBalancers,
       connectApps,
       connectStorage,
+      connectPubsub,
       image: String(raw.image).trim(),
       replicas: clampInt(raw.replicas, 1, MAX_REPLICAS, 1),
       expose: raw.expose === "lb" || raw.expose === "http" || raw.expose === "https" ? raw.expose : "none",

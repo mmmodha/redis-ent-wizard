@@ -4,6 +4,7 @@ import { normalizeAppDiskGib, normalizeAppMachineTypes, parseAppExtraPorts } fro
 import { normalizeApplications } from "./applications.js";
 import { clusterNamePrefix, normalizeClusters } from "./clusters.js";
 import { bucketFullName, bucketGrantRole, normalizeStorageBuckets } from "./storage.js";
+import { grantsPublisher, grantsSubscriber, normalizePubsub, topicFullName } from "./pubsub.js";
 import { resolveGkeOperatorChart } from "./rs-releases.js";
 import type { CreateInstanceInput, DeploymentMode } from "./types.js";
 
@@ -126,6 +127,27 @@ interface ConnectSelections {
   connectLoadBalancers?: string[];
   connectApps?: string[];
   connectStorage?: string[];
+  connectPubsub?: string[];
+}
+
+/** Static Pub/Sub env values (global, identical for VM and GKE). */
+interface PubsubRef {
+  topic: string;
+  subscription: string;
+  project: string;
+}
+function pubsubEnvMap(input: CreateInstanceInput, prefix: string): Map<string, PubsubRef> {
+  const project = input.project || "";
+  const m = new Map<string, PubsubRef>();
+  for (const t of normalizePubsub(input)) {
+    const full = topicFullName(prefix, t.name);
+    m.set(t.name, {
+      topic: `projects/${project}/topics/${full}`,
+      subscription: t.create_subscription ? `projects/${project}/subscriptions/${full}-sub` : "",
+      project,
+    });
+  }
+  return m;
 }
 
 /** Static env plus the apply-time refs that Terraform resolves in profiles/vm. */
@@ -145,6 +167,8 @@ interface VmRegistry {
   lbNames: Set<string>;
   /** Bucket slug -> full bucket name (`<prefix>-<slug>`). */
   storageBuckets: Map<string, string>;
+  /** Topic slug -> static Pub/Sub env values. */
+  pubsub: Map<string, PubsubRef>;
   adminUser: string;
   vmPrefix: string;
   dnsSuffix: string;
@@ -193,6 +217,7 @@ export function buildVmRegistry(
     appHosts,
     lbNames,
     storageBuckets,
+    pubsub: pubsubEnvMap(input, vmPrefix),
     adminUser: input.RS_admin || "admin@redis.io",
     vmPrefix,
     dnsSuffix,
@@ -242,7 +267,25 @@ export function resolveVmConnections(sel: ConnectSelections, reg: VmRegistry): R
     }
   }
 
+  injectPubsubEnv(env, sel.connectPubsub, reg.pubsub);
+
   return { env, connectClusterAdmin, connectLb };
+}
+
+/** Shared Pub/Sub env injection (VM and GKE produce identical values). */
+function injectPubsubEnv(
+  env: Record<string, string>,
+  connectPubsub: string[] | undefined,
+  pubsub: Map<string, PubsubRef>,
+): void {
+  for (const p of (connectPubsub || []).filter(Boolean)) {
+    const ref = pubsub.get(p);
+    if (!ref) continue;
+    const slug = envSlug(p);
+    env[`PUBSUB_${slug}_TOPIC`] = ref.topic;
+    if (ref.subscription) env[`PUBSUB_${slug}_SUBSCRIPTION`] = ref.subscription;
+    env[`PUBSUB_${slug}_PROJECT`] = ref.project;
+  }
 }
 
 function buildVmApplications(input: CreateInstanceInput, reg: VmRegistry): Record<string, unknown>[] {
@@ -281,9 +324,29 @@ function buildVmSetConnections(input: CreateInstanceInput, reg: VmRegistry): Res
       connectLoadBalancers: vc.load_balancers,
       connectApps: vc.apps,
       connectStorage: vc.storage,
+      connectPubsub: vc.pubsub,
     },
     reg,
   );
+}
+
+/** Topic short-names that at least one consumer connects to. */
+function connectedPubsubNames(input: CreateInstanceInput): Set<string> {
+  const set = new Set<string>();
+  for (const a of input.applications || []) for (const p of a.connectPubsub || []) set.add(String(p));
+  for (const p of input.vms_connect?.pubsub || []) set.add(String(p));
+  return set;
+}
+
+/** tfvars for the shared pubsub module; grants set only for connected topics. */
+function buildPubsub(input: CreateInstanceInput, prefix: string): Record<string, unknown>[] {
+  const connected = connectedPubsubNames(input);
+  return normalizePubsub(input).map((t) => ({
+    name: topicFullName(prefix, t.name),
+    create_subscription: t.create_subscription,
+    grant_publisher: connected.has(t.name) && grantsPublisher(t.role),
+    grant_subscriber: connected.has(t.name) && grantsSubscriber(t.role),
+  }));
 }
 
 function buildLoadBalancers(input: CreateInstanceInput): Record<string, unknown>[] {
@@ -331,6 +394,7 @@ export function resolveGkeConnections(
   prefix: string,
   apps: string[],
   storageBuckets: Map<string, string> = new Map(),
+  pubsub: Map<string, PubsubRef> = new Map(),
 ): { env: Record<string, string>; secretRefs: GkeSecretRef[] } {
   const env: Record<string, string> = {};
   const secretRefs: GkeSecretRef[] = [];
@@ -388,6 +452,8 @@ export function resolveGkeConnections(
     }
   }
 
+  injectPubsubEnv(env, sel.connectPubsub, pubsub);
+
   return { env, secretRefs };
 }
 
@@ -398,8 +464,9 @@ function buildGkeApplications(input: CreateInstanceInput): Record<string, unknow
   const appNames = apps.map((a) => a.name);
   const storageBuckets = new Map<string, string>();
   for (const b of normalizeStorageBuckets(input)) storageBuckets.set(b.name, bucketFullName(prefix, b.name));
+  const pubsub = pubsubEnvMap(input, prefix);
   return apps.map((app) => {
-    const conn = resolveGkeConnections(app, clusters, prefix, appNames, storageBuckets);
+    const conn = resolveGkeConnections(app, clusters, prefix, appNames, storageBuckets, pubsub);
     return {
       name: app.name,
       image: app.image || "",
@@ -440,6 +507,7 @@ export function vmStackModuleArguments(): string {
   applications     = var.applications
   load_balancers   = var.load_balancers
   storage_buckets  = var.storage_buckets
+  pubsub_topics    = var.pubsub_topics
   app_injected_env = var.app_injected_env
   app_connect_cluster_admin = var.app_connect_cluster_admin
   app_connect_lb   = var.app_connect_lb
@@ -510,6 +578,7 @@ ${
   outputs_dir              = var.outputs_dir
   applications             = var.applications
   storage_buckets          = var.storage_buckets
+  pubsub_topics            = var.pubsub_topics
 `
 }
 }
@@ -544,6 +613,7 @@ output "clusters" {
 output "app_workloads" { value = module.stack.app_workloads }
 output "load_balancers" { value = module.stack.load_balancers }
 output "storage_buckets" { value = module.stack.storage_buckets }
+output "pubsub_topics" { value = module.stack.pubsub_topics }
 output "deployment_mode" { value = module.stack.deployment_mode }
 `
     : `
@@ -556,6 +626,7 @@ output "rec_namespace" { value = module.stack.rec_namespace }
 output "k8s_outputs_file" { value = module.stack.k8s_outputs_file }
 output "app_outputs_file" { value = module.stack.app_outputs_file }
 output "storage_buckets" { value = module.stack.storage_buckets }
+output "pubsub_topics" { value = module.stack.pubsub_topics }
 output "deployment_mode" { value = module.stack.deployment_mode }
 `
 }
@@ -655,6 +726,15 @@ variable "storage_buckets" {
   }))
   default = []
 }
+variable "pubsub_topics" {
+  type = list(object({
+    name                = string
+    create_subscription = bool
+    grant_publisher     = bool
+    grant_subscriber    = bool
+  }))
+  default = []
+}
 `
       : `
 variable "yourname" { type = string }
@@ -704,6 +784,15 @@ variable "storage_buckets" {
     versioning    = bool
     force_destroy = bool
     grant_role    = string
+  }))
+  default = []
+}
+variable "pubsub_topics" {
+  type = list(object({
+    name                = string
+    create_subscription = bool
+    grant_publisher     = bool
+    grant_subscriber    = bool
   }))
   default = []
 }
@@ -772,6 +861,7 @@ variable "storage_buckets" {
     tfvars.app_connect_cluster_admin = vmsConn.connectClusterAdmin;
     tfvars.app_connect_lb = vmsConn.connectLb;
     tfvars.storage_buckets = buildStorageBuckets(input, vmPrefix);
+    tfvars.pubsub_topics = buildPubsub(input, vmPrefix);
   } else {
     const clusters = normalizeClusters({ ...input, mode: "gke" });
     const prefix = `${input.name}-${input.env || "default"}`;
@@ -788,6 +878,7 @@ variable "storage_buckets" {
     });
     tfvars.applications = buildGkeApplications(input);
     tfvars.storage_buckets = buildStorageBuckets(input, prefix);
+    tfvars.pubsub_topics = buildPubsub(input, prefix);
   }
 
   const tfvarsBody = Object.entries(tfvars)

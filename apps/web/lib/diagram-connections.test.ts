@@ -46,6 +46,7 @@ function buildDiagram(): { nodes: DesignNode[]; edges: DesignEdge[] } {
     node("v1", "vms", { name: "", count: 2, machine_type: "e2-standard-2", disk_gib: 0, memviz_enabled: false, expose_http: false, expose_https: false, extra_ports: "" }, ROOT_ID),
     node("lb1", "loadbalancer", { name: "front", expose_http: true, expose_https: false, extra_ports: "" }, ROOT_ID),
     node("s1", "storage", { name: "assets", location: "", storage_class: "STANDARD", versioning: false, force_destroy: true, access: "readwrite" }, ROOT_ID),
+    node("p1", "pubsub", { name: "events", create_subscription: true, role: "both" }, ROOT_ID),
   ];
   const edges: DesignEdge[] = [
     { id: "e1", source: "lb1", target: "app1" }, // LB fronts the app
@@ -54,6 +55,7 @@ function buildDiagram(): { nodes: DesignNode[]; edges: DesignEdge[] } {
     { id: "e4", source: "v1", target: "db1" }, //   Set-of-VMs consumes database
     { id: "e5", source: "v1", target: "lb1" }, //   Set-of-VMs consumes the app's LB VIP
     { id: "e6", source: "app1", target: "s1" }, //  app consumes the storage bucket
+    { id: "e7", source: "app1", target: "p1" }, //  app consumes the Pub/Sub topic
   ];
   return { nodes, edges };
 }
@@ -66,6 +68,7 @@ describe("diagramToCreateInput connections", () => {
     assert.deepEqual(app.connectClusters, ["cache"]);
     assert.deepEqual(app.connectDatabases, ["sessions"]);
     assert.deepEqual(app.connectStorage, ["assets"]);
+    assert.deepEqual(app.connectPubsub, ["events"]);
     // The LB fronts the app; the app itself does not consume it.
     assert.equal(app.connectLoadBalancers, undefined);
     const lb = payload.load_balancers.find((l: any) => l.target === "web");
@@ -75,6 +78,9 @@ describe("diagramToCreateInput connections", () => {
     const bucket = payload.storage_buckets.find((b: any) => b.name === "assets");
     assert.ok(bucket, "storage bucket present");
     assert.equal(bucket.access, "readwrite");
+    const topic = payload.pubsub_topics.find((t: any) => t.name === "events");
+    assert.ok(topic, "pubsub topic present");
+    assert.equal(topic.create_subscription, true);
   });
 
   it("derives vms_connect for the Set-of-VMs group", () => {
@@ -94,8 +100,10 @@ describe("diagramToCreateInput connections", () => {
     assert.deepEqual(app.connectClusters, ["cache"]);
     assert.deepEqual(app.connectDatabases, ["sessions"]);
     assert.deepEqual(app.connectStorage, ["assets"]);
+    assert.deepEqual(app.connectPubsub, ["events"]);
     assert.deepEqual(again.vms_connect.databases, ["sessions"]);
     assert.equal((again.storage_buckets as any[]).length, 1);
+    assert.equal((again.pubsub_topics as any[]).length, 1);
   });
 });
 
@@ -120,6 +128,10 @@ describe("exposedVariables", () => {
     assert.deepEqual(
       exposedVariables("storage", "assets").map((v) => v.name),
       ["GCS_ASSETS_BUCKET", "GCS_ASSETS_URL"],
+    );
+    assert.deepEqual(
+      exposedVariables("pubsub", "events").map((v) => v.name),
+      ["PUBSUB_EVENTS_TOPIC", "PUBSUB_EVENTS_SUBSCRIPTION", "PUBSUB_EVENTS_PROJECT"],
     );
   });
 });

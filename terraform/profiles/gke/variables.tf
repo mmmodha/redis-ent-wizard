@@ -119,3 +119,14 @@ variable "storage_buckets" {
   description = "Cloud Storage buckets provisioned for this deployment."
   default     = []
 }
+
+variable "pubsub_topics" {
+  type = list(object({
+    name                = string
+    create_subscription = bool
+    grant_publisher     = bool
+    grant_subscriber    = bool
+  }))
+  description = "Pub/Sub topics provisioned for this deployment."
+  default     = []
+}

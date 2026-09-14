@@ -71,6 +71,16 @@ export interface LoadBalancerSpec {
   ports: number[];
 }
 
+/** A Pub/Sub topic (with an optional subscription) available to workloads. */
+export interface PubsubSpec {
+  /** Short name; the actual topic is `<deploymentPrefix>-<slug>`. */
+  name: string;
+  /** Also create a pull subscription `<topic>-sub`. */
+  create_subscription?: boolean;
+  /** Which IAM roles a connected consumer's SA gets on the topic/subscription. */
+  role?: "publish" | "subscribe" | "both";
+}
+
 /** A Google Cloud Storage bucket available as object storage to workloads. */
 export interface StorageBucketSpec {
   /** Short name; the actual bucket is `<deploymentPrefix>-<slug>`. */
@@ -103,6 +113,8 @@ export interface Application {
   connectApps?: string[];
   /** Names of storage buckets injected as GCS_<NAME>_BUCKET / GCS_<NAME>_URL. */
   connectStorage?: string[];
+  /** Names of Pub/Sub topics injected as PUBSUB_<NAME>_TOPIC / _SUBSCRIPTION / _PROJECT. */
+  connectPubsub?: string[];
   // VM
   artifact?: ApplicationArtifact;
   vm_count?: number;
@@ -221,6 +233,8 @@ export interface CreateInstanceInput {
   load_balancers?: LoadBalancerSpec[];
   /** Cloud Storage buckets provisioned for this deployment (VM and GKE). */
   storage_buckets?: StorageBucketSpec[];
+  /** Pub/Sub topics provisioned for this deployment (VM and GKE). */
+  pubsub_topics?: PubsubSpec[];
   /** Connection references from the Set-of-VMs group (app VMs) to providers in this deployment. */
   vms_connect?: {
     clusters?: string[];
@@ -228,6 +242,7 @@ export interface CreateInstanceInput {
     load_balancers?: string[];
     apps?: string[];
     storage?: string[];
+    pubsub?: string[];
   };
   // GKE
   gke_clustersize?: number;

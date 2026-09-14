@@ -344,7 +344,8 @@ function DesignCanvas() {
       const b = nodeById(bId ?? "");
       if (!a || !b || a.id === b.id) return null;
       const isConsumer = (k: string) => k === "application" || k === "vms";
-      const isProviderOnly = (k: string) => k === "cluster" || k === "database" || k === "storage";
+      const isProviderOnly = (k: string) =>
+        k === "cluster" || k === "database" || k === "storage" || k === "pubsub";
 
       const orientLb = (lb: DesignNode, host: DesignNode) => {
         const backend = lbBackendId(lb);

@@ -13,6 +13,7 @@ import type {
   DatabaseData,
   LoadBalancerData,
   NodeKind,
+  PubsubData,
   RootData,
   StorageData,
   VmsData,
@@ -226,6 +227,19 @@ export function StorageNode({ data }: NodeProps) {
   );
 }
 
+export function PubsubNode({ data }: NodeProps) {
+  const d = data as PubsubData;
+  const meta = [d.create_subscription ? "topic + subscription" : "topic", d.role].join(" · ");
+  return (
+    <div className="design-pubsub">
+      <Handle type="target" position={Position.Left} className="design-hit" />
+      <NodeHeader icon="pubsub" title={d.name.trim() || "Pub/Sub"} />
+      <div className="design-node-meta mono">{meta}</div>
+      <ExposesLine kind="pubsub" name={d.name.trim()} />
+    </div>
+  );
+}
+
 export const nodeTypes: NodeTypes = {
   network: RootNode,
   gke: RootNode,
@@ -235,4 +249,5 @@ export const nodeTypes: NodeTypes = {
   application: ApplicationNode,
   loadbalancer: LoadBalancerNode,
   storage: StorageNode,
+  pubsub: PubsubNode,
 };

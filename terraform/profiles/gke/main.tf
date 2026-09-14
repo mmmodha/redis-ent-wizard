@@ -14,6 +14,14 @@ module "storage" {
   youremail        = var.youremail
 }
 
+module "pubsub" {
+  source = "../../modules/pubsub"
+
+  topics           = var.pubsub_topics
+  compute_sa_email = local.compute_sa
+  youremail        = var.youremail
+}
+
 module "network" {
   source = "../../modules/network"
 
@@ -103,6 +111,10 @@ output "app_outputs_file" {
 
 output "storage_buckets" {
   value = module.storage.buckets
+}
+
+output "pubsub_topics" {
+  value = module.pubsub.topics
 }
 
 output "deployment_mode" {

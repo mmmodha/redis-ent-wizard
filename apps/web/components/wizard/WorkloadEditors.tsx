@@ -46,6 +46,7 @@ export type ApplicationDraft = {
   connectLoadBalancers: string[];
   connectApps: string[];
   connectStorage: string[];
+  connectPubsub: string[];
   requirements: string[];
   // VM mode
   artifact: ArtifactSource;
@@ -84,6 +85,27 @@ export function blankStorage(): StorageDraft {
     versioning: false,
     force_destroy: true,
     access: "readwrite",
+  };
+}
+
+/** A Pub/Sub topic draft. */
+export type PubsubDraft = {
+  name: string;
+  create_subscription: boolean;
+  role: "publish" | "subscribe" | "both";
+};
+
+export function blankPubsub(): PubsubDraft {
+  return { name: "", create_subscription: true, role: "both" };
+}
+
+export function pubsubDraftFromConfig(t: Record<string, unknown>): PubsubDraft {
+  const s = (v: unknown) => (typeof v === "string" ? v : "");
+  const role = s(t.role);
+  return {
+    name: s(t.name),
+    create_subscription: t.create_subscription === undefined ? true : Boolean(t.create_subscription),
+    role: role === "publish" || role === "subscribe" ? role : "both",
   };
 }
 
@@ -131,6 +153,7 @@ export function blankApplication(machineType = ""): ApplicationDraft {
     connectLoadBalancers: [],
     connectApps: [],
     connectStorage: [],
+    connectPubsub: [],
     requirements: [],
     artifact: { kind: "upload", ref: "", type: "jar" },
     vm_count: 1,
@@ -218,20 +241,30 @@ export function VmsConnectEditor({
   loadBalancerNames,
   appHostNames,
   storageNames,
+  pubsubNames,
 }: {
-  value: { clusters: string[]; databases: string[]; load_balancers: string[]; apps: string[]; storage: string[] };
+  value: {
+    clusters: string[];
+    databases: string[];
+    load_balancers: string[];
+    apps: string[];
+    storage: string[];
+    pubsub: string[];
+  };
   onChange: (v: {
     clusters: string[];
     databases: string[];
     load_balancers: string[];
     apps: string[];
     storage: string[];
+    pubsub: string[];
   }) => void;
   clusterNames: string[];
   databaseNames: string[];
   loadBalancerNames: string[];
   appHostNames: string[];
   storageNames: string[];
+  pubsubNames: string[];
 }) {
   const toggle = (field: keyof typeof value, name: string, on: boolean) =>
     onChange({ ...value, [field]: on ? [...value[field], name] : value[field].filter((x) => x !== name) });
@@ -240,7 +273,8 @@ export function VmsConnectEditor({
     !databaseNames.length &&
     !loadBalancerNames.length &&
     !appHostNames.length &&
-    !storageNames.length
+    !storageNames.length &&
+    !pubsubNames.length
   ) {
     return null;
   }
@@ -284,6 +318,13 @@ export function VmsConnectEditor({
         options={storageNames}
         selected={value.storage}
         onToggle={(n, on) => toggle("storage", n, on)}
+      />
+      <ConnectPicker
+        label="Connect to Pub/Sub"
+        hint="Injects PUBSUB_<TOPIC>_TOPIC / _SUBSCRIPTION and grants publish/subscribe."
+        options={pubsubNames}
+        selected={value.pubsub}
+        onToggle={(n, on) => toggle("pubsub", n, on)}
       />
     </div>
   );
@@ -510,6 +551,7 @@ export function ApplicationsEditor({
   loadBalancerNames = [],
   appHostNames = [],
   storageNames = [],
+  pubsubNames = [],
 }: {
   applications: ApplicationDraft[];
   onChange: (apps: ApplicationDraft[]) => void;
@@ -523,6 +565,7 @@ export function ApplicationsEditor({
   loadBalancerNames?: string[];
   appHostNames?: string[];
   storageNames?: string[];
+  pubsubNames?: string[];
 }) {
   const [uploading, setUploading] = useState<Record<number, boolean>>({});
   const [uploadErrors, setUploadErrors] = useState<Record<number, string>>({});
@@ -914,6 +957,19 @@ export function ApplicationsEditor({
                 })
               }
             />
+            <ConnectPicker
+              label="Connect to Pub/Sub"
+              hint="Injects PUBSUB_<TOPIC>_TOPIC / _SUBSCRIPTION and grants publish/subscribe."
+              options={pubsubNames}
+              selected={app.connectPubsub}
+              onToggle={(cn, on) =>
+                patch(i, {
+                  connectPubsub: on
+                    ? [...app.connectPubsub, cn]
+                    : app.connectPubsub.filter((x) => x !== cn),
+                })
+              }
+            />
 
             <div className="wiz-field-wide">
               <span className="machine-picker-label">Environment variables</span>
@@ -1154,6 +1210,66 @@ export function StorageEditor({
       <div style={{ marginTop: 12 }}>
         <button type="button" className="btn" onClick={() => onChange([...buckets, blankStorage()])}>
           Add bucket
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/** Pub/Sub topics editor (VM and GKE). */
+export function PubsubEditor({
+  topics,
+  onChange,
+}: {
+  topics: PubsubDraft[];
+  onChange: (topics: PubsubDraft[]) => void;
+}) {
+  const patch = (i: number, p: Partial<PubsubDraft>) =>
+    onChange(topics.map((t, idx) => (idx === i ? { ...t, ...p } : t)));
+
+  return (
+    <div className="companion-block">
+      <h3 className="companion-title">Pub/Sub (optional)</h3>
+      <p className="hint" style={{ marginTop: 0 }}>
+        Topics (and optional subscriptions). Connect an application or the Set-of-VMs group to inject the
+        topic/subscription names and grant publish/subscribe.
+      </p>
+      {topics.map((t, i) => (
+        <div className="wiz-workload-card" key={`topic-${i}`}>
+          <div className="wiz-workload-head">
+            <h4>{t.name.trim() || `Topic ${i + 1}`}</h4>
+            <button type="button" className="btn" onClick={() => onChange(topics.filter((_, idx) => idx !== i))}>
+              Remove
+            </button>
+          </div>
+          <div className="grid grid-2">
+            <label>
+              Topic name
+              <input value={t.name} onChange={(e) => patch(i, { name: e.target.value.slice(0, 40) })} placeholder="events" />
+              <span className="hint">Prefixed with the deployment name.</span>
+            </label>
+            <label>
+              Access for connected components
+              <select value={t.role} onChange={(e) => patch(i, { role: e.target.value as PubsubDraft["role"] })}>
+                <option value="both">Publish &amp; subscribe</option>
+                <option value="publish">Publish only</option>
+                <option value="subscribe">Subscribe only</option>
+              </select>
+            </label>
+            <label className="wiz-check-row">
+              <input
+                type="checkbox"
+                checked={t.create_subscription}
+                onChange={(e) => patch(i, { create_subscription: e.target.checked })}
+              />
+              Create a pull subscription
+            </label>
+          </div>
+        </div>
+      ))}
+      <div style={{ marginTop: 12 }}>
+        <button type="button" className="btn" onClick={() => onChange([...topics, blankPubsub()])}>
+          Add topic
         </button>
       </div>
     </div>

@@ -8,16 +8,20 @@ import {
   ApplicationsEditor,
   DatabaseEditor,
   LoadBalancerEditor,
+  PubsubEditor,
   StorageEditor,
   VmsConnectEditor,
   blankApplication,
   blankLb,
+  blankPubsub,
   blankStorage,
   databaseDraftFromConfig,
+  pubsubDraftFromConfig,
   storageDraftFromConfig,
   type ApplicationDraft,
   type DatabaseDraft,
   type LbDraft,
+  type PubsubDraft,
   type StorageDraft,
 } from "@/components/wizard/WorkloadEditors";
 import { parsePorts } from "@/lib/diagram";
@@ -177,7 +181,15 @@ type WizardForm = {
   applications: ApplicationDraft[];
   load_balancers: LbDraft[];
   storage_buckets: StorageDraft[];
-  vms_connect: { clusters: string[]; databases: string[]; load_balancers: string[]; apps: string[]; storage: string[] };
+  pubsub_topics: PubsubDraft[];
+  vms_connect: {
+    clusters: string[];
+    databases: string[];
+    load_balancers: string[];
+    apps: string[];
+    storage: string[];
+    pubsub: string[];
+  };
   RS_admin: string;
   app: number;
   app_machine_types: string[];
@@ -213,6 +225,7 @@ function applicationDraftFromConfig(a: Record<string, unknown>): ApplicationDraf
     connectLoadBalancers: strArray(a.connectLoadBalancers),
     connectApps: strArray(a.connectApps),
     connectStorage: strArray(a.connectStorage),
+    connectPubsub: strArray(a.connectPubsub),
     requirements: strArray(a.requirements),
     artifact: {
       kind:
@@ -292,6 +305,9 @@ function formFromConfig(
     storage_buckets: Array.isArray(cfg.storage_buckets)
       ? (cfg.storage_buckets as Record<string, unknown>[]).map(storageDraftFromConfig)
       : [],
+    pubsub_topics: Array.isArray(cfg.pubsub_topics)
+      ? (cfg.pubsub_topics as Record<string, unknown>[]).map(pubsubDraftFromConfig)
+      : [],
     vms_connect: (() => {
       const vc = (cfg.vms_connect as Record<string, unknown> | undefined) || {};
       return {
@@ -300,6 +316,7 @@ function formFromConfig(
         load_balancers: strArray(vc.load_balancers),
         apps: strArray(vc.apps),
         storage: strArray(vc.storage),
+        pubsub: strArray(vc.pubsub),
       };
     })(),
     RS_admin: str(cfg.RS_admin) || prev.RS_admin,
@@ -361,12 +378,14 @@ function WizardInner() {
     applications: [] as ApplicationDraft[],
     load_balancers: [] as LbDraft[],
     storage_buckets: [] as StorageDraft[],
-    vms_connect: { clusters: [], databases: [], load_balancers: [], apps: [], storage: [] } as {
+    pubsub_topics: [] as PubsubDraft[],
+    vms_connect: { clusters: [], databases: [], load_balancers: [], apps: [], storage: [], pubsub: [] } as {
       clusters: string[];
       databases: string[];
       load_balancers: string[];
       apps: string[];
       storage: string[];
+      pubsub: string[];
     },
     RS_admin: "admin@redis.io",
     app: 0,
@@ -440,6 +459,10 @@ function WizardInner() {
   const storageConnectNames = useMemo(
     () => form.storage_buckets.map((b) => b.name.trim()).filter(Boolean),
     [form.storage_buckets],
+  );
+  const pubsubConnectNames = useMemo(
+    () => form.pubsub_topics.map((t) => t.name.trim()).filter(Boolean),
+    [form.pubsub_topics],
   );
 
   useEffect(() => {
@@ -637,6 +660,7 @@ function WizardInner() {
         app.connectLoadBalancers = a.connectLoadBalancers;
       if (a.connectApps.length) app.connectApps = a.connectApps;
       if (a.connectStorage.length) app.connectStorage = a.connectStorage;
+      if (a.connectPubsub.length) app.connectPubsub = a.connectPubsub;
       if (a.requirements.length) app.requirements = a.requirements;
       if (form.mode === "vm") {
         Object.assign(app, {
@@ -669,6 +693,11 @@ function WizardInner() {
       }))
       .filter((b) => b.name);
     if (storageBuckets.length) base.storage_buckets = storageBuckets;
+
+    const pubsubTopics = form.pubsub_topics
+      .map((t) => ({ name: t.name.trim(), create_subscription: t.create_subscription, role: t.role }))
+      .filter((t) => t.name);
+    if (pubsubTopics.length) base.pubsub_topics = pubsubTopics;
 
     if (form.mode === "vm") {
       if (form.clusters.length === 0) {
@@ -745,13 +774,15 @@ function WizardInner() {
           load_balancers: form.vms_connect.load_balancers,
           apps: form.vms_connect.apps,
           storage: form.vms_connect.storage,
+          pubsub: form.vms_connect.pubsub,
         };
         if (
           vc.clusters.length ||
           vc.databases.length ||
           vc.load_balancers.length ||
           vc.apps.length ||
-          vc.storage.length
+          vc.storage.length ||
+          vc.pubsub.length
         )
           base.vms_connect = vc;
       }
@@ -1647,6 +1678,7 @@ function WizardInner() {
               loadBalancerNames={lbConnectNames}
               appHostNames={appHostConnectNames}
               storageNames={storageConnectNames}
+              pubsubNames={pubsubConnectNames}
               onChange={(applications) => {
                 setForm((prev) => ({ ...prev, applications }));
                 setPreflightResult(null);
@@ -1671,6 +1703,14 @@ function WizardInner() {
               }}
             />
 
+            <PubsubEditor
+              topics={form.pubsub_topics}
+              onChange={(pubsub_topics) => {
+                setForm((prev) => ({ ...prev, pubsub_topics }));
+                setPreflightResult(null);
+              }}
+            />
+
             {form.app > 0 ? (
               <VmsConnectEditor
                 value={form.vms_connect}
@@ -1679,6 +1719,7 @@ function WizardInner() {
                 loadBalancerNames={lbConnectNames}
                 appHostNames={appHostConnectNames}
                 storageNames={storageConnectNames}
+                pubsubNames={pubsubConnectNames}
                 onChange={(vms_connect) => {
                   setForm((prev) => ({ ...prev, vms_connect }));
                   setPreflightResult(null);
@@ -1871,6 +1912,7 @@ function WizardInner() {
               databaseNames={databaseConnectNames}
               appHostNames={appHostConnectNames}
               storageNames={storageConnectNames}
+              pubsubNames={pubsubConnectNames}
               onChange={(applications) => {
                 setForm((prev) => ({ ...prev, applications }));
                 setPreflightResult(null);
@@ -1882,6 +1924,14 @@ function WizardInner() {
               region={form.region_name}
               onChange={(storage_buckets) => {
                 setForm((prev) => ({ ...prev, storage_buckets }));
+                setPreflightResult(null);
+              }}
+            />
+
+            <PubsubEditor
+              topics={form.pubsub_topics}
+              onChange={(pubsub_topics) => {
+                setForm((prev) => ({ ...prev, pubsub_topics }));
                 setPreflightResult(null);
               }}
             />

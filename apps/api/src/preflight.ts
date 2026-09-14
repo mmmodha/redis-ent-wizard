@@ -19,6 +19,7 @@ import {
 } from "./gcp.js";
 import { normalizeApplications } from "./applications.js";
 import { bucketFullName, normalizeStorageBuckets } from "./storage.js";
+import { normalizePubsub } from "./pubsub.js";
 import { capacityFor } from "./databases.js";
 import { clusterTrialShardGate } from "./trial-shards.js";
 import { LOCAL_SSD_GIB, maxLocalSsdsForMachineType } from "./nvme.js";
@@ -861,6 +862,7 @@ export async function preflight(
     );
     const lbByName = new Map((input.load_balancers || []).map((lb) => [lb.name, lb]));
     const bucketNames = new Set<string>((input.storage_buckets || []).map((b) => b.name));
+    const topicNames = new Set<string>((input.pubsub_topics || []).map((t) => t.name));
     let connApps: ReturnType<typeof normalizeApplications> = [];
     try {
       connApps = normalizeApplications({ mode, applications: input.applications });
@@ -879,6 +881,7 @@ export async function preflight(
         connectLoadBalancers?: string[];
         connectApps?: string[];
         connectStorage?: string[];
+        connectPubsub?: string[];
       },
       self: { app?: string; isVmsGroup?: boolean },
     ) => {
@@ -888,6 +891,8 @@ export async function preflight(
         if (!dbNames.has(d)) problems.push(`${label} → unknown database "${d}"`);
       for (const b of sel.connectStorage || [])
         if (!bucketNames.has(b)) problems.push(`${label} → unknown storage bucket "${b}"`);
+      for (const p of sel.connectPubsub || [])
+        if (!topicNames.has(p)) problems.push(`${label} → unknown Pub/Sub topic "${p}"`);
       for (const a of sel.connectApps || []) {
         if (self.app && a === self.app) problems.push(`${label} cannot connect to itself`);
         else if (!appNames.has(a) && appCount === 0)
@@ -918,6 +923,7 @@ export async function preflight(
           connectLoadBalancers: input.vms_connect.load_balancers,
           connectApps: input.vms_connect.apps,
           connectStorage: input.vms_connect.storage,
+          connectPubsub: input.vms_connect.pubsub,
         },
         { isVmsGroup: true },
       );
@@ -930,7 +936,8 @@ export async function preflight(
             a.connectDatabases?.length ||
             a.connectLoadBalancers?.length ||
             a.connectApps?.length ||
-            a.connectStorage?.length) ??
+            a.connectStorage?.length ||
+            a.connectPubsub?.length) ??
           0,
       ) ||
       Boolean(
@@ -939,7 +946,8 @@ export async function preflight(
             input.vms_connect.databases?.length ||
             input.vms_connect.load_balancers?.length ||
             input.vms_connect.apps?.length ||
-            input.vms_connect.storage?.length),
+            input.vms_connect.storage?.length ||
+            input.vms_connect.pubsub?.length),
       );
     if (problems.length) {
       checks.push(fail("connections", "Component connections", problems.join("; ")));
@@ -1008,6 +1016,46 @@ export async function preflight(
         }
       } catch (err) {
         checks.push(warn("storage_iam", "Storage IAM", `Could not verify: ${errorText(err)}`));
+      }
+    }
+  }
+
+  // 12h. Pub/Sub topics
+  {
+    let topics: ReturnType<typeof normalizePubsub> = [];
+    try {
+      topics = normalizePubsub(input);
+    } catch (err) {
+      checks.push(fail("pubsub", "Pub/Sub", err instanceof Error ? err.message : String(err)));
+    }
+    if (topics.length) {
+      const connected = new Set<string>();
+      for (const a of input.applications || [])
+        for (const p of a.connectPubsub || []) connected.add(String(p));
+      for (const p of input.vms_connect?.pubsub || []) connected.add(String(p));
+
+      try {
+        const enabled = await listEnabledServices(credentialsFile, project);
+        if (!enabled.includes("pubsub.googleapis.com")) {
+          checks.push(fail("pubsub_api", "Pub/Sub API", "Not enabled: pubsub.googleapis.com"));
+        }
+      } catch {
+        /* covered by the APIs check */
+      }
+
+      try {
+        const perms = connected.size
+          ? ["pubsub.topics.create", "pubsub.topics.setIamPolicy"]
+          : ["pubsub.topics.create"];
+        const granted = await testIamPermissions(credentialsFile, project, perms);
+        const missing = perms.filter((p) => !granted.includes(p));
+        if (missing.length) {
+          checks.push(fail("pubsub_iam", "Pub/Sub IAM", `Missing ${missing.join(", ")} — grant roles/pubsub.admin`));
+        } else {
+          checks.push(pass("pubsub", "Pub/Sub", `${topics.length} topic(s), ${connected.size} connected to a consumer`));
+        }
+      } catch (err) {
+        checks.push(warn("pubsub_iam", "Pub/Sub IAM", `Could not verify: ${errorText(err)}`));
       }
     }
   }

@@ -15,6 +15,7 @@ import {
   type DatabaseData,
   type DesignNodeData,
   type LoadBalancerData,
+  type PubsubData,
   type StorageData,
   type NodeKind,
   type RootData,
@@ -87,6 +88,7 @@ export function NodeDialog({
     application: "Application",
     loadbalancer: "Load balancer",
     storage: "Cloud Storage bucket",
+    pubsub: "Pub/Sub topic",
   };
 
   return (
@@ -176,7 +178,9 @@ export function NodeDialog({
             <StorageForm data={draft as StorageData} set={set} probeZone={probeZone} />
           ) : null}
 
-          {["cluster", "database", "vms", "application", "loadbalancer", "storage"].includes(target.type) ? (
+          {target.type === "pubsub" ? <PubsubForm data={draft as PubsubData} set={set} /> : null}
+
+          {["cluster", "database", "vms", "application", "loadbalancer", "storage", "pubsub"].includes(target.type) ? (
             <ExposesNote
               kind={target.type as NodeKind}
               name={target.type === "vms" ? "app" : String((draft as { name?: string }).name || "").trim()}
@@ -1124,6 +1128,44 @@ function StorageForm({
           onChange={(e) => set<StorageData>({ force_destroy: e.target.checked })}
         />
         Allow destroy of a non-empty bucket
+      </label>
+    </div>
+  );
+}
+
+function PubsubForm({
+  data,
+  set,
+}: {
+  data: PubsubData;
+  set: <T extends DesignNodeData>(p: Partial<T>) => void;
+}) {
+  return (
+    <div className="grid">
+      <label>
+        Topic name
+        <input
+          value={data.name}
+          onChange={(e) => set<PubsubData>({ name: e.target.value.slice(0, 40) })}
+          placeholder="events"
+        />
+        <span className="hint">The real topic is prefixed with the deployment name.</span>
+      </label>
+      <label>
+        Access for connected components
+        <select value={data.role} onChange={(e) => set<PubsubData>({ role: e.target.value as PubsubData["role"] })}>
+          <option value="both">Publish &amp; subscribe</option>
+          <option value="publish">Publish only</option>
+          <option value="subscribe">Subscribe only</option>
+        </select>
+      </label>
+      <label className="design-check-row">
+        <input
+          type="checkbox"
+          checked={data.create_subscription}
+          onChange={(e) => set<PubsubData>({ create_subscription: e.target.checked })}
+        />
+        Create a pull subscription
       </label>
     </div>
   );

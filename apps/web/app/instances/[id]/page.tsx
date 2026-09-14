@@ -383,6 +383,10 @@ export default function InstanceDetailPage() {
     ? (inst!.endpoints!.storage_buckets as Array<Record<string, unknown>>)
     : [];
   const showStoragePanel = storageBuckets.length > 0;
+  const pubsubTopics = Array.isArray(inst?.endpoints?.pubsub_topics)
+    ? (inst!.endpoints!.pubsub_topics as Array<Record<string, unknown>>)
+    : [];
+  const showPubsubPanel = pubsubTopics.length > 0;
   const dbStatusColor = (status: string) => statusToneColor(status);
   const showDbPanel = databases.length > 0 || licenses.length > 0 || configuredDbCount > 0;
   const showAppPanel = vmWorkloads.length > 0 || gkeAppServices.length > 0 || configuredAppCount > 0;
@@ -775,6 +779,37 @@ export default function InstanceDetailPage() {
                                 {copied === url ? "Copied" : "Copy"}
                               </button>
                             </span>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              ) : null}
+
+              {showPubsubPanel ? (
+                <div className="access-section">
+                  <h3>Pub/Sub</h3>
+                  <div className="summary-grid">
+                    {pubsubTopics.map((t, i) => {
+                      const topic = String(t.topic || t.name || "");
+                      const subscription = String(t.subscription || "");
+                      return (
+                        <div className="summary-row" key={`topic-${topic}-${i}`}>
+                          <div className="summary-label">{String(t.name || topic)}</div>
+                          <div className="summary-value">
+                            <span className="db-endpoint-row">
+                              <span className="mono">{topic}</span>
+                              <button
+                                type="button"
+                                className="btn btn-copy"
+                                onClick={() => copyEndpoint(topic)}
+                                title="Copy topic to clipboard"
+                              >
+                                {copied === topic ? "Copied" : "Copy"}
+                              </button>
+                            </span>
+                            {subscription ? <div className="hint mono">{subscription}</div> : null}
                           </div>
                         </div>
                       );

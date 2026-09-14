@@ -99,6 +99,13 @@ export function defaultNodeData(
         force_destroy: true,
         access: "readwrite",
       };
+    case "pubsub":
+      return {
+        kind: "pubsub",
+        name: "",
+        create_subscription: true,
+        role: "both",
+      };
     default:
       return { kind: "network", label: "VPC network" };
   }

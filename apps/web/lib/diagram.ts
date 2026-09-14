@@ -14,7 +14,8 @@ export type NodeKind =
   | "vms"
   | "application"
   | "loadbalancer"
-  | "storage";
+  | "storage"
+  | "pubsub";
 
 export type RootData = {
   kind: "network" | "gke";
@@ -114,6 +115,14 @@ export type StorageData = {
   [k: string]: unknown;
 };
 
+export type PubsubData = {
+  kind: "pubsub";
+  name: string;
+  create_subscription: boolean;
+  role: "publish" | "subscribe" | "both";
+  [k: string]: unknown;
+};
+
 export type DesignNodeData =
   | RootData
   | ClusterData
@@ -121,7 +130,8 @@ export type DesignNodeData =
   | VmsData
   | ApplicationData
   | LoadBalancerData
-  | StorageData;
+  | StorageData
+  | PubsubData;
 
 export type DesignNode = Node<DesignNodeData>;
 export type DesignEdge = Edge;
@@ -235,6 +245,9 @@ function isLoadBalancer(n: DesignNode): n is Node<LoadBalancerData> {
 function isStorage(n: DesignNode): n is Node<StorageData> {
   return n.data.kind === "storage";
 }
+function isPubsub(n: DesignNode): n is Node<PubsubData> {
+  return n.data.kind === "pubsub";
+}
 
 /** Human-facing name for a cluster node, used for edge connect references. */
 export function clusterName(node: Node<ClusterData>, index: number): string {
@@ -308,6 +321,12 @@ export function exposedVariables(
         { name: `GCS_${s}_BUCKET`, description: "Bucket name" },
         { name: `GCS_${s}_URL`, description: "Bucket URL (gs://…)" },
       ];
+    case "pubsub":
+      return [
+        { name: `PUBSUB_${s}_TOPIC`, description: "Topic resource name" },
+        { name: `PUBSUB_${s}_SUBSCRIPTION`, description: "Subscription resource name (if created)" },
+        { name: `PUBSUB_${s}_PROJECT`, description: "GCP project id" },
+      ];
     case "application":
     case "vms":
       return [{ name: `${s}_HOST`, description: "Component hostname" }];
@@ -331,6 +350,7 @@ export function diagramToCreateInput(
   const apps = nodes.filter(isApplication);
   const lbs = nodes.filter(isLoadBalancer);
   const storageNodes = nodes.filter(isStorage);
+  const pubsubNodes = nodes.filter(isPubsub);
 
   const clusterNameById = new Map<string, string>();
   clusters.forEach((c, i) => clusterNameById.set(c.id, clusterName(c, i)));
@@ -341,6 +361,8 @@ export function diagramToCreateInput(
   databases.forEach((d) => dbNameById.set(d.id, d.data.name.trim() || "db"));
   const storageNameById = new Map<string, string>();
   storageNodes.forEach((s) => storageNameById.set(s.id, s.data.name.trim() || "bucket"));
+  const pubsubNameById = new Map<string, string>();
+  pubsubNodes.forEach((p) => pubsubNameById.set(p.id, p.data.name.trim() || "topic"));
   const hostNameById = new Map<string, string>();
   apps.forEach((a) => hostNameById.set(a.id, a.data.name.trim() || "app"));
   vmsNodes.forEach((v) => hostNameById.set(v.id, "app"));
@@ -410,6 +432,9 @@ export function diagramToCreateInput(
     const connectStorage = uniq(
       outgoing.filter((e) => storageNameById.has(e.target)).map((e) => storageNameById.get(e.target) as string),
     );
+    const connectPubsub = uniq(
+      outgoing.filter((e) => pubsubNameById.has(e.target)).map((e) => pubsubNameById.get(e.target) as string),
+    );
     const common: Record<string, unknown> = {
       name: a.data.name.trim() || "app",
     };
@@ -423,6 +448,7 @@ export function diagramToCreateInput(
     if (connectLoadBalancers.length) common.connectLoadBalancers = connectLoadBalancers;
     if (connectApps.length) common.connectApps = connectApps;
     if (connectStorage.length) common.connectStorage = connectStorage;
+    if (connectPubsub.length) common.connectPubsub = connectPubsub;
     if (settings.mode === "vm") {
       Object.assign(common, {
         artifact: {
@@ -475,6 +501,13 @@ export function diagramToCreateInput(
     access: s.data.access,
   }));
   if (storageBuckets.length) base.storage_buckets = storageBuckets;
+
+  const pubsubTopics = pubsubNodes.map((p) => ({
+    name: p.data.name.trim() || "topic",
+    create_subscription: Boolean(p.data.create_subscription),
+    role: p.data.role,
+  }));
+  if (pubsubTopics.length) base.pubsub_topics = pubsubTopics;
 
   if (settings.mode === "vm") {
     const clusterNodes = clusters;
@@ -543,6 +576,9 @@ export function diagramToCreateInput(
       storage: uniq(
         vmsOutgoing.filter((e) => storageNameById.has(e.target)).map((e) => storageNameById.get(e.target) as string),
       ),
+      pubsub: uniq(
+        vmsOutgoing.filter((e) => pubsubNameById.has(e.target)).map((e) => pubsubNameById.get(e.target) as string),
+      ),
     };
 
     Object.assign(base, {
@@ -592,7 +628,8 @@ export function diagramToCreateInput(
       vmsConnect.databases.length ||
       vmsConnect.load_balancers.length ||
       vmsConnect.apps.length ||
-      vmsConnect.storage.length
+      vmsConnect.storage.length ||
+      vmsConnect.pubsub.length
     ) {
       base.vms_connect = vmsConnect;
     }
@@ -644,6 +681,7 @@ export const NODE_SIZE: Record<string, { width: number; height: number }> = {
   vms: { width: 232, height: 120 },
   application: { width: 232, height: 120 },
   storage: { width: 232, height: 120 },
+  pubsub: { width: 232, height: 120 },
 };
 
 /** Initial style for a freshly dropped node, if the kind has a preset size. */
@@ -804,6 +842,7 @@ type StoredAppCfg = {
   connectLoadBalancers?: unknown[];
   connectApps?: unknown[];
   connectStorage?: unknown[];
+  connectPubsub?: unknown[];
   requirements?: unknown[];
   artifact?: { kind?: string; ref?: string; type?: string; branch?: string; runInDocker?: boolean };
   vm_count?: number;
@@ -953,13 +992,45 @@ export function createInputToDiagram(
     if (name) storageNameToId.set(name, id);
   });
 
+  // Pub/Sub topics (both modes).
+  const pubsubCfgs = Array.isArray(cfg.pubsub_topics)
+    ? (cfg.pubsub_topics as Record<string, unknown>[])
+    : [];
+  const pubsubNameToId = new Map<string, string>();
+  pubsubCfgs.forEach((p, i) => {
+    const id = nextId("pubsub");
+    const name = dstr(p.name);
+    nodes.push({
+      id,
+      type: "pubsub",
+      parentId: ROOT_ID,
+      extent: "parent",
+      position: { x: 520 + i * 220, y: 460 },
+      style: { width: NODE_SIZE.pubsub.width, height: NODE_SIZE.pubsub.height },
+      data: {
+        kind: "pubsub",
+        name,
+        create_subscription: Boolean(p.create_subscription),
+        role: p.role === "publish" || p.role === "subscribe" ? p.role : "both",
+      },
+    });
+    if (name) pubsubNameToId.set(name, id);
+  });
+
   // Custom application workloads.
   const apps = Array.isArray(cfg.applications) ? (cfg.applications as StoredAppCfg[]) : [];
   const arr = (x: unknown): string[] => (Array.isArray(x) ? x.map(String) : []);
   const appIdByName = new Map<string, string>();
   const appConnects: {
     sourceId: string;
-    sel: { clusters: string[]; databases: string[]; load_balancers: string[]; apps: string[]; storage: string[] };
+    sel: {
+      clusters: string[];
+      databases: string[];
+      load_balancers: string[];
+      apps: string[];
+      storage: string[];
+      pubsub: string[];
+    };
   }[] = [];
   apps.forEach((a, k) => {
     const appId = nextId("application");
@@ -1005,6 +1076,7 @@ export function createInputToDiagram(
         load_balancers: arr(a.connectLoadBalancers),
         apps: arr(a.connectApps),
         storage: arr(a.connectStorage),
+        pubsub: arr(a.connectPubsub),
       },
     });
   });
@@ -1068,7 +1140,14 @@ export function createInputToDiagram(
   // connection reference recorded on apps and the Set-of-VMs group.
   const addConsumerEdges = (
     sourceId: string,
-    sel: { clusters: string[]; databases: string[]; load_balancers: string[]; apps: string[]; storage: string[] },
+    sel: {
+      clusters: string[];
+      databases: string[];
+      load_balancers: string[];
+      apps: string[];
+      storage: string[];
+      pubsub: string[];
+    },
   ) => {
     const push = (targetId: string | undefined, isLb = false) => {
       if (!targetId || targetId === sourceId) return;
@@ -1086,10 +1165,18 @@ export function createInputToDiagram(
     sel.load_balancers.forEach((n) => push(lbNameToId.get(n), true));
     sel.apps.forEach((n) => push(hostNameToId.get(n)));
     sel.storage.forEach((n) => push(storageNameToId.get(n)));
+    sel.pubsub.forEach((n) => push(pubsubNameToId.get(n)));
   };
   for (const { sourceId, sel } of appConnects) addConsumerEdges(sourceId, sel);
   const vc = cfg.vms_connect as
-    | { clusters?: unknown; databases?: unknown; load_balancers?: unknown; apps?: unknown; storage?: unknown }
+    | {
+        clusters?: unknown;
+        databases?: unknown;
+        load_balancers?: unknown;
+        apps?: unknown;
+        storage?: unknown;
+        pubsub?: unknown;
+      }
     | undefined;
   if (vmsId && vc) {
     addConsumerEdges(vmsId, {
@@ -1098,6 +1185,7 @@ export function createInputToDiagram(
       load_balancers: arr(vc.load_balancers),
       apps: arr(vc.apps),
       storage: arr(vc.storage),
+      pubsub: arr(vc.pubsub),
     });
   }
 
