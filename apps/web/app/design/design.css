@@ -214,10 +214,48 @@
 }
 
 .design-handle {
-  width: 8px;
-  height: 8px;
+  width: 11px;
+  height: 11px;
   background: var(--redis-hyper);
   border: 1px solid var(--redis-bg-primary);
+}
+
+/*
+ * Full-node connection target. Invisible, and only intercepts pointer events
+ * while a connection line is being dragged (the `.design-connecting` class is
+ * toggled on the flow), so it never blocks node click/drag. Lets a user drop a
+ * connection anywhere on the component instead of on a tiny handle dot.
+ */
+.design-hit {
+  position: absolute !important;
+  inset: 0 !important;
+  width: 100% !important;
+  height: 100% !important;
+  min-width: 0 !important;
+  min-height: 0 !important;
+  transform: none !important;
+  border: none !important;
+  border-radius: var(--radius) !important;
+  background: transparent !important;
+  opacity: 0;
+  pointer-events: none !important;
+}
+.design-connecting .design-hit {
+  pointer-events: all !important;
+}
+
+/* Connection-drag feedback: green when the hovered target is valid, red if not. */
+.design-connline {
+  stroke: var(--redis-text-secondary);
+  stroke-width: 2;
+}
+.design-connline.valid {
+  stroke: #21a67a;
+  stroke-width: 2.5;
+}
+.design-connline.invalid {
+  stroke: #e5484d;
+  stroke-width: 2.5;
 }
 
 /* Nodes */

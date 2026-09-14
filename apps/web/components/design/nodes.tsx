@@ -77,7 +77,7 @@ export function ClusterNode({ id, data }: NodeProps) {
   const capClass = clusterCapacityClass(capInput);
   return (
     <div className="design-cluster">
-      <Handle type="target" position={Position.Left} className="design-handle" />
+      <Handle type="target" position={Position.Left} className="design-hit" />
       <NodeHeader icon="cluster" title={d.name.trim() || "Redis cluster"} tag={`${count} nodes`} />
       <div className="design-node-meta mono">{d.machine_type || "machine type"}</div>
       {caption ? <div className={`design-cap ${capClass}`.trim()}>{caption}</div> : null}
@@ -104,7 +104,7 @@ export function DatabaseNode({ id, data }: NodeProps) {
     : null;
   return (
     <div className="design-db">
-      <Handle type="target" position={Position.Left} className="design-handle" />
+      <Handle type="target" position={Position.Left} className="design-hit" />
       <NodeHeader icon="database" title={d.name.trim() || "database"} />
       <div className="design-node-meta mono">{d.memory_gb} GB</div>
       <div className="design-badges">
@@ -157,7 +157,7 @@ export function VmsNode({ data }: NodeProps) {
   ].filter(Boolean);
   return (
     <div className="design-vms">
-      <Handle type="target" position={Position.Left} className="design-handle" />
+      <Handle type="target" position={Position.Left} className="design-hit" />
       <NodeHeader icon="vm" title={d.name.trim() || "Set of VMs"} tag={`${d.count} VMs`} />
       <div className="design-node-meta mono">{d.machine_type || "machine type"}</div>
       {extras.length ? <div className="design-node-meta mono">{extras.join(" · ")}</div> : null}
@@ -179,7 +179,7 @@ export function ApplicationNode({ data }: NodeProps) {
         : "no source yet";
   return (
     <div className="design-app">
-      <Handle type="target" position={Position.Left} className="design-handle" />
+      <Handle type="target" position={Position.Left} className="design-hit" />
       <NodeHeader icon="application" title={d.name.trim() || "Application"} />
       <div className="design-node-meta mono">{summary}</div>
       {d.liveStatus ? (
@@ -202,7 +202,7 @@ export function LoadBalancerNode({ data }: NodeProps) {
   ].filter(Boolean);
   return (
     <div className="design-lb">
-      <Handle type="target" position={Position.Left} className="design-handle" />
+      <Handle type="target" position={Position.Left} className="design-hit" />
       <NodeHeader icon="load-balancer" title={d.name.trim() || "Load balancer"} />
       <div className="design-node-meta mono">{ports.length ? ports.join(" · ") : "closed"}</div>
       <ExposesLine kind="loadbalancer" name={d.name.trim()} />
@@ -218,7 +218,7 @@ export function StorageNode({ data }: NodeProps) {
     .join(" · ");
   return (
     <div className="design-storage">
-      <Handle type="target" position={Position.Left} className="design-handle" />
+      <Handle type="target" position={Position.Left} className="design-hit" />
       <NodeHeader icon="storage" title={d.name.trim() || "Cloud Storage"} />
       <div className="design-node-meta mono">{meta}</div>
       <ExposesLine kind="storage" name={d.name.trim()} />

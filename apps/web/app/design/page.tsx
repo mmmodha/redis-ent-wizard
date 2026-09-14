@@ -13,10 +13,12 @@ import {
   ReactFlow,
   ReactFlowProvider,
   addEdge,
+  getBezierPath,
   useEdgesState,
   useNodesState,
   useReactFlow,
   type Connection,
+  type ConnectionLineComponentProps,
   type Edge,
   type Node,
 } from "@xyflow/react";
@@ -75,6 +77,13 @@ function nodeSize(node: Node): { w: number; h: number } {
   return { w, h };
 }
 
+/** Connection line that turns green when the hovered target is valid, red when not. */
+function DesignConnectionLine({ fromX, fromY, toX, toY, connectionStatus }: ConnectionLineComponentProps) {
+  const [path] = getBezierPath({ sourceX: fromX, sourceY: fromY, targetX: toX, targetY: toY });
+  const status = connectionStatus === "valid" ? " valid" : connectionStatus === "invalid" ? " invalid" : "";
+  return <path d={path} fill="none" className={`design-connline${status}`} />;
+}
+
 function DesignCanvas() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -100,6 +109,7 @@ function DesignCanvas() {
   const [edges, setEdges, onEdgesChange] = useEdgesState<DesignEdge>([]);
 
   const [dialog, setDialog] = useState<DialogTarget | null>(null);
+  const [connecting, setConnecting] = useState(false);
   const [toast, setToast] = useState("");
   const [preflight, setPreflight] = useState<PreflightResult | null>(null);
   const [checking, setChecking] = useState(false);
@@ -580,6 +590,10 @@ function DesignCanvas() {
               onConnect={onConnect}
               isValidConnection={isValidConnection}
               connectionMode={ConnectionMode.Loose}
+              connectionLineComponent={DesignConnectionLine}
+              onConnectStart={() => setConnecting(true)}
+              onConnectEnd={() => setConnecting(false)}
+              className={connecting ? "design-connecting" : undefined}
               onDrop={onDrop}
               onDragOver={onDragOver}
               onNodeClick={onNodeClick}
