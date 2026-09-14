@@ -465,6 +465,28 @@ export async function gkeClusterExists(
 /** Permission needed to read a gs:// artifact (checked in preflight). */
 export const STORAGE_READ_PERMISSIONS = ["storage.objects.get"];
 
+/** Project-level permissions Terraform needs to create + bind IAM on buckets. */
+export const STORAGE_ADMIN_PERMISSIONS = ["storage.buckets.create", "storage.buckets.setIamPolicy"];
+
+/**
+ * Whether a global bucket name is free. GCS bucket names are globally unique, so
+ * a GET returns 404 when free and 200/403 when the name is already taken (by any
+ * project). Returns "free" | "taken" | "unknown" (couldn't determine).
+ */
+export async function bucketAvailability(
+  credentialsFile: string,
+  bucket: string,
+): Promise<"free" | "taken" | "unknown"> {
+  const token = await fetchAccessToken(credentialsFile);
+  const res = await fetch(
+    `https://storage.googleapis.com/storage/v1/b/${encodeURIComponent(bucket)}?fields=name`,
+    { headers: { Authorization: `Bearer ${token}` } },
+  );
+  if (res.status === 404) return "free";
+  if (res.status === 200 || res.status === 403) return "taken";
+  return "unknown";
+}
+
 /** Download a GCS object's bytes (media). Requires storage.objects.get. */
 export async function downloadObject(
   credentialsFile: string,

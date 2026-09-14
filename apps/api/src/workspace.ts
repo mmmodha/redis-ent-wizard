@@ -3,6 +3,7 @@ import path from "node:path";
 import { normalizeAppDiskGib, normalizeAppMachineTypes, parseAppExtraPorts } from "./app-web.js";
 import { normalizeApplications } from "./applications.js";
 import { clusterNamePrefix, normalizeClusters } from "./clusters.js";
+import { bucketFullName, bucketGrantRole, normalizeStorageBuckets } from "./storage.js";
 import { resolveGkeOperatorChart } from "./rs-releases.js";
 import type { CreateInstanceInput, DeploymentMode } from "./types.js";
 
@@ -124,6 +125,7 @@ interface ConnectSelections {
   connectDatabases?: string[];
   connectLoadBalancers?: string[];
   connectApps?: string[];
+  connectStorage?: string[];
 }
 
 /** Static env plus the apply-time refs that Terraform resolves in profiles/vm. */
@@ -141,6 +143,8 @@ interface VmRegistry {
   dbEndpoints: Map<string, string>;
   appHosts: Map<string, string>;
   lbNames: Set<string>;
+  /** Bucket slug -> full bucket name (`<prefix>-<slug>`). */
+  storageBuckets: Map<string, string>;
   adminUser: string;
   vmPrefix: string;
   dnsSuffix: string;
@@ -180,12 +184,15 @@ export function buildVmRegistry(
   const appHosts = new Map<string, string>();
   for (const a of apps) appHosts.set(a.name, `${a.name}.${vmPrefix}.${dnsSuffix}`);
   const lbNames = new Set<string>((input.load_balancers || []).map((lb) => lb.name));
+  const storageBuckets = new Map<string, string>();
+  for (const b of normalizeStorageBuckets(input)) storageBuckets.set(b.name, bucketFullName(vmPrefix, b.name));
   return {
     clusterHosts,
     clusterIndex,
     dbEndpoints,
     appHosts,
     lbNames,
+    storageBuckets,
     adminUser: input.RS_admin || "admin@redis.io",
     vmPrefix,
     dnsSuffix,
@@ -226,6 +233,15 @@ export function resolveVmConnections(sel: ConnectSelections, reg: VmRegistry): R
     if (reg.lbNames.has(lb)) connectLb[`LB_${envSlug(lb)}_ENDPOINT`] = lb;
   }
 
+  for (const bucket of (sel.connectStorage || []).filter(Boolean)) {
+    const full = reg.storageBuckets.get(bucket);
+    if (full) {
+      const slug = envSlug(bucket);
+      env[`GCS_${slug}_BUCKET`] = full;
+      env[`GCS_${slug}_URL`] = `gs://${full}`;
+    }
+  }
+
   return { env, connectClusterAdmin, connectLb };
 }
 
@@ -264,6 +280,7 @@ function buildVmSetConnections(input: CreateInstanceInput, reg: VmRegistry): Res
       connectDatabases: vc.databases,
       connectLoadBalancers: vc.load_balancers,
       connectApps: vc.apps,
+      connectStorage: vc.storage,
     },
     reg,
   );
@@ -279,6 +296,28 @@ function buildLoadBalancers(input: CreateInstanceInput): Record<string, unknown>
   }));
 }
 
+/** Bucket short-names that at least one consumer (app or Set-of-VMs) connects to. */
+function connectedStorageNames(input: CreateInstanceInput): Set<string> {
+  const set = new Set<string>();
+  for (const a of input.applications || []) for (const s of a.connectStorage || []) set.add(String(s));
+  for (const s of input.vms_connect?.storage || []) set.add(String(s));
+  return set;
+}
+
+/** tfvars for the shared storage module; `grant_role` set only for connected buckets. */
+function buildStorageBuckets(input: CreateInstanceInput, prefix: string): Record<string, unknown>[] {
+  const connected = connectedStorageNames(input);
+  const defaultLocation = input.region_name || "europe-west1";
+  return normalizeStorageBuckets(input).map((b) => ({
+    name: bucketFullName(prefix, b.name),
+    location: b.location || defaultLocation,
+    storage_class: b.storage_class,
+    versioning: b.versioning,
+    force_destroy: b.force_destroy,
+    grant_role: connected.has(b.name) ? bucketGrantRole(b.access) : "",
+  }));
+}
+
 interface GkeSecretRef {
   name: string;
   secret: string;
@@ -291,6 +330,7 @@ export function resolveGkeConnections(
   clusters: ReturnType<typeof normalizeClusters>,
   prefix: string,
   apps: string[],
+  storageBuckets: Map<string, string> = new Map(),
 ): { env: Record<string, string>; secretRefs: GkeSecretRef[] } {
   const env: Record<string, string> = {};
   const secretRefs: GkeSecretRef[] = [];
@@ -339,6 +379,15 @@ export function resolveGkeConnections(
     if (appSet.has(name)) env[`${envSlug(name)}_HOST`] = `${name}.${GKE_APP_NS}.svc.cluster.local`;
   }
 
+  for (const bucket of (sel.connectStorage || []).filter(Boolean)) {
+    const full = storageBuckets.get(bucket);
+    if (full) {
+      const slug = envSlug(bucket);
+      env[`GCS_${slug}_BUCKET`] = full;
+      env[`GCS_${slug}_URL`] = `gs://${full}`;
+    }
+  }
+
   return { env, secretRefs };
 }
 
@@ -347,8 +396,10 @@ function buildGkeApplications(input: CreateInstanceInput): Record<string, unknow
   const clusters = normalizeClusters({ ...input, mode: "gke" });
   const prefix = `${input.name}-${input.env || "default"}`;
   const appNames = apps.map((a) => a.name);
+  const storageBuckets = new Map<string, string>();
+  for (const b of normalizeStorageBuckets(input)) storageBuckets.set(b.name, bucketFullName(prefix, b.name));
   return apps.map((app) => {
-    const conn = resolveGkeConnections(app, clusters, prefix, appNames);
+    const conn = resolveGkeConnections(app, clusters, prefix, appNames, storageBuckets);
     return {
       name: app.name,
       image: app.image || "",
@@ -388,6 +439,7 @@ export function vmStackModuleArguments(): string {
   ssh_private_key_path = var.ssh_private_key_path
   applications     = var.applications
   load_balancers   = var.load_balancers
+  storage_buckets  = var.storage_buckets
   app_injected_env = var.app_injected_env
   app_connect_cluster_admin = var.app_connect_cluster_admin
   app_connect_lb   = var.app_connect_lb
@@ -457,6 +509,7 @@ ${
   operator_chart_version   = var.operator_chart_version
   outputs_dir              = var.outputs_dir
   applications             = var.applications
+  storage_buckets          = var.storage_buckets
 `
 }
 }
@@ -490,6 +543,7 @@ output "clusters" {
 }
 output "app_workloads" { value = module.stack.app_workloads }
 output "load_balancers" { value = module.stack.load_balancers }
+output "storage_buckets" { value = module.stack.storage_buckets }
 output "deployment_mode" { value = module.stack.deployment_mode }
 `
     : `
@@ -501,6 +555,7 @@ output "rec_names" { value = module.stack.rec_names }
 output "rec_namespace" { value = module.stack.rec_namespace }
 output "k8s_outputs_file" { value = module.stack.k8s_outputs_file }
 output "app_outputs_file" { value = module.stack.app_outputs_file }
+output "storage_buckets" { value = module.stack.storage_buckets }
 output "deployment_mode" { value = module.stack.deployment_mode }
 `
 }
@@ -589,6 +644,17 @@ variable "app_connect_lb" {
   type    = map(string)
   default = {}
 }
+variable "storage_buckets" {
+  type = list(object({
+    name          = string
+    location      = string
+    storage_class = string
+    versioning    = bool
+    force_destroy = bool
+    grant_role    = string
+  }))
+  default = []
+}
 `
       : `
 variable "yourname" { type = string }
@@ -627,6 +693,17 @@ variable "applications" {
       secret_key  = string
     }))
     expose = string
+  }))
+  default = []
+}
+variable "storage_buckets" {
+  type = list(object({
+    name          = string
+    location      = string
+    storage_class = string
+    versioning    = bool
+    force_destroy = bool
+    grant_role    = string
   }))
   default = []
 }
@@ -694,6 +771,7 @@ variable "applications" {
     tfvars.app_injected_env = vmsConn.env;
     tfvars.app_connect_cluster_admin = vmsConn.connectClusterAdmin;
     tfvars.app_connect_lb = vmsConn.connectLb;
+    tfvars.storage_buckets = buildStorageBuckets(input, vmPrefix);
   } else {
     const clusters = normalizeClusters({ ...input, mode: "gke" });
     const prefix = `${input.name}-${input.env || "default"}`;
@@ -709,6 +787,7 @@ variable "applications" {
       outputs_dir: workDir,
     });
     tfvars.applications = buildGkeApplications(input);
+    tfvars.storage_buckets = buildStorageBuckets(input, prefix);
   }
 
   const tfvarsBody = Object.entries(tfvars)

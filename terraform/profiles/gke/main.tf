@@ -1,5 +1,17 @@
 locals {
   name_prefix = "${var.yourname}-${var.env}"
+  # GKE nodes run as the default compute SA (with cloud-platform scope).
+  compute_sa = "${data.google_project.current.number}-compute@developer.gserviceaccount.com"
+}
+
+data "google_project" "current" {}
+
+module "storage" {
+  source = "../../modules/storage"
+
+  buckets          = var.storage_buckets
+  compute_sa_email = local.compute_sa
+  youremail        = var.youremail
 }
 
 module "network" {
@@ -87,6 +99,10 @@ output "k8s_outputs_file" {
 
 output "app_outputs_file" {
   value = length(module.app_k8s) > 0 ? module.app_k8s[0].app_outputs_file : ""
+}
+
+output "storage_buckets" {
+  value = module.storage.buckets
 }
 
 output "deployment_mode" {

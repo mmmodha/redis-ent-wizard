@@ -41,6 +41,10 @@
   -webkit-mask-image: url(/brand/icons/gke.svg);
   mask-image: url(/brand/icons/gke.svg);
 }
+.design-icon-storage {
+  -webkit-mask-image: url(/brand/icons/storage.svg);
+  mask-image: url(/brand/icons/storage.svg);
+}
 
 /* Settings panel */
 .design-settings-panel {
@@ -307,7 +311,8 @@
 .design-db,
 .design-vms,
 .design-app,
-.design-lb {
+.design-lb,
+.design-storage {
   width: 100%;
   height: 100%;
   border: 1px solid var(--border-soft);
@@ -340,6 +345,10 @@
 
 .design-lb {
   border-left: 3px solid var(--redis-text-link);
+}
+
+.design-storage {
+  border-left: 3px solid var(--redis-dusk-90);
 }
 
 .design-cap {

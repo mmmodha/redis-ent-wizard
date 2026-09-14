@@ -89,6 +89,16 @@ export function defaultNodeData(
         expose_https: false,
         extra_ports: "",
       };
+    case "storage":
+      return {
+        kind: "storage",
+        name: "",
+        location: "",
+        storage_class: "STANDARD",
+        versioning: false,
+        force_destroy: true,
+        access: "readwrite",
+      };
     default:
       return { kind: "network", label: "VPC network" };
   }

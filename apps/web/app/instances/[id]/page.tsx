@@ -379,6 +379,10 @@ export default function InstanceDetailPage() {
     }
   });
   const showLbPanel = loadBalancers.length > 0;
+  const storageBuckets = Array.isArray(inst?.endpoints?.storage_buckets)
+    ? (inst!.endpoints!.storage_buckets as Array<Record<string, unknown>>)
+    : [];
+  const showStoragePanel = storageBuckets.length > 0;
   const dbStatusColor = (status: string) => statusToneColor(status);
   const showDbPanel = databases.length > 0 || licenses.length > 0 || configuredDbCount > 0;
   const showAppPanel = vmWorkloads.length > 0 || gkeAppServices.length > 0 || configuredAppCount > 0;
@@ -743,6 +747,40 @@ export default function InstanceDetailPage() {
             ))}
           </div>
         </div>
+              ) : null}
+
+              {showStoragePanel ? (
+                <div className="access-section">
+                  <h3>Storage buckets</h3>
+                  <div className="summary-grid">
+                    {storageBuckets.map((b, i) => {
+                      const name = String(b.name || "");
+                      const url = String(b.url || `gs://${name}`);
+                      const location = String(b.location || "");
+                      return (
+                        <div className="summary-row" key={`bucket-${name}-${i}`}>
+                          <div className="summary-label">
+                            {name}
+                            {location ? <div className="hint">{location}</div> : null}
+                          </div>
+                          <div className="summary-value">
+                            <span className="db-endpoint-row">
+                              <span className="mono">{url}</span>
+                              <button
+                                type="button"
+                                className="btn btn-copy"
+                                onClick={() => copyEndpoint(url)}
+                                title="Copy bucket URL to clipboard"
+                              >
+                                {copied === url ? "Copied" : "Copy"}
+                              </button>
+                            </span>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
               ) : null}
             </>
           )}

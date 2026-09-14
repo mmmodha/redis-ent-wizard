@@ -45,6 +45,7 @@ export type ApplicationDraft = {
   connectDatabases: string[];
   connectLoadBalancers: string[];
   connectApps: string[];
+  connectStorage: string[];
   requirements: string[];
   // VM mode
   artifact: ArtifactSource;
@@ -64,6 +65,42 @@ export type LbDraft = {
   target_kind: "application" | "vms";
   ports: string;
 };
+
+/** A Cloud Storage bucket draft. */
+export type StorageDraft = {
+  name: string;
+  location: string;
+  storage_class: "STANDARD" | "NEARLINE" | "COLDLINE" | "ARCHIVE";
+  versioning: boolean;
+  force_destroy: boolean;
+  access: "read" | "readwrite";
+};
+
+export function blankStorage(): StorageDraft {
+  return {
+    name: "",
+    location: "",
+    storage_class: "STANDARD",
+    versioning: false,
+    force_destroy: true,
+    access: "readwrite",
+  };
+}
+
+export function storageDraftFromConfig(b: Record<string, unknown>): StorageDraft {
+  const s = (v: unknown) => (typeof v === "string" ? v : "");
+  const cls = s(b.storage_class);
+  return {
+    name: s(b.name),
+    location: s(b.location),
+    storage_class: (["STANDARD", "NEARLINE", "COLDLINE", "ARCHIVE"].includes(cls)
+      ? cls
+      : "STANDARD") as StorageDraft["storage_class"],
+    versioning: Boolean(b.versioning),
+    force_destroy: b.force_destroy === undefined ? true : Boolean(b.force_destroy),
+    access: b.access === "read" ? "read" : "readwrite",
+  };
+}
 
 export function blankDatabase(clusterNodes = 3): DatabaseDraft {
   return {
@@ -93,6 +130,7 @@ export function blankApplication(machineType = ""): ApplicationDraft {
     connectDatabases: [],
     connectLoadBalancers: [],
     connectApps: [],
+    connectStorage: [],
     requirements: [],
     artifact: { kind: "upload", ref: "", type: "jar" },
     vm_count: 1,
@@ -179,17 +217,31 @@ export function VmsConnectEditor({
   databaseNames,
   loadBalancerNames,
   appHostNames,
+  storageNames,
 }: {
-  value: { clusters: string[]; databases: string[]; load_balancers: string[]; apps: string[] };
-  onChange: (v: { clusters: string[]; databases: string[]; load_balancers: string[]; apps: string[] }) => void;
+  value: { clusters: string[]; databases: string[]; load_balancers: string[]; apps: string[]; storage: string[] };
+  onChange: (v: {
+    clusters: string[];
+    databases: string[];
+    load_balancers: string[];
+    apps: string[];
+    storage: string[];
+  }) => void;
   clusterNames: string[];
   databaseNames: string[];
   loadBalancerNames: string[];
   appHostNames: string[];
+  storageNames: string[];
 }) {
   const toggle = (field: keyof typeof value, name: string, on: boolean) =>
     onChange({ ...value, [field]: on ? [...value[field], name] : value[field].filter((x) => x !== name) });
-  if (!clusterNames.length && !databaseNames.length && !loadBalancerNames.length && !appHostNames.length) {
+  if (
+    !clusterNames.length &&
+    !databaseNames.length &&
+    !loadBalancerNames.length &&
+    !appHostNames.length &&
+    !storageNames.length
+  ) {
     return null;
   }
   return (
@@ -225,6 +277,13 @@ export function VmsConnectEditor({
         options={appHostNames.filter((n) => n !== "app")}
         selected={value.apps}
         onToggle={(n, on) => toggle("apps", n, on)}
+      />
+      <ConnectPicker
+        label="Connect to storage"
+        hint="Injects GCS_<BUCKET>_BUCKET / _URL and grants bucket access."
+        options={storageNames}
+        selected={value.storage}
+        onToggle={(n, on) => toggle("storage", n, on)}
       />
     </div>
   );
@@ -450,6 +509,7 @@ export function ApplicationsEditor({
   databaseNames = [],
   loadBalancerNames = [],
   appHostNames = [],
+  storageNames = [],
 }: {
   applications: ApplicationDraft[];
   onChange: (apps: ApplicationDraft[]) => void;
@@ -462,6 +522,7 @@ export function ApplicationsEditor({
   databaseNames?: string[];
   loadBalancerNames?: string[];
   appHostNames?: string[];
+  storageNames?: string[];
 }) {
   const [uploading, setUploading] = useState<Record<number, boolean>>({});
   const [uploadErrors, setUploadErrors] = useState<Record<number, string>>({});
@@ -840,6 +901,19 @@ export function ApplicationsEditor({
                 })
               }
             />
+            <ConnectPicker
+              label="Connect to storage"
+              hint="Injects GCS_<BUCKET>_BUCKET / _URL and grants bucket access."
+              options={storageNames}
+              selected={app.connectStorage}
+              onToggle={(cn, on) =>
+                patch(i, {
+                  connectStorage: on
+                    ? [...app.connectStorage, cn]
+                    : app.connectStorage.filter((x) => x !== cn),
+                })
+              }
+            />
 
             <div className="wiz-field-wide">
               <span className="machine-picker-label">Environment variables</span>
@@ -994,6 +1068,92 @@ export function LoadBalancerEditor({
       <div style={{ marginTop: 12 }}>
         <button type="button" className="btn" onClick={() => onChange([...loadBalancers, blankLb()])}>
           Add load balancer
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/** Cloud Storage buckets editor (VM and GKE). */
+export function StorageEditor({
+  buckets,
+  onChange,
+  region,
+}: {
+  buckets: StorageDraft[];
+  onChange: (buckets: StorageDraft[]) => void;
+  region: string;
+}) {
+  const patch = (i: number, p: Partial<StorageDraft>) =>
+    onChange(buckets.map((b, idx) => (idx === i ? { ...b, ...p } : b)));
+
+  return (
+    <div className="companion-block">
+      <h3 className="companion-title">Cloud Storage (optional)</h3>
+      <p className="hint" style={{ marginTop: 0 }}>
+        Object storage buckets. Connect an application or the Set-of-VMs group to a bucket to inject its
+        name/URL and grant access.
+      </p>
+      {buckets.map((b, i) => (
+        <div className="wiz-workload-card" key={`bucket-${i}`}>
+          <div className="wiz-workload-head">
+            <h4>{b.name.trim() || `Bucket ${i + 1}`}</h4>
+            <button type="button" className="btn" onClick={() => onChange(buckets.filter((_, idx) => idx !== i))}>
+              Remove
+            </button>
+          </div>
+          <div className="grid grid-2">
+            <label>
+              Bucket name
+              <input value={b.name} onChange={(e) => patch(i, { name: e.target.value.slice(0, 40) })} placeholder="assets" />
+              <span className="hint">Prefixed with the deployment name for global uniqueness.</span>
+            </label>
+            <label>
+              Location
+              <select value={b.location} onChange={(e) => patch(i, { location: e.target.value })}>
+                <option value="">Deployment region{region ? ` (${region})` : ""}</option>
+                <option value="US">US (multi-region)</option>
+                <option value="EU">EU (multi-region)</option>
+                <option value="ASIA">ASIA (multi-region)</option>
+              </select>
+            </label>
+            <label>
+              Storage class
+              <select
+                value={b.storage_class}
+                onChange={(e) => patch(i, { storage_class: e.target.value as StorageDraft["storage_class"] })}
+              >
+                <option value="STANDARD">Standard</option>
+                <option value="NEARLINE">Nearline</option>
+                <option value="COLDLINE">Coldline</option>
+                <option value="ARCHIVE">Archive</option>
+              </select>
+            </label>
+            <label>
+              Access for connected components
+              <select value={b.access} onChange={(e) => patch(i, { access: e.target.value as StorageDraft["access"] })}>
+                <option value="readwrite">Read &amp; write</option>
+                <option value="read">Read-only</option>
+              </select>
+            </label>
+            <label className="wiz-check-row">
+              <input type="checkbox" checked={b.versioning} onChange={(e) => patch(i, { versioning: e.target.checked })} />
+              Object versioning
+            </label>
+            <label className="wiz-check-row">
+              <input
+                type="checkbox"
+                checked={b.force_destroy}
+                onChange={(e) => patch(i, { force_destroy: e.target.checked })}
+              />
+              Allow destroy of a non-empty bucket
+            </label>
+          </div>
+        </div>
+      ))}
+      <div style={{ marginTop: 12 }}>
+        <button type="button" className="btn" onClick={() => onChange([...buckets, blankStorage()])}>
+          Add bucket
         </button>
       </div>
     </div>

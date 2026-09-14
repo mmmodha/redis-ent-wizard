@@ -71,6 +71,20 @@ export interface LoadBalancerSpec {
   ports: number[];
 }
 
+/** A Google Cloud Storage bucket available as object storage to workloads. */
+export interface StorageBucketSpec {
+  /** Short name; the actual bucket is `<deploymentPrefix>-<slug>`. */
+  name: string;
+  /** GCS location: a region (e.g. europe-west1) or a multi-region (US/EU/ASIA). Defaults to the deployment region. */
+  location?: string;
+  storage_class?: "STANDARD" | "NEARLINE" | "COLDLINE" | "ARCHIVE";
+  versioning?: boolean;
+  /** Allow terraform destroy to delete a non-empty bucket (default true for lab teardown). */
+  force_destroy?: boolean;
+  /** Access granted to a connected consumer's service account. */
+  access?: "read" | "readwrite";
+}
+
 export interface Application {
   name: string;
   /** Optional. When empty on VM, the artifact is only staged (manual start). */
@@ -87,6 +101,8 @@ export interface Application {
   connectLoadBalancers?: string[];
   /** Names of other applications / Set-of-VMs whose host is injected as <NAME>_HOST. */
   connectApps?: string[];
+  /** Names of storage buckets injected as GCS_<NAME>_BUCKET / GCS_<NAME>_URL. */
+  connectStorage?: string[];
   // VM
   artifact?: ApplicationArtifact;
   vm_count?: number;
@@ -203,12 +219,15 @@ export interface CreateInstanceInput {
   applications?: Application[];
   /** Internal load balancers fronting application / Set-of-VMs groups (VM mode). */
   load_balancers?: LoadBalancerSpec[];
+  /** Cloud Storage buckets provisioned for this deployment (VM and GKE). */
+  storage_buckets?: StorageBucketSpec[];
   /** Connection references from the Set-of-VMs group (app VMs) to providers in this deployment. */
   vms_connect?: {
     clusters?: string[];
     databases?: string[];
     load_balancers?: string[];
     apps?: string[];
+    storage?: string[];
   };
   // GKE
   gke_clustersize?: number;

@@ -36,6 +36,22 @@ locals {
     )
   }
   lb_all_ports = distinct(flatten([for lb in var.load_balancers : lb.ports]))
+
+  # Default compute service account the VMs run as; granted access to connected buckets.
+  compute_sa = "${data.google_project.current.number}-compute@developer.gserviceaccount.com"
+  # App VMs need the cloud-platform scope to WRITE to a bucket (default scope is
+  # storage read-only). Widen only when a bucket grants read+write.
+  app_vm_scopes = anytrue([for b in var.storage_buckets : b.grant_role == "roles/storage.objectAdmin"]) ? ["cloud-platform"] : []
+}
+
+data "google_project" "current" {}
+
+module "storage" {
+  source = "../../modules/storage"
+
+  buckets          = var.storage_buckets
+  compute_sa_email = local.compute_sa
+  youremail        = var.youremail
 }
 
 module "network" {
@@ -103,6 +119,7 @@ module "app_vm" {
   app_expose_https   = var.app_expose_https
   app_disk_gib       = var.app_disk_gib
   app_extra_ports    = var.app_extra_ports
+  oauth_scopes       = local.app_vm_scopes
   # Connection env for the Set-of-VMs group, same merge as app_workload.
   injected_env = merge(
     var.app_injected_env,
@@ -137,6 +154,7 @@ module "app_workload" {
   machine_type        = each.value.machine_type
   disk_gib            = each.value.disk_gib
   ports               = each.value.ports
+  oauth_scopes        = local.app_vm_scopes
   # Merge static connection env with apply-time refs: cluster admin passwords
   # (from re_vm) and internal LB VIPs (from the reserved internal address).
   env = merge(
@@ -389,6 +407,10 @@ output "load_balancers" {
       ports = local.lb_by_name[k].ports
     }
   ]
+}
+
+output "storage_buckets" {
+  value = module.storage.buckets
 }
 
 output "deployment_mode" {

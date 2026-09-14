@@ -21,6 +21,7 @@ const baseInput = (): CreateInstanceInput => ({
     { name: "web", artifact: { kind: "url", ref: "https://x/app.jar", type: "jar" } },
   ],
   load_balancers: [{ name: "front", target: "web", target_kind: "application", ports: [8080] }],
+  storage_buckets: [{ name: "assets", access: "readwrite" }],
 });
 
 describe("resolveVmConnections", () => {
@@ -34,10 +35,13 @@ describe("resolveVmConnections", () => {
         connectDatabases: ["sessions"],
         connectLoadBalancers: ["front"],
         connectApps: ["web"],
+        connectStorage: ["assets"],
       },
       reg,
     );
     assert.equal(conn.env.REDIS_CACHE_HOST, "cluster.demo-default-cache.demo.redislabs.com");
+    assert.equal(conn.env.GCS_ASSETS_BUCKET, "demo-default-assets");
+    assert.equal(conn.env.GCS_ASSETS_URL, "gs://demo-default-assets");
     assert.equal(conn.env.REDIS_CACHE_ADMIN_USER, "admin@redis.io");
     assert.equal(conn.env.REDIS_HOST, "cluster.demo-default-cache.demo.redislabs.com");
     assert.equal(

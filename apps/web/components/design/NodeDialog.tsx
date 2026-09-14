@@ -15,6 +15,7 @@ import {
   type DatabaseData,
   type DesignNodeData,
   type LoadBalancerData,
+  type StorageData,
   type NodeKind,
   type RootData,
   type VmsData,
@@ -85,6 +86,7 @@ export function NodeDialog({
     vms: "Set of VMs",
     application: "Application",
     loadbalancer: "Load balancer",
+    storage: "Cloud Storage bucket",
   };
 
   return (
@@ -170,7 +172,11 @@ export function NodeDialog({
             <LoadBalancerForm data={draft as LoadBalancerData} set={set} />
           ) : null}
 
-          {["cluster", "database", "vms", "application", "loadbalancer"].includes(target.type) ? (
+          {target.type === "storage" ? (
+            <StorageForm data={draft as StorageData} set={set} probeZone={probeZone} />
+          ) : null}
+
+          {["cluster", "database", "vms", "application", "loadbalancer", "storage"].includes(target.type) ? (
             <ExposesNote
               kind={target.type as NodeKind}
               name={target.type === "vms" ? "app" : String((draft as { name?: string }).name || "").trim()}
@@ -1043,6 +1049,81 @@ function LoadBalancerForm({
           placeholder="8080, 9090"
         />
         <span className="hint">Comma-separated ports or ranges opened from the internet.</span>
+      </label>
+    </div>
+  );
+}
+
+function StorageForm({
+  data,
+  set,
+  probeZone,
+}: {
+  data: StorageData;
+  set: <T extends DesignNodeData>(p: Partial<T>) => void;
+  probeZone: string;
+}) {
+  const region = probeZone.replace(/-[a-z]$/, "");
+  return (
+    <div className="grid">
+      <label>
+        Bucket name
+        <input
+          value={data.name}
+          onChange={(e) => set<StorageData>({ name: e.target.value.slice(0, 40) })}
+          placeholder="assets"
+        />
+        <span className="hint">
+          The real bucket is prefixed with the deployment name for global uniqueness.
+        </span>
+      </label>
+      <label>
+        Location
+        <select value={data.location} onChange={(e) => set<StorageData>({ location: e.target.value })}>
+          <option value="">Deployment region{region ? ` (${region})` : ""}</option>
+          <option value="US">US (multi-region)</option>
+          <option value="EU">EU (multi-region)</option>
+          <option value="ASIA">ASIA (multi-region)</option>
+        </select>
+      </label>
+      <label>
+        Storage class
+        <select
+          value={data.storage_class}
+          onChange={(e) => set<StorageData>({ storage_class: e.target.value as StorageData["storage_class"] })}
+        >
+          <option value="STANDARD">Standard</option>
+          <option value="NEARLINE">Nearline</option>
+          <option value="COLDLINE">Coldline</option>
+          <option value="ARCHIVE">Archive</option>
+        </select>
+      </label>
+      <label>
+        Access for connected components
+        <select
+          value={data.access}
+          onChange={(e) => set<StorageData>({ access: e.target.value as StorageData["access"] })}
+        >
+          <option value="readwrite">Read &amp; write</option>
+          <option value="read">Read-only</option>
+        </select>
+        <span className="hint">Read &amp; write widens connected app VMs to the cloud-platform scope.</span>
+      </label>
+      <label className="design-check-row">
+        <input
+          type="checkbox"
+          checked={data.versioning}
+          onChange={(e) => set<StorageData>({ versioning: e.target.checked })}
+        />
+        Object versioning
+      </label>
+      <label className="design-check-row">
+        <input
+          type="checkbox"
+          checked={data.force_destroy}
+          onChange={(e) => set<StorageData>({ force_destroy: e.target.checked })}
+        />
+        Allow destroy of a non-empty bucket
       </label>
     </div>
   );

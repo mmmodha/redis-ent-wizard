@@ -26,6 +26,8 @@ For **GKE** add `roles/container.clusterAdmin`, and `roles/iam.serviceAccountUse
 
 **Application** artifacts are copied onto the VMs over SSH (VM mode already requires the SSH key pair below), so *uploaded* and `https://` artifacts need **no** extra IAM. Only an artifact referenced by `gs://` needs a read role — `roles/storage.objectViewer` — because the API downloads it before copying it across.
 
+**Cloud Storage** buckets need `roles/storage.admin` (bucket create + IAM binding). Connecting an application or the Set-of-VMs group to a bucket grants the deployment's compute service account access to it (`roles/storage.objectAdmin` for read+write, `roles/storage.objectViewer` for read-only) and — for read+write — widens the app VMs' OAuth scope to `cloud-platform`. Buckets are created as `<instance>-<env>-<name>` for global uniqueness.
+
 ### Run it
 
 ```bash

@@ -127,6 +127,12 @@ variable "injected_env" {
   default     = {}
 }
 
+variable "oauth_scopes" {
+  type        = list(string)
+  description = "VM service-account OAuth scopes. Empty keeps the GCE default (storage read-only)."
+  default     = []
+}
+
 resource "google_compute_disk" "app_data" {
   for_each = {
     for i, size in local.app_disk_gib : tostring(i) => size if size > 0
@@ -186,6 +192,15 @@ resource "google_compute_instance" "app" {
   network_interface {
     subnetwork = var.public_subnet_name
     access_config {}
+  }
+
+  # Widen the default compute SA's scope only when object-storage write access is
+  # needed (empty list = keep the GCE default: storage read-only).
+  dynamic "service_account" {
+    for_each = length(var.oauth_scopes) > 0 ? [1] : []
+    content {
+      scopes = var.oauth_scopes
+    }
   }
 }
 

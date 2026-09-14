@@ -112,6 +112,12 @@ variable "env" {
   default     = {}
 }
 
+variable "oauth_scopes" {
+  type        = list(string)
+  description = "VM service-account OAuth scopes. Empty keeps the GCE default (storage read-only)."
+  default     = []
+}
+
 variable "expose_http" {
   type    = bool
   default = false
@@ -388,6 +394,15 @@ resource "google_compute_instance" "vm" {
   network_interface {
     subnetwork = var.public_subnet_name
     access_config {}
+  }
+
+  # Widen the default compute SA's scope only when object-storage write access is
+  # needed (empty list = keep the GCE default: storage read-only).
+  dynamic "service_account" {
+    for_each = length(var.oauth_scopes) > 0 ? [1] : []
+    content {
+      scopes = var.oauth_scopes
+    }
   }
 }
 

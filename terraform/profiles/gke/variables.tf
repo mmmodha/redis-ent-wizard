@@ -106,3 +106,16 @@ variable "applications" {
   description = "Custom application workloads deployed as containers on GKE."
   default     = []
 }
+
+variable "storage_buckets" {
+  type = list(object({
+    name          = string
+    location      = string
+    storage_class = string
+    versioning    = bool
+    force_destroy = bool
+    grant_role    = string
+  }))
+  description = "Cloud Storage buckets provisioned for this deployment."
+  default     = []
+}

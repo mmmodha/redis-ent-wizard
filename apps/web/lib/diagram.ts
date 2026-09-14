@@ -13,7 +13,8 @@ export type NodeKind =
   | "database"
   | "vms"
   | "application"
-  | "loadbalancer";
+  | "loadbalancer"
+  | "storage";
 
 export type RootData = {
   kind: "network" | "gke";
@@ -102,13 +103,25 @@ export type LoadBalancerData = {
   [k: string]: unknown;
 };
 
+export type StorageData = {
+  kind: "storage";
+  name: string;
+  location: string;
+  storage_class: "STANDARD" | "NEARLINE" | "COLDLINE" | "ARCHIVE";
+  versioning: boolean;
+  force_destroy: boolean;
+  access: "read" | "readwrite";
+  [k: string]: unknown;
+};
+
 export type DesignNodeData =
   | RootData
   | ClusterData
   | DatabaseData
   | VmsData
   | ApplicationData
-  | LoadBalancerData;
+  | LoadBalancerData
+  | StorageData;
 
 export type DesignNode = Node<DesignNodeData>;
 export type DesignEdge = Edge;
@@ -219,6 +232,9 @@ function isApplication(n: DesignNode): n is Node<ApplicationData> {
 function isLoadBalancer(n: DesignNode): n is Node<LoadBalancerData> {
   return n.data.kind === "loadbalancer";
 }
+function isStorage(n: DesignNode): n is Node<StorageData> {
+  return n.data.kind === "storage";
+}
 
 /** Human-facing name for a cluster node, used for edge connect references. */
 export function clusterName(node: Node<ClusterData>, index: number): string {
@@ -287,6 +303,11 @@ export function exposedVariables(
       return [{ name: `REDIS_${s}_ENDPOINT`, description: "Database endpoint (host:port)" }];
     case "loadbalancer":
       return [{ name: `LB_${s}_ENDPOINT`, description: "Internal load-balancer VIP (host:port)" }];
+    case "storage":
+      return [
+        { name: `GCS_${s}_BUCKET`, description: "Bucket name" },
+        { name: `GCS_${s}_URL`, description: "Bucket URL (gs://…)" },
+      ];
     case "application":
     case "vms":
       return [{ name: `${s}_HOST`, description: "Component hostname" }];
@@ -309,14 +330,17 @@ export function diagramToCreateInput(
   const vmsNodes = nodes.filter(isVms);
   const apps = nodes.filter(isApplication);
   const lbs = nodes.filter(isLoadBalancer);
+  const storageNodes = nodes.filter(isStorage);
 
   const clusterNameById = new Map<string, string>();
   clusters.forEach((c, i) => clusterNameById.set(c.id, clusterName(c, i)));
 
   // Provider registries for connection edges. Databases inject their endpoint;
-  // apps and the single Set-of-VMs group ("app") inject a host.
+  // apps and the single Set-of-VMs group ("app") inject a host; buckets a name.
   const dbNameById = new Map<string, string>();
   databases.forEach((d) => dbNameById.set(d.id, d.data.name.trim() || "db"));
+  const storageNameById = new Map<string, string>();
+  storageNodes.forEach((s) => storageNameById.set(s.id, s.data.name.trim() || "bucket"));
   const hostNameById = new Map<string, string>();
   apps.forEach((a) => hostNameById.set(a.id, a.data.name.trim() || "app"));
   vmsNodes.forEach((v) => hostNameById.set(v.id, "app"));
@@ -383,6 +407,9 @@ export function diagramToCreateInput(
         .filter((e) => hostNameById.has(e.target) && e.target !== a.id)
         .map((e) => hostNameById.get(e.target) as string),
     );
+    const connectStorage = uniq(
+      outgoing.filter((e) => storageNameById.has(e.target)).map((e) => storageNameById.get(e.target) as string),
+    );
     const common: Record<string, unknown> = {
       name: a.data.name.trim() || "app",
     };
@@ -395,6 +422,7 @@ export function diagramToCreateInput(
     if (connectDatabases.length) common.connectDatabases = connectDatabases;
     if (connectLoadBalancers.length) common.connectLoadBalancers = connectLoadBalancers;
     if (connectApps.length) common.connectApps = connectApps;
+    if (connectStorage.length) common.connectStorage = connectStorage;
     if (settings.mode === "vm") {
       Object.assign(common, {
         artifact: {
@@ -436,6 +464,17 @@ export function diagramToCreateInput(
     region_zones: settings.region_zones,
     applications,
   };
+
+  // Storage buckets are available in both VM and GKE.
+  const storageBuckets = storageNodes.map((s) => ({
+    name: s.data.name.trim() || "bucket",
+    location: s.data.location.trim() || undefined,
+    storage_class: s.data.storage_class,
+    versioning: Boolean(s.data.versioning),
+    force_destroy: Boolean(s.data.force_destroy),
+    access: s.data.access,
+  }));
+  if (storageBuckets.length) base.storage_buckets = storageBuckets;
 
   if (settings.mode === "vm") {
     const clusterNodes = clusters;
@@ -501,6 +540,9 @@ export function diagramToCreateInput(
           .filter((e) => hostNameById.has(e.target) && !vmsNodes.some((v) => v.id === e.target))
           .map((e) => hostNameById.get(e.target) as string),
       ),
+      storage: uniq(
+        vmsOutgoing.filter((e) => storageNameById.has(e.target)).map((e) => storageNameById.get(e.target) as string),
+      ),
     };
 
     Object.assign(base, {
@@ -549,7 +591,8 @@ export function diagramToCreateInput(
       vmsConnect.clusters.length ||
       vmsConnect.databases.length ||
       vmsConnect.load_balancers.length ||
-      vmsConnect.apps.length
+      vmsConnect.apps.length ||
+      vmsConnect.storage.length
     ) {
       base.vms_connect = vmsConnect;
     }
@@ -600,6 +643,7 @@ export const NODE_SIZE: Record<string, { width: number; height: number }> = {
   cluster: { width: 312, height: 128 },
   vms: { width: 232, height: 120 },
   application: { width: 232, height: 120 },
+  storage: { width: 232, height: 120 },
 };
 
 /** Initial style for a freshly dropped node, if the kind has a preset size. */
@@ -759,6 +803,7 @@ type StoredAppCfg = {
   connectDatabases?: unknown[];
   connectLoadBalancers?: unknown[];
   connectApps?: unknown[];
+  connectStorage?: unknown[];
   requirements?: unknown[];
   artifact?: { kind?: string; ref?: string; type?: string; branch?: string; runInDocker?: boolean };
   vm_count?: number;
@@ -877,13 +922,44 @@ export function createInputToDiagram(
     });
   }
 
+  // Storage buckets (both modes) — full array rebuild so reopened instances show them.
+  const storageCfgs = Array.isArray(cfg.storage_buckets)
+    ? (cfg.storage_buckets as Record<string, unknown>[])
+    : [];
+  const storageNameToId = new Map<string, string>();
+  storageCfgs.forEach((s, i) => {
+    const id = nextId("storage");
+    const name = dstr(s.name);
+    const cls = dstr(s.storage_class);
+    nodes.push({
+      id,
+      type: "storage",
+      parentId: ROOT_ID,
+      extent: "parent",
+      position: { x: 520 + i * 220, y: 300 },
+      style: { width: NODE_SIZE.storage.width, height: NODE_SIZE.storage.height },
+      data: {
+        kind: "storage",
+        name,
+        location: dstr(s.location),
+        storage_class: (["STANDARD", "NEARLINE", "COLDLINE", "ARCHIVE"].includes(cls)
+          ? cls
+          : "STANDARD") as StorageData["storage_class"],
+        versioning: Boolean(s.versioning),
+        force_destroy: s.force_destroy === undefined ? true : Boolean(s.force_destroy),
+        access: s.access === "read" ? "read" : "readwrite",
+      },
+    });
+    if (name) storageNameToId.set(name, id);
+  });
+
   // Custom application workloads.
   const apps = Array.isArray(cfg.applications) ? (cfg.applications as StoredAppCfg[]) : [];
   const arr = (x: unknown): string[] => (Array.isArray(x) ? x.map(String) : []);
   const appIdByName = new Map<string, string>();
   const appConnects: {
     sourceId: string;
-    sel: { clusters: string[]; databases: string[]; load_balancers: string[]; apps: string[] };
+    sel: { clusters: string[]; databases: string[]; load_balancers: string[]; apps: string[]; storage: string[] };
   }[] = [];
   apps.forEach((a, k) => {
     const appId = nextId("application");
@@ -928,6 +1004,7 @@ export function createInputToDiagram(
         databases: arr(a.connectDatabases),
         load_balancers: arr(a.connectLoadBalancers),
         apps: arr(a.connectApps),
+        storage: arr(a.connectStorage),
       },
     });
   });
@@ -991,7 +1068,7 @@ export function createInputToDiagram(
   // connection reference recorded on apps and the Set-of-VMs group.
   const addConsumerEdges = (
     sourceId: string,
-    sel: { clusters: string[]; databases: string[]; load_balancers: string[]; apps: string[] },
+    sel: { clusters: string[]; databases: string[]; load_balancers: string[]; apps: string[]; storage: string[] },
   ) => {
     const push = (targetId: string | undefined, isLb = false) => {
       if (!targetId || targetId === sourceId) return;
@@ -1008,10 +1085,11 @@ export function createInputToDiagram(
     sel.databases.forEach((n) => push(dbNameToId.get(n)));
     sel.load_balancers.forEach((n) => push(lbNameToId.get(n), true));
     sel.apps.forEach((n) => push(hostNameToId.get(n)));
+    sel.storage.forEach((n) => push(storageNameToId.get(n)));
   };
   for (const { sourceId, sel } of appConnects) addConsumerEdges(sourceId, sel);
   const vc = cfg.vms_connect as
-    | { clusters?: unknown; databases?: unknown; load_balancers?: unknown; apps?: unknown }
+    | { clusters?: unknown; databases?: unknown; load_balancers?: unknown; apps?: unknown; storage?: unknown }
     | undefined;
   if (vmsId && vc) {
     addConsumerEdges(vmsId, {
@@ -1019,6 +1097,7 @@ export function createInputToDiagram(
       databases: arr(vc.databases),
       load_balancers: arr(vc.load_balancers),
       apps: arr(vc.apps),
+      storage: arr(vc.storage),
     });
   }
 

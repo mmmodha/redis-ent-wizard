@@ -14,6 +14,7 @@ import type {
   LoadBalancerData,
   NodeKind,
   RootData,
+  StorageData,
   VmsData,
 } from "@/lib/diagram";
 
@@ -210,6 +211,21 @@ export function LoadBalancerNode({ data }: NodeProps) {
   );
 }
 
+export function StorageNode({ data }: NodeProps) {
+  const d = data as StorageData;
+  const meta = [d.location.trim() || "region", d.storage_class, d.access === "read" ? "read-only" : "read+write"]
+    .filter(Boolean)
+    .join(" · ");
+  return (
+    <div className="design-storage">
+      <Handle type="target" position={Position.Left} className="design-handle" />
+      <NodeHeader icon="storage" title={d.name.trim() || "Cloud Storage"} />
+      <div className="design-node-meta mono">{meta}</div>
+      <ExposesLine kind="storage" name={d.name.trim()} />
+    </div>
+  );
+}
+
 export const nodeTypes: NodeTypes = {
   network: RootNode,
   gke: RootNode,
@@ -218,4 +234,5 @@ export const nodeTypes: NodeTypes = {
   vms: VmsNode,
   application: ApplicationNode,
   loadbalancer: LoadBalancerNode,
+  storage: StorageNode,
 };

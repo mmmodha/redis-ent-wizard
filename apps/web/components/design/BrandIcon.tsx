@@ -9,7 +9,8 @@ export type IconName =
   | "application"
   | "load-balancer"
   | "network"
-  | "gke";
+  | "gke"
+  | "storage";
 
 export function BrandIcon({ name, size = 18 }: { name: IconName; size?: number }) {
   return (

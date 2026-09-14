@@ -14,8 +14,11 @@ import {
   readKey,
   testIamPermissions,
   STORAGE_READ_PERMISSIONS,
+  STORAGE_ADMIN_PERMISSIONS,
+  bucketAvailability,
 } from "./gcp.js";
 import { normalizeApplications } from "./applications.js";
+import { bucketFullName, normalizeStorageBuckets } from "./storage.js";
 import { capacityFor } from "./databases.js";
 import { clusterTrialShardGate } from "./trial-shards.js";
 import { LOCAL_SSD_GIB, maxLocalSsdsForMachineType } from "./nvme.js";
@@ -857,6 +860,7 @@ export async function preflight(
       (c.databases || []).forEach((d) => dbNames.add(d.name)),
     );
     const lbByName = new Map((input.load_balancers || []).map((lb) => [lb.name, lb]));
+    const bucketNames = new Set<string>((input.storage_buckets || []).map((b) => b.name));
     let connApps: ReturnType<typeof normalizeApplications> = [];
     try {
       connApps = normalizeApplications({ mode, applications: input.applications });
@@ -869,13 +873,21 @@ export async function preflight(
 
     const check = (
       label: string,
-      sel: { connectClusters?: string[]; connectDatabases?: string[]; connectLoadBalancers?: string[]; connectApps?: string[] },
+      sel: {
+        connectClusters?: string[];
+        connectDatabases?: string[];
+        connectLoadBalancers?: string[];
+        connectApps?: string[];
+        connectStorage?: string[];
+      },
       self: { app?: string; isVmsGroup?: boolean },
     ) => {
       for (const c of sel.connectClusters || [])
         if (!clusterConnectNames.has(c)) problems.push(`${label} → unknown cluster "${c}"`);
       for (const d of sel.connectDatabases || [])
         if (!dbNames.has(d)) problems.push(`${label} → unknown database "${d}"`);
+      for (const b of sel.connectStorage || [])
+        if (!bucketNames.has(b)) problems.push(`${label} → unknown storage bucket "${b}"`);
       for (const a of sel.connectApps || []) {
         if (self.app && a === self.app) problems.push(`${label} cannot connect to itself`);
         else if (!appNames.has(a) && appCount === 0)
@@ -905,6 +917,7 @@ export async function preflight(
           connectDatabases: input.vms_connect.databases,
           connectLoadBalancers: input.vms_connect.load_balancers,
           connectApps: input.vms_connect.apps,
+          connectStorage: input.vms_connect.storage,
         },
         { isVmsGroup: true },
       );
@@ -913,19 +926,89 @@ export async function preflight(
     const anySelection =
       connApps.some(
         (a) =>
-          (a.connectClusters?.length || a.connectDatabases?.length || a.connectLoadBalancers?.length || a.connectApps?.length) ?? 0,
+          (a.connectClusters?.length ||
+            a.connectDatabases?.length ||
+            a.connectLoadBalancers?.length ||
+            a.connectApps?.length ||
+            a.connectStorage?.length) ??
+          0,
       ) ||
       Boolean(
         input.vms_connect &&
           (input.vms_connect.clusters?.length ||
             input.vms_connect.databases?.length ||
             input.vms_connect.load_balancers?.length ||
-            input.vms_connect.apps?.length),
+            input.vms_connect.apps?.length ||
+            input.vms_connect.storage?.length),
       );
     if (problems.length) {
       checks.push(fail("connections", "Component connections", problems.join("; ")));
     } else if (anySelection) {
       checks.push(pass("connections", "Component connections", "All wired endpoints resolve"));
+    }
+  }
+
+  // 12g. Cloud Storage buckets
+  {
+    let buckets: ReturnType<typeof normalizeStorageBuckets> = [];
+    try {
+      buckets = normalizeStorageBuckets(input);
+    } catch (err) {
+      checks.push(fail("storage", "Cloud Storage", err instanceof Error ? err.message : String(err)));
+    }
+    if (buckets.length) {
+      const connectedBuckets = new Set<string>();
+      for (const a of input.applications || [])
+        for (const s of a.connectStorage || []) connectedBuckets.add(String(s));
+      for (const s of input.vms_connect?.storage || []) connectedBuckets.add(String(s));
+
+      let nameProblem = false;
+      for (const b of buckets) {
+        const full = bucketFullName(namePrefix, b.name);
+        const id = `storage_${b.name}`;
+        if (full.length > 63) {
+          checks.push(fail(id, `Bucket ${b.name}`, `Full name "${full}" exceeds 63 chars — shorten the name, instance, or env`));
+          nameProblem = true;
+          continue;
+        }
+        try {
+          const avail = await bucketAvailability(credentialsFile, full);
+          if (avail === "taken") {
+            checks.push(fail(id, `Bucket ${b.name}`, `${full} already exists globally — pick another name`));
+            nameProblem = true;
+          } else if (avail === "unknown") {
+            checks.push(warn(id, `Bucket ${b.name}`, `Could not verify global availability of ${full}`));
+          }
+        } catch (err) {
+          checks.push(warn(id, `Bucket ${b.name}`, `Could not verify ${full}: ${errorText(err)}`));
+        }
+      }
+
+      try {
+        const enabled = await listEnabledServices(credentialsFile, project);
+        if (!enabled.includes("storage.googleapis.com")) {
+          checks.push(fail("storage_api", "Storage API", "Not enabled: storage.googleapis.com"));
+        }
+      } catch {
+        /* enabled-services already warned in the APIs check */
+      }
+
+      try {
+        const perms = connectedBuckets.size ? STORAGE_ADMIN_PERMISSIONS : ["storage.buckets.create"];
+        const granted = await testIamPermissions(credentialsFile, project, perms);
+        const missing = perms.filter((p) => !granted.includes(p));
+        if (missing.length) {
+          checks.push(
+            fail("storage_iam", "Storage IAM", `Missing ${missing.join(", ")} — grant roles/storage.admin to create buckets`),
+          );
+        } else if (!nameProblem) {
+          checks.push(
+            pass("storage", "Cloud Storage", `${buckets.length} bucket(s), ${connectedBuckets.size} connected to a consumer`),
+          );
+        }
+      } catch (err) {
+        checks.push(warn("storage_iam", "Storage IAM", `Could not verify: ${errorText(err)}`));
+      }
     }
   }
 

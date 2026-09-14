@@ -93,6 +93,7 @@ const applicationSchema = z.object({
   connectDatabases: z.array(z.string().max(40)).max(16).optional(),
   connectLoadBalancers: z.array(z.string().max(40)).max(8).optional(),
   connectApps: z.array(z.string().max(40)).max(8).optional(),
+  connectStorage: z.array(z.string().max(40)).max(8).optional(),
   artifact: z
     .object({
       kind: z.enum(["upload", "url", "gcs", "git"]),
@@ -116,6 +117,19 @@ const loadBalancerSchema = z.object({
   target: z.string().min(1).max(40),
   target_kind: z.enum(["application", "vms"]),
   ports: z.array(z.number().int().min(1).max(65535)).min(1).max(16),
+});
+
+const storageBucketSchema = z.object({
+  name: z
+    .string()
+    .min(1)
+    .max(40)
+    .regex(/^[a-z][a-z0-9-]*$/, "bucket name must be lowercase alphanumeric/hyphen"),
+  location: z.string().max(40).optional(),
+  storage_class: z.enum(["STANDARD", "NEARLINE", "COLDLINE", "ARCHIVE"]).optional(),
+  versioning: z.boolean().optional(),
+  force_destroy: z.boolean().optional(),
+  access: z.enum(["read", "readwrite"]).optional(),
 });
 
 const createSchema = z.object({
@@ -175,12 +189,14 @@ const createSchema = z.object({
     .optional(),
   applications: z.array(applicationSchema).max(8).optional(),
   load_balancers: z.array(loadBalancerSchema).max(8).optional(),
+  storage_buckets: z.array(storageBucketSchema).max(8).optional(),
   vms_connect: z
     .object({
       clusters: z.array(z.string().max(40)).max(3).optional(),
       databases: z.array(z.string().max(40)).max(16).optional(),
       load_balancers: z.array(z.string().max(40)).max(8).optional(),
       apps: z.array(z.string().max(40)).max(8).optional(),
+      storage: z.array(z.string().max(40)).max(8).optional(),
     })
     .optional(),
   dns_managed_zone: z.string().optional(),

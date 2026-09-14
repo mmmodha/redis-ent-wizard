@@ -218,3 +218,16 @@ variable "load_balancers" {
   description = "Regional internal TCP passthrough load balancers fronting app VMs."
   default     = []
 }
+
+variable "storage_buckets" {
+  type = list(object({
+    name          = string
+    location      = string
+    storage_class = string
+    versioning    = bool
+    force_destroy = bool
+    grant_role    = string # "" = no IAM grant; else the role granted to the compute SA
+  }))
+  description = "Cloud Storage buckets provisioned for this deployment."
+  default     = []
+}
