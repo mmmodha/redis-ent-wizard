@@ -1,4 +1,5 @@
 import type { Edge, Node } from "@xyflow/react";
+import dagre from "dagre";
 import { effectiveDbReplication, clusterRedisNodeCount } from "./db-replication";
 
 /**
@@ -426,7 +427,7 @@ export function reconcileRdiInternalNodes(
       className: "design-edge-rdi",
     });
   }
-  nextNodes = layoutDiagram(nextNodes);
+  nextNodes = layoutDiagram(nextNodes, nextEdges);
   return { nodes: nextNodes, edges: nextEdges };
 }
 
@@ -927,13 +928,17 @@ function styleNum(v: unknown, fallback: number): number {
 }
 
 /**
- * Pure layout pass: returns a new nodes array with every node's `position`
- * (relative to its parent) and container `style` size recomputed so nested
- * nodes sit fully inside their parents with no overlap, and every container
- * grows to hold its children. Deterministic and idempotent: children keep
- * their insertion order, so re-running it never shuffles the diagram.
+ * Layout pass: sizes nodes, stacks databases inside their cluster, then arranges
+ * the top-level components with dagre (edge-aware, left→right) so connected
+ * components flow across the canvas instead of a fixed grid. Databases stay
+ * nested in their cluster; the root grows to contain everything. Deterministic
+ * and idempotent for a given (nodes, edges) input.
  */
-export function layoutDiagram(nodes: DesignNode[]): DesignNode[] {
+export function layoutDiagram(
+  nodes: DesignNode[],
+  edges: DesignEdge[] = [],
+  rootMin?: { width: number; height: number },
+): DesignNode[] {
   const { PAD, GAP, CLUSTER_HEADER, ROOT_HEADER } = LAYOUT;
   const DB = NODE_SIZE.database;
   const CLUSTER_WIDTH = Math.max(NODE_SIZE.cluster.width, DB.width + 2 * PAD);
@@ -968,36 +973,56 @@ export function layoutDiagram(nodes: DesignNode[]): DesignNode[] {
     cluster.style = { ...cluster.style, width: CLUSTER_WIDTH, height };
   }
 
-  // 3) Arrange every root child in a wrapping grid inside the root.
+  // 3) Arrange every root child with dagre, using the edges between components.
   const root = out.find((n) => n.id === ROOT_ID);
   if (root) {
     const children = out.filter((n) => n.parentId === ROOT_ID);
-    const MAX_COLS = 3;
-    let x: number = PAD;
-    let y: number = ROOT_HEADER;
-    let rowHeight = 0;
-    let col = 0;
-    let maxRight: number = PAD;
-    for (const child of children) {
-      const width = styleNum(child.style?.width, NODE_SIZE.cluster.width);
-      const height = styleNum(child.style?.height, NODE_SIZE.cluster.height);
-      const wouldOverflow = x + width > ROOT_SIZE.width - PAD;
-      if (col > 0 && (col >= MAX_COLS || wouldOverflow)) {
-        x = PAD;
-        y += rowHeight + GAP;
-        rowHeight = 0;
-        col = 0;
-      }
-      child.position = { x, y };
-      x += width + GAP;
-      rowHeight = Math.max(rowHeight, height);
-      maxRight = Math.max(maxRight, child.position.x + width);
-      col += 1;
+    // Map any node id to the top-level component it belongs to (a database → its
+    // parent cluster) so edges to nested nodes rank their container.
+    const topLevelOf = new Map<string, string>();
+    for (const n of out) {
+      if (n.id === ROOT_ID) continue;
+      topLevelOf.set(n.id, n.parentId === ROOT_ID ? n.id : n.parentId ?? n.id);
     }
+
+    const g = new dagre.graphlib.Graph();
+    g.setGraph({ rankdir: "LR", nodesep: GAP, ranksep: GAP * 2.5, marginx: PAD, marginy: PAD });
+    g.setDefaultEdgeLabel(() => ({}));
+
+    const sizeOf = (child: DesignNode) => ({
+      width: styleNum(child.style?.width, NODE_SIZE.cluster.width),
+      height: styleNum(child.style?.height, NODE_SIZE.cluster.height),
+    });
+    for (const child of children) g.setNode(child.id, sizeOf(child));
+    for (const e of edges) {
+      const s = topLevelOf.get(e.source);
+      const t = topLevelOf.get(e.target);
+      if (!s || !t || s === t || !g.hasNode(s) || !g.hasNode(t)) continue;
+      g.setEdge(s, t);
+    }
+
+    dagre.layout(g);
+
+    let maxRight: number = PAD;
+    let maxBottom: number = ROOT_HEADER;
+    for (const child of children) {
+      const pos = g.node(child.id);
+      const { width, height } = sizeOf(child);
+      if (!pos) continue;
+      // dagre positions are node centres; convert to top-left and reserve the
+      // root's title chrome (dagre's own margins keep components off the edges).
+      const x = pos.x - width / 2 + PAD;
+      const y = pos.y - height / 2 + ROOT_HEADER;
+      child.position = { x, y };
+      maxRight = Math.max(maxRight, x + width);
+      maxBottom = Math.max(maxBottom, y + height);
+    }
+    // Size the root to its content, but grow it to fill the available canvas
+    // (rootMin, the pane size) so the VPC/GKE frame occupies the whole view.
     root.style = {
       ...root.style,
-      width: Math.max(ROOT_SIZE.width, maxRight + PAD),
-      height: Math.max(ROOT_SIZE.height, y + rowHeight + PAD),
+      width: Math.max(maxRight + PAD, rootMin?.width ?? 0),
+      height: Math.max(maxBottom + PAD, rootMin?.height ?? 0),
     };
   }
 
@@ -1553,5 +1578,5 @@ export function createInputToDiagram(
     }
   }
 
-  return { nodes: layoutDiagram(nodes), edges };
+  return { nodes: layoutDiagram(nodes, edges), edges };
 }

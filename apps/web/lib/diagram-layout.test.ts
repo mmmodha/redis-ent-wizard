@@ -6,8 +6,33 @@ import {
   ROOT_ID,
   layoutDiagram,
   rootNode,
+  type DesignEdge,
   type DesignNode,
 } from "./diagram.js";
+
+function appNode(id: string): DesignNode {
+  return {
+    id,
+    type: "application",
+    position: { x: 0, y: 0 },
+    parentId: ROOT_ID,
+    data: {
+      kind: "application",
+      name: id,
+      command: "",
+      ports: "",
+      env: [],
+      requirements: [],
+      artifact: { kind: "upload", ref: "", type: "jar" },
+      vm_count: 1,
+      machine_type: "",
+      disk_gib: 0,
+      image: "",
+      replicas: 1,
+      expose: "none",
+    },
+  };
+}
 
 function clusterNode(id: string): DesignNode {
   return {
@@ -136,6 +161,31 @@ describe("layoutDiagram nested databases", () => {
       assert.ok(db.y >= LAYOUT.CLUSTER_HEADER);
       assert.ok(db.right <= c.width - LAYOUT.PAD);
       assert.ok(db.bottom <= c.height - LAYOUT.PAD);
+    }
+  });
+});
+
+describe("layoutDiagram dagre placement", () => {
+  const nodes = () => [rootNode("vm"), appNode("app-1"), clusterNode("cluster-a")];
+  const edges: DesignEdge[] = [{ id: "e", source: "app-1", target: "cluster-a" }];
+
+  it("separates a wired consumer and provider along the rank axis (LR)", () => {
+    const laid = layoutDiagram(nodes(), edges);
+    const app = laid.find((n) => n.id === "app-1")!;
+    const cluster = laid.find((n) => n.id === "cluster-a")!;
+    // Left→right: the consumer (edge source) ranks left of the provider (target).
+    assert.ok(app.position.x < cluster.position.x, "consumer should sit left of provider");
+    // Top-level components are placed below the root's title chrome.
+    assert.ok(app.position.y >= LAYOUT.ROOT_HEADER - LAYOUT.PAD);
+  });
+
+  it("is deterministic / idempotent for the same (nodes, edges)", () => {
+    const once = layoutDiagram(nodes(), edges);
+    const twice = layoutDiagram(once, edges);
+    for (const n of once) {
+      const m = twice.find((x) => x.id === n.id)!;
+      assert.equal(n.position.x, m.position.x);
+      assert.equal(n.position.y, m.position.y);
     }
   });
 });

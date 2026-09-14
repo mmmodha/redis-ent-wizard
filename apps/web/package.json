@@ -8,7 +8,9 @@
     "start": "next start -p 3000"
   },
   "dependencies": {
+    "@types/dagre": "^0.7.54",
     "@xyflow/react": "^12.11.3",
+    "dagre": "^0.8.5",
     "next": "^15.1.3",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"

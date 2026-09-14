@@ -27,6 +27,7 @@ import { NodeDialog, type DialogTarget } from "@/components/design/NodeDialog";
 import { PALETTE_MIME, Palette } from "@/components/design/Palette";
 import { defaultNodeData } from "@/components/design/defaults";
 import { nodeTypes } from "@/components/design/nodes";
+import { FloatingEdge } from "@/components/design/FloatingEdge";
 import {
   createInputToDiagram,
   diagramToCreateInput,
@@ -74,6 +75,10 @@ function DesignConnectionLine({ fromX, fromY, toX, toY, connectionStatus }: Conn
   return <path d={path} fill="none" className={`design-connline${status}`} />;
 }
 
+// Override the built-in "default" edge so every edge floats to the output
+// (right/bottom) and input (left/top) sides that face the connected node.
+const edgeTypes = { default: FloatingEdge, floating: FloatingEdge };
+
 /**
  * Canvas half of the unified create workspace. Deployment settings, the action
  * bar and preflight live in the parent shell; this view owns only the diagram,
@@ -94,16 +99,19 @@ export function DesignView({
   onUploadingChange: (uploading: boolean) => void;
 }) {
   const mode = settings.mode;
-  const { screenToFlowPosition } = useReactFlow();
+  const { screenToFlowPosition, fitView } = useReactFlow();
   const wrapperRef = useRef<HTMLDivElement>(null);
   const idRef = useRef(1);
+  // The pane's pixel size, measured from the canvas wrapper so the root
+  // (VPC/GKE) node can be grown to fill it.
+  const [pane, setPane] = useState({ width: ROOT_SIZE.width, height: ROOT_SIZE.height });
 
   // Hydrate the canvas once from the incoming config (the parent remounts this
   // component with a fresh key on a view switch, so mount === (re)hydrate).
   const initial = useMemo(() => {
     if (initialConfig && Object.keys(initialConfig).length) {
       const { nodes, edges } = createInputToDiagram(initialConfig, mode);
-      const laid = layoutDiagram(nodes);
+      const laid = layoutDiagram(nodes, edges);
       const maxId = laid.reduce((m, n) => {
         const match = /-(\d+)$/.exec(n.id);
         return match ? Math.max(m, Number(match[1])) : m;
@@ -111,7 +119,7 @@ export function DesignView({
       idRef.current = maxId + 1;
       return { nodes: laid, edges };
     }
-    return { nodes: [rootNode(mode)], edges: [] as DesignEdge[] };
+    return { nodes: layoutDiagram([rootNode(mode)], []), edges: [] as DesignEdge[] };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -137,9 +145,36 @@ export function DesignView({
   useEffect(() => {
     if (builtModeRef.current === mode) return;
     builtModeRef.current = mode;
-    setNodes(layoutDiagram([rootNode(mode)]));
+    setNodes(layoutDiagram([rootNode(mode)], [], pane));
     setEdges([]);
-  }, [mode, setNodes, setEdges]);
+  }, [mode, pane, setNodes, setEdges]);
+
+  // Measure the canvas wrapper (reliable even behind the credential-lock overlay).
+  useEffect(() => {
+    const el = wrapperRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const measure = () => {
+      const r = el.getBoundingClientRect();
+      if (r.width > 0 && r.height > 0) {
+        setPane((p) =>
+          p.width === Math.round(r.width) && p.height === Math.round(r.height)
+            ? p
+            : { width: Math.round(r.width), height: Math.round(r.height) },
+        );
+      }
+    };
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  // Re-layout (and re-frame) when the pane resizes so the root fills the canvas.
+  useEffect(() => {
+    setNodes((prev) => layoutDiagram(prev, edges, pane));
+    const id = requestAnimationFrame(() => fitView({ padding: 0.04, duration: 150 }));
+    return () => cancelAnimationFrame(id);
+  }, [pane, edges, setNodes, fitView]);
 
   const validCredential = gcp.credentials.find((c) => c.file === gcp.settings.credentialsFile)?.valid;
   const canvasReady = canUseDesignerCanvas({
@@ -238,18 +273,17 @@ export function DesignView({
         data,
         ...(style ? { style } : {}),
       };
-      setNodes((prev) => layoutDiagram(prev.concat(newNode)));
-      if (lbTargetId) {
-        setEdges((eds) =>
-          addEdge(
-            { id: `edge-lb-${id}`, source: id, target: lbTargetId as string, animated: true, className: "design-edge-lb" },
-            eds,
-          ),
-        );
-      }
+      const nextEdges = lbTargetId
+        ? addEdge(
+            { id: `edge-lb-${id}`, source: id, target: lbTargetId, animated: true, className: "design-edge-lb" },
+            edges,
+          )
+        : edges;
+      if (lbTargetId) setEdges(nextEdges);
+      setNodes((prev) => layoutDiagram(prev.concat(newNode), nextEdges, pane));
       setDialog({ id, type: kind, data: newNode.data });
     },
-    [canvasReady, screenToFlowPosition, nodeAt, mode, gcp.machineTypes, gcp.vmReleases, setNodes, setEdges, showToast, nodes],
+    [canvasReady, screenToFlowPosition, nodeAt, mode, gcp.machineTypes, gcp.vmReleases, setNodes, setEdges, showToast, nodes, edges, pane],
   );
 
   const onDragOver = useCallback(
@@ -320,21 +354,20 @@ export function DesignView({
         showToast("Wire a consumer (app or set of VMs) to a cluster, database, load balancer, or another app — not to its own load balancer.");
         return;
       }
-      setEdges((eds) =>
-        addEdge(
-          {
-            id: `edge-${oriented.source}-${oriented.target}`,
-            source: oriented.source,
-            target: oriented.target,
-            animated: true,
-            ...(oriented.isLbEdge ? { className: "design-edge-lb" } : {}),
-          },
-          eds,
-        ),
+      const nextEdges = addEdge(
+        {
+          id: `edge-${oriented.source}-${oriented.target}`,
+          source: oriented.source,
+          target: oriented.target,
+          animated: true,
+          ...(oriented.isLbEdge ? { className: "design-edge-lb" } : {}),
+        },
+        edges,
       );
-      setNodes((prev) => layoutDiagram(prev));
+      setEdges(nextEdges);
+      setNodes((prev) => layoutDiagram(prev, nextEdges, pane));
     },
-    [canvasReady, orientConnection, setEdges, setNodes, showToast],
+    [canvasReady, orientConnection, setEdges, setNodes, showToast, edges, pane],
   );
 
   const onNodeClick = useCallback(
@@ -360,11 +393,12 @@ export function DesignView({
           }
         }
       }
-      setNodes((prev) => layoutDiagram(prev.filter((n) => !doomed.has(n.id))));
-      setEdges((prev) => prev.filter((e) => !doomed.has(e.source) && !doomed.has(e.target)));
+      const nextEdges = edges.filter((e) => !doomed.has(e.source) && !doomed.has(e.target));
+      setEdges(nextEdges);
+      setNodes((prev) => layoutDiagram(prev.filter((n) => !doomed.has(n.id)), nextEdges, pane));
       setDialog(null);
     },
-    [nodes, setNodes, setEdges],
+    [nodes, edges, setNodes, setEdges, pane],
   );
 
   const saveDialog = useCallback(
@@ -379,11 +413,11 @@ export function DesignView({
               : n,
           );
         }
-        return layoutDiagram(next);
+        return layoutDiagram(next, edges, pane);
       });
       setDialog(null);
     },
-    [dialog, mode, setNodes],
+    [dialog, mode, setNodes, edges, pane],
   );
 
   // Keep the RDI pipeline-state database in sync with the RDI target edge.
@@ -445,6 +479,7 @@ export function DesignView({
               zoomOnPinch={canvasReady}
               zoomOnDoubleClick={canvasReady}
               nodeTypes={nodeTypes}
+              edgeTypes={edgeTypes}
               fitView
               proOptions={{ hideAttribution: true }}
             >
