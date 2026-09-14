@@ -18,6 +18,7 @@ import {
   type CloudSqlData,
   type LoadBalancerData,
   type PubsubData,
+  type RdiData,
   type StorageData,
   type NodeKind,
   type RootData,
@@ -93,6 +94,7 @@ export function NodeDialog({
     pubsub: "Pub/Sub topic",
     bigquery: "BigQuery dataset",
     cloudsql: "Cloud SQL instance",
+    rdi: "Redis Data Integration",
   };
 
   return (
@@ -189,6 +191,16 @@ export function NodeDialog({
           ) : null}
 
           {target.type === "cloudsql" ? <CloudSqlForm data={draft as CloudSqlData} set={set} /> : null}
+
+          {target.type === "rdi" ? (
+            <RdiForm
+              data={draft as RdiData}
+              set={set}
+              machineTypes={machineTypes}
+              loadingMachines={loadingMachines}
+              probeZone={probeZone}
+            />
+          ) : null}
 
           {[
             "cluster",
@@ -1282,6 +1294,48 @@ function CloudSqlForm({
         <input value={data.db_user} onChange={(e) => set<CloudSqlData>({ db_user: e.target.value })} placeholder="appuser" />
         <span className="hint">Password is auto-generated and injected into connected components.</span>
       </label>
+    </div>
+  );
+}
+
+function RdiForm({
+  data,
+  set,
+  machineTypes,
+  loadingMachines,
+  probeZone,
+}: {
+  data: RdiData;
+  set: <T extends DesignNodeData>(p: Partial<T>) => void;
+  machineTypes: MachineTypeInfo[];
+  loadingMachines?: boolean;
+  probeZone: string;
+}) {
+  return (
+    <div className="grid">
+      <label>
+        Name
+        <input
+          value={data.name}
+          onChange={(e) => set<RdiData>({ name: e.target.value.slice(0, 40) })}
+          placeholder="ingest"
+        />
+        <span className="hint">The RDI runtime is prefixed with the deployment name.</span>
+      </label>
+      <MachineTypePicker
+        label="RDI VM machine type"
+        value={data.machine_type}
+        onChange={(v) => set<RdiData>({ machine_type: v })}
+        machineTypes={machineTypes}
+        loading={loadingMachines}
+        preferredFamilies={["n2", "e2", "n2d"]}
+        hint={`Used in VM mode; types available in ${probeZone || "selected zone"}`}
+      />
+      <p className="hint" style={{ margin: 0 }}>
+        Wire this RDI node to one or more Cloud SQL instances (pipeline sources) and to a single Redis
+        database (the target). The pipeline-state database is created automatically in the target&apos;s
+        cluster.
+      </p>
     </div>
   );
 }

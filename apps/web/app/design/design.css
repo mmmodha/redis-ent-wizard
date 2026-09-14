@@ -57,6 +57,10 @@
   -webkit-mask-image: url(/brand/icons/cloudsql.svg);
   mask-image: url(/brand/icons/cloudsql.svg);
 }
+.design-icon-rdi {
+  -webkit-mask-image: url(/brand/icons/rdi.svg);
+  mask-image: url(/brand/icons/rdi.svg);
+}
 
 /* Settings panel */
 .design-settings-panel {
@@ -225,6 +229,13 @@
   stroke-dasharray: 6 4;
 }
 
+/* The RDI link to its managed pipeline-state database is visually distinct. */
+.design-canvas-wrap .react-flow__edge.design-edge-rdi .react-flow__edge-path {
+  stroke: var(--redis-violet-70, #8a5cf6);
+  stroke-width: 2.5;
+  stroke-dasharray: 2 4;
+}
+
 .design-handle {
   width: 11px;
   height: 11px;
@@ -365,7 +376,8 @@
 .design-storage,
 .design-pubsub,
 .design-bigquery,
-.design-cloudsql {
+.design-cloudsql,
+.design-rdi {
   width: 100%;
   height: 100%;
   border: 1px solid var(--border-soft);
@@ -414,6 +426,21 @@
 
 .design-cloudsql {
   border-left: 3px solid var(--redis-dusk-90);
+}
+
+.design-rdi {
+  border-left: 3px solid var(--redis-violet-70, #8a5cf6);
+}
+
+/* The tool-managed RDI pipeline-state database stands apart from user databases. */
+.design-db-rdi {
+  border-left: 3px dashed var(--redis-violet-70, #8a5cf6);
+  background: var(--redis-bg-secondary, #faf7ff);
+}
+
+.design-badge-rdi {
+  background: var(--redis-violet-70, #8a5cf6);
+  color: #fff;
 }
 
 .design-cap {

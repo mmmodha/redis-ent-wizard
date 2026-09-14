@@ -4,6 +4,7 @@ import {
   createInputToDiagram,
   diagramToCreateInput,
   exposedVariables,
+  reconcileRdiInternalNodes,
   ROOT_ID,
   type DesignEdge,
   type DesignNode,
@@ -49,6 +50,8 @@ function buildDiagram(): { nodes: DesignNode[]; edges: DesignEdge[] } {
     node("p1", "pubsub", { name: "events", create_subscription: true, role: "both" }, ROOT_ID),
     node("bq1", "bigquery", { name: "analytics", location: "", access: "readwrite" }, ROOT_ID),
     node("sql1", "cloudsql", { name: "orders", engine: "postgres", tier: "db-f1-micro", db_name: "appdb", db_user: "appuser", connectivity: "private" }, ROOT_ID),
+    node("dbt", "database", { name: "target", memory_gb: 1, replication: false, sharding: false, shards_count: 1, eviction_policy: "noeviction", port: 12000, password: "", modules: [], proxy_policy: "single", shards_placement: "dense", oss_cluster: false, flex: false }, "c1"),
+    node("rdi1", "rdi", { name: "ingest", machine_type: "n2-standard-4" }, ROOT_ID),
   ];
   const edges: DesignEdge[] = [
     { id: "e1", source: "lb1", target: "app1" }, // LB fronts the app
@@ -61,6 +64,8 @@ function buildDiagram(): { nodes: DesignNode[]; edges: DesignEdge[] } {
     { id: "e8", source: "app1", target: "bq1" }, // app consumes the BigQuery dataset
     { id: "e9", source: "app1", target: "sql1" }, // app consumes the Cloud SQL instance
     { id: "e10", source: "v1", target: "sql1" }, //  Set-of-VMs consumes the Cloud SQL instance
+    { id: "e11", source: "rdi1", target: "sql1" }, // RDI ingests from the Cloud SQL source
+    { id: "e12", source: "rdi1", target: "dbt" }, //  RDI writes to the target database
   ];
   return { nodes, edges };
 }
@@ -124,6 +129,43 @@ describe("diagramToCreateInput connections", () => {
     assert.equal((again.pubsub_topics as any[]).length, 1);
     assert.equal((again.bigquery_datasets as any[]).length, 1);
     assert.equal((again.cloud_sql_instances as any[]).length, 1);
+    assert.equal((again.rdi as any).name, "ingest");
+    assert.equal((again.rdi as any).target, "target");
+    assert.deepEqual((again.rdi as any).pipelines, [{ source: "orders" }]);
+  });
+});
+
+describe("RDI connections", () => {
+  it("derives rdi target + pipeline sources from edges", () => {
+    const { nodes, edges } = buildDiagram();
+    const payload = diagramToCreateInput(nodes, edges, settings) as Record<string, any>;
+    assert.equal(payload.rdi.name, "ingest");
+    assert.equal(payload.rdi.machine_type, "n2-standard-4");
+    assert.equal(payload.rdi.target, "target");
+    assert.deepEqual(payload.rdi.pipelines, [{ source: "orders" }]);
+  });
+
+  it("reconciles a distinct internal state DB when RDI has a target", () => {
+    const { nodes, edges } = buildDiagram();
+    const out = reconcileRdiInternalNodes(nodes, edges);
+    assert.ok(out, "a change is produced");
+    const stateNode = out!.nodes.find((n) => (n.data as any).rdiInternal);
+    assert.ok(stateNode, "internal state DB spawned");
+    assert.equal(stateNode!.parentId, "c1", "spawned in the target's cluster");
+    const stateEdge = out!.edges.find((e) => e.id.startsWith("edge-rdiint-"));
+    assert.ok(stateEdge, "distinct RDI link created");
+    assert.equal(stateEdge!.className, "design-edge-rdi");
+    // Second pass is a no-op (stable — no render loop).
+    assert.equal(reconcileRdiInternalNodes(out!.nodes, out!.edges), null);
+  });
+
+  it("excludes the internal state DB from the create payload's databases", () => {
+    const { nodes, edges } = buildDiagram();
+    const withState = reconcileRdiInternalNodes(nodes, edges)!;
+    const payload = diagramToCreateInput(withState.nodes, withState.edges, settings) as Record<string, any>;
+    const c1 = payload.clusters.find((c: any) => c.name === "cache");
+    const dbNames = (c1.databases as any[]).map((d) => d.name);
+    assert.ok(!dbNames.includes("ingest-state"), "internal state DB not emitted as a user database");
   });
 });
 
@@ -167,6 +209,10 @@ describe("exposedVariables", () => {
         "SQL_ORDERS_PASSWORD",
         "SQL_ORDERS_CONNECTION_NAME",
       ],
+    );
+    assert.deepEqual(
+      exposedVariables("rdi", "ingest").map((v) => v.name),
+      [],
     );
   });
 });

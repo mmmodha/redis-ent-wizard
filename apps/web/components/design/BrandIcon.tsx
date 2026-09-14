@@ -13,7 +13,8 @@ export type IconName =
   | "storage"
   | "pubsub"
   | "bigquery"
-  | "cloudsql";
+  | "cloudsql"
+  | "rdi";
 
 export function BrandIcon({ name, size = 18 }: { name: IconName; size?: number }) {
   return (

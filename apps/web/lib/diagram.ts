@@ -17,7 +17,8 @@ export type NodeKind =
   | "storage"
   | "pubsub"
   | "bigquery"
-  | "cloudsql";
+  | "cloudsql"
+  | "rdi";
 
 export type RootData = {
   kind: "network" | "gke";
@@ -54,6 +55,8 @@ export type DatabaseData = {
   shards_placement: "dense" | "sparse";
   oss_cluster: boolean;
   flex: boolean;
+  /** Set on the tool-synthesized RDI pipeline-state database (visual only). */
+  rdiInternal?: boolean;
   [k: string]: unknown;
 };
 
@@ -144,6 +147,18 @@ export type CloudSqlData = {
   [k: string]: unknown;
 };
 
+/** One RDI pipeline's per-table mapping, keyed by source in RdiData.pipelines. */
+export type RdiTableConfig = { table: string; key_prefix?: string };
+
+export type RdiData = {
+  kind: "rdi";
+  name: string;
+  machine_type: string;
+  /** Per-source table/transform config authored in the pipeline editor. */
+  pipelines?: { source: string; tables?: RdiTableConfig[] }[];
+  [k: string]: unknown;
+};
+
 export type DesignNodeData =
   | RootData
   | ClusterData
@@ -154,7 +169,8 @@ export type DesignNodeData =
   | StorageData
   | PubsubData
   | BigqueryData
-  | CloudSqlData;
+  | CloudSqlData
+  | RdiData;
 
 export type DesignNode = Node<DesignNodeData>;
 export type DesignEdge = Edge;
@@ -277,6 +293,13 @@ function isBigquery(n: DesignNode): n is Node<BigqueryData> {
 function isCloudSql(n: DesignNode): n is Node<CloudSqlData> {
   return n.data.kind === "cloudsql";
 }
+function isRdi(n: DesignNode): n is Node<RdiData> {
+  return n.data.kind === "rdi";
+}
+/** True for the tool-synthesized RDI pipeline-state database node. */
+function isRdiInternalDb(n: DesignNode): boolean {
+  return n.data.kind === "database" && Boolean((n.data as DatabaseData).rdiInternal);
+}
 
 /** Human-facing name for a cluster node, used for edge connect references. */
 export function clusterName(node: Node<ClusterData>, index: number): string {
@@ -316,6 +339,95 @@ export function predictedDatabaseEndpoint(
   const deploymentPrefix = `${settings.name}-${settings.env || "default"}`;
   const fqdn = `cluster.${clusterDnsPrefix(deploymentPrefix, clusterIndex, clusterNameRaw)}.${zone}`;
   return { endpoint: `${fqdn}:${p}`, resolved: true };
+}
+
+/** DatabaseData for the tool-synthesized RDI pipeline-state database (visual only). */
+export function rdiStateNodeData(rdiName: string): DatabaseData {
+  return {
+    kind: "database",
+    name: `${(rdiName || "rdi").trim()}-state`,
+    memory_gb: 1,
+    replication: false,
+    sharding: false,
+    shards_count: 1,
+    eviction_policy: "noeviction",
+    port: 13000,
+    password: "",
+    modules: [],
+    proxy_policy: "single",
+    shards_placement: "dense",
+    oss_cluster: false,
+    flex: false,
+    rdiInternal: true,
+  };
+}
+
+/**
+ * Reconcile the RDI pipeline-state database on the live canvas: for the RDI node
+ * (one per deployment) that has a target-database edge, ensure exactly one
+ * internal state database (`rdi-internal-<rdiId>`) exists in the target's
+ * cluster, linked to RDI by a distinct `design-edge-rdi` edge. Removes any stale
+ * internal database when the target edge, the RDI node, or the cluster is gone.
+ * Returns null when nothing needs to change (so callers avoid render loops).
+ */
+export function reconcileRdiInternalNodes(
+  nodes: DesignNode[],
+  edges: DesignEdge[],
+): { nodes: DesignNode[]; edges: DesignEdge[] } | null {
+  const dbById = new Map(nodes.filter(isDatabase).map((n) => [n.id, n] as const));
+  // Desired internal DBs keyed by node id -> its cluster + owning RDI.
+  const desired = new Map<string, { rdiId: string; clusterId: string; rdiName: string }>();
+  for (const rdi of nodes.filter(isRdi)) {
+    const targetEdge = edges.find((e) => {
+      if (e.source !== rdi.id) return false;
+      const t = dbById.get(e.target);
+      return Boolean(t && !isRdiInternalDb(t));
+    });
+    if (!targetEdge) continue;
+    const clusterId = dbById.get(targetEdge.target)?.parentId;
+    if (!clusterId) continue;
+    desired.set(`rdi-internal-${rdi.id}`, { rdiId: rdi.id, clusterId, rdiName: rdi.data.name });
+  }
+
+  const existing = nodes.filter(isRdiInternalDb);
+  const wantEdgeIds = new Set([...desired.keys()].map((id) => `edge-rdiint-${id.replace("rdi-internal-", "")}`));
+  const haveInternalEdges = edges.filter((e) => e.id.startsWith("edge-rdiint-"));
+
+  // Does the current graph already match the desired set (nodes + cluster + edges)?
+  const nodesMatch =
+    existing.length === desired.size &&
+    existing.every((n) => {
+      const d = desired.get(n.id);
+      return d && n.parentId === d.clusterId;
+    });
+  const edgesMatch =
+    haveInternalEdges.length === wantEdgeIds.size && haveInternalEdges.every((e) => wantEdgeIds.has(e.id));
+  if (nodesMatch && edgesMatch) return null;
+
+  // Rebuild: drop all internal DBs + their edges, then add the desired set.
+  let nextNodes = nodes.filter((n) => !isRdiInternalDb(n));
+  let nextEdges = edges.filter((e) => !e.id.startsWith("edge-rdiint-"));
+  for (const [id, d] of desired) {
+    nextNodes.push({
+      id,
+      type: "database",
+      parentId: d.clusterId,
+      extent: "parent",
+      deletable: false,
+      position: { x: 16, y: 0 },
+      style: { width: NODE_SIZE.database.width, height: NODE_SIZE.database.height },
+      data: rdiStateNodeData(d.rdiName),
+    });
+    nextEdges.push({
+      id: `edge-rdiint-${d.rdiId}`,
+      source: d.rdiId,
+      target: id,
+      animated: true,
+      className: "design-edge-rdi",
+    });
+  }
+  nextNodes = layoutDiagram(nextNodes);
+  return { nodes: nextNodes, edges: nextEdges };
 }
 
 /** Env-var slug from a component name (mirrors the API's envSlug). */
@@ -389,9 +501,13 @@ export function diagramToCreateInput(
   settings: DesignSettings,
 ): Record<string, unknown> {
   const clusters = nodes.filter(isCluster);
-  const databases = nodes.filter(isDatabase);
+  // The RDI pipeline-state database is synthesized by the API from the RDI→target
+  // relationship, so it is excluded here — it is neither a user database nor a
+  // connectable target on the canvas.
+  const databases = nodes.filter(isDatabase).filter((d) => !isRdiInternalDb(d));
   const vmsNodes = nodes.filter(isVms);
   const apps = nodes.filter(isApplication);
+  const rdiNodes = nodes.filter(isRdi);
   const lbs = nodes.filter(isLoadBalancer);
   const storageNodes = nodes.filter(isStorage);
   const pubsubNodes = nodes.filter(isPubsub);
@@ -584,6 +700,36 @@ export function diagramToCreateInput(
   }));
   if (cloudSqlInstances.length) base.cloud_sql_instances = cloudSqlInstances;
 
+  // RDI (one per deployment). Its target and pipeline sources come from edges:
+  // RDI→database (non-internal) is the target; each RDI→Cloud SQL is a pipeline.
+  const rdiNode = rdiNodes[0];
+  if (rdiNode) {
+    const outgoing = edges.filter((e) => e.source === rdiNode.id);
+    const target = outgoing
+      .map((e) => dbNameById.get(e.target))
+      .find((n): n is string => Boolean(n));
+    const sources = uniq(
+      outgoing.filter((e) => cloudsqlNameById.has(e.target)).map((e) => cloudsqlNameById.get(e.target) as string),
+    );
+    // Merge per-source table config authored in the pipeline editor.
+    const tablesBySource = new Map<string, RdiTableConfig[]>();
+    for (const p of rdiNode.data.pipelines || []) {
+      if (p.tables && p.tables.length) tablesBySource.set(p.source, p.tables);
+    }
+    const rdi: Record<string, unknown> = {
+      name: rdiNode.data.name.trim() || "rdi",
+      machine_type: rdiNode.data.machine_type,
+    };
+    if (target) rdi.target = target;
+    if (sources.length) {
+      rdi.pipelines = sources.map((source) => {
+        const tables = tablesBySource.get(source);
+        return tables && tables.length ? { source, tables } : { source };
+      });
+    }
+    base.rdi = rdi;
+  }
+
   if (settings.mode === "vm") {
     const clusterNodes = clusters;
     const first = clusterNodes[0];
@@ -767,6 +913,7 @@ export const NODE_SIZE: Record<string, { width: number; height: number }> = {
   pubsub: { width: 232, height: 120 },
   bigquery: { width: 232, height: 120 },
   cloudsql: { width: 232, height: 120 },
+  rdi: { width: 232, height: 120 },
 };
 
 /** Initial style for a freshly dropped node, if the kind has a preset size. */
@@ -903,6 +1050,7 @@ function databaseDataFromConfig(d: Record<string, unknown>): DatabaseData {
     shards_placement: d.shards_placement === "sparse" ? "sparse" : "dense",
     oss_cluster: Boolean(d.oss_cluster),
     flex: Boolean(d.flex),
+    ...(d.rdi_internal ? { rdiInternal: true } : {}),
   };
 }
 
@@ -1004,14 +1152,17 @@ export function createInputToDiagram(
     });
     const dbs = Array.isArray(c.databases) ? c.databases : [];
     dbs.forEach((d, j) => {
+      const data = databaseDataFromConfig(d || {});
       nodes.push({
         id: nextId("database"),
         type: "database",
         parentId: clusterId,
         extent: "parent",
+        // The RDI state database is tool-managed, not user-deletable.
+        ...(data.rdiInternal ? { deletable: false } : {}),
         position: { x: 16, y: 40 + j * 44 },
         style: { width: NODE_SIZE.database.width, height: NODE_SIZE.database.height },
-        data: databaseDataFromConfig(d || {}),
+        data,
       });
     });
   });
@@ -1340,6 +1491,66 @@ export function createInputToDiagram(
       bigquery: arr(vc.bigquery),
       sql: arr(vc.sql),
     });
+  }
+
+  // RDI (one per deployment): rebuild the node, its source/target edges, and the
+  // distinct link to the already-recreated pipeline-state database.
+  const rdiCfg = cfg.rdi as
+    | { name?: unknown; machine_type?: unknown; target?: unknown; pipelines?: unknown }
+    | undefined;
+  if (rdiCfg && dstr(rdiCfg.name)) {
+    const rdiId = nextId("rdi");
+    const pipelines = Array.isArray(rdiCfg.pipelines)
+      ? (rdiCfg.pipelines as Record<string, unknown>[]).map((p) => ({
+          source: dstr(p.source),
+          tables: Array.isArray(p.tables)
+            ? (p.tables as Record<string, unknown>[]).map((t) => ({
+                table: dstr(t.table),
+                key_prefix: dstr(t.key_prefix) || undefined,
+              }))
+            : undefined,
+        }))
+      : undefined;
+    nodes.push({
+      id: rdiId,
+      type: "rdi",
+      parentId: ROOT_ID,
+      extent: "parent",
+      position: { x: 520, y: 460 },
+      style: { width: NODE_SIZE.rdi.width, height: NODE_SIZE.rdi.height },
+      data: {
+        kind: "rdi",
+        name: dstr(rdiCfg.name),
+        machine_type: dstr(rdiCfg.machine_type) || "n2-standard-4",
+        ...(pipelines && pipelines.length ? { pipelines } : {}),
+      },
+    });
+    for (const p of pipelines || []) {
+      const sid = cloudsqlNameToId.get(p.source);
+      if (sid) {
+        edgeCounter += 1;
+        edges.push({ id: `edge-${edgeCounter}`, source: rdiId, target: sid, animated: true });
+      }
+    }
+    const target = dstr(rdiCfg.target);
+    const targetDbId = target ? dbNameToId.get(target) : undefined;
+    if (targetDbId) {
+      edgeCounter += 1;
+      edges.push({ id: `edge-${edgeCounter}`, source: rdiId, target: targetDbId, animated: true });
+      const targetNode = nodes.find((n) => n.id === targetDbId);
+      const stateNode = nodes.find(
+        (n) => n.parentId === targetNode?.parentId && n.data.kind === "database" && (n.data as DatabaseData).rdiInternal,
+      );
+      if (stateNode) {
+        edges.push({
+          id: `edge-rdiint-${rdiId}`,
+          source: rdiId,
+          target: stateNode.id,
+          animated: true,
+          className: "design-edge-rdi",
+        });
+      }
+    }
   }
 
   return { nodes: layoutDiagram(nodes), edges };

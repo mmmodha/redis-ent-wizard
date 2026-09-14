@@ -123,6 +123,13 @@ export function defaultNodeData(
         db_user: "appuser",
         connectivity: "private",
       };
+    case "rdi":
+      return {
+        kind: "rdi",
+        name: "",
+        machine_type: "n2-standard-4",
+        pipelines: [],
+      };
     default:
       return { kind: "network", label: "VPC network" };
   }

@@ -37,6 +37,7 @@ import {
   diagramToCreateInput,
   initialNodeStyle,
   layoutDiagram,
+  reconcileRdiInternalNodes,
   type ClusterData,
   type DatabaseData,
   type DesignEdge,
@@ -280,6 +281,13 @@ function DesignCanvas() {
         }
         parentId = ROOT_ID;
         relative = point;
+      } else if (kind === "rdi") {
+        if (nodes.some((n) => n.data.kind === "rdi")) {
+          showToast("Only one RDI component is supported per deployment.");
+          return;
+        }
+        parentId = ROOT_ID;
+        relative = point;
       }
 
       const id = `${kind}-${idRef.current++}`;
@@ -312,7 +320,7 @@ function DesignCanvas() {
       // Open the editor immediately so the drop captures its fields.
       setDialog({ id, type: kind, data: newNode.data });
     },
-    [canvasReady, screenToFlowPosition, nodeAt, meta.mode, gcp.machineTypes, gcp.vmReleases, setNodes, setEdges, resetPreflight, showToast],
+    [canvasReady, screenToFlowPosition, nodeAt, meta.mode, gcp.machineTypes, gcp.vmReleases, setNodes, setEdges, resetPreflight, showToast, nodes],
   );
 
   const onDragOver = useCallback(
@@ -361,6 +369,12 @@ function DesignCanvas() {
 
       const ka = a.data.kind;
       const kb = b.data.kind;
+      // RDI is a connector: it may only source edges to a Cloud SQL instance
+      // (a pipeline source) or a Redis database (its single target).
+      const isRdiTargetKind = (k: string) => k === "cloudsql" || k === "database";
+      if (ka === "rdi" && isRdiTargetKind(kb)) return { source: a.id, target: b.id, isLbEdge: false };
+      if (kb === "rdi" && isRdiTargetKind(ka)) return { source: b.id, target: a.id, isLbEdge: false };
+      if (ka === "rdi" || kb === "rdi") return null;
       if (isProviderOnly(ka) && isConsumer(kb)) return { source: b.id, target: a.id, isLbEdge: false };
       if (isProviderOnly(kb) && isConsumer(ka)) return { source: a.id, target: b.id, isLbEdge: false };
       if (ka === "loadbalancer" && isConsumer(kb)) return orientLb(a, b);
@@ -454,6 +468,17 @@ function DesignCanvas() {
     },
     [dialog, meta.mode, setNodes, resetPreflight],
   );
+
+  // Keep the RDI pipeline-state database in sync with the RDI target edge:
+  // spawn it (in the target's cluster, linked by a distinct edge) when RDI is
+  // wired to a target, and tear it down when that link, the RDI node, or the
+  // cluster goes away. reconcile returns null when nothing needs to change.
+  useEffect(() => {
+    const next = reconcileRdiInternalNodes(nodes, edges);
+    if (!next) return;
+    setNodes(next.nodes);
+    setEdges(next.edges);
+  }, [nodes, edges, setNodes, setEdges]);
 
   // Client-side capacity check surfaced before preflight.
   const overCommitted = useMemo(() => {

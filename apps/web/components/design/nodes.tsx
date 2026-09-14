@@ -16,6 +16,7 @@ import type {
   LoadBalancerData,
   NodeKind,
   PubsubData,
+  RdiData,
   RootData,
   StorageData,
   VmsData,
@@ -106,11 +107,16 @@ export function DatabaseNode({ id, data }: NodeProps) {
     ? predictedDatabaseEndpoint(settings, clusterNameRaw, clusterIndex < 0 ? 0 : clusterIndex, d.port)
     : null;
   return (
-    <div className="design-db">
+    <div className={`design-db${d.rdiInternal ? " design-db-rdi" : ""}`}>
       <Handle type="target" position={Position.Left} className="design-hit" />
-      <NodeHeader icon="database" title={d.name.trim() || "database"} />
+      <NodeHeader
+        icon="database"
+        title={d.name.trim() || "database"}
+        tag={d.rdiInternal ? "RDI state" : undefined}
+      />
       <div className="design-node-meta mono">{d.memory_gb} GB</div>
       <div className="design-badges">
+        {d.rdiInternal ? <span className="design-badge design-badge-rdi">managed by RDI</span> : null}
         {ha ? <span className="design-badge">HA</span> : null}
         {d.liveStatus ? (
           <span className={`design-badge design-badge-live design-badge-${d.liveStatus}`}>{String(d.liveStatus)}</span>
@@ -268,6 +274,22 @@ export function CloudSqlNode({ data }: NodeProps) {
   );
 }
 
+export function RdiNode({ data }: NodeProps) {
+  const d = data as RdiData;
+  const pipelines = Array.isArray(d.pipelines) ? d.pipelines.length : 0;
+  return (
+    <div className="design-rdi">
+      <Handle type="target" position={Position.Left} className="design-hit" />
+      <NodeHeader icon="rdi" title={d.name.trim() || "RDI"} />
+      <div className="design-node-meta mono">{d.machine_type || "machine type"}</div>
+      <div className="design-node-meta mono">
+        {pipelines ? `${pipelines} pipeline${pipelines === 1 ? "" : "s"}` : "wire a Cloud SQL source + a target DB"}
+      </div>
+      <Handle type="source" position={Position.Right} className="design-handle" />
+    </div>
+  );
+}
+
 export const nodeTypes: NodeTypes = {
   network: RootNode,
   gke: RootNode,
@@ -280,4 +302,5 @@ export const nodeTypes: NodeTypes = {
   pubsub: PubsubNode,
   bigquery: BigqueryNode,
   cloudsql: CloudSqlNode,
+  rdi: RdiNode,
 };

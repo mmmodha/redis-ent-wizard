@@ -17,6 +17,7 @@ const ITEMS: PaletteItem[] = [
   { kind: "pubsub", label: "Pub/Sub", icon: "pubsub", hint: "Drop on the root; connect an app or VMs" },
   { kind: "bigquery", label: "BigQuery", icon: "bigquery", hint: "Drop on the root; connect an app or VMs" },
   { kind: "cloudsql", label: "Cloud SQL", icon: "cloudsql", hint: "Drop on the root; connect an app or VMs" },
+  { kind: "rdi", label: "RDI", icon: "rdi", hint: "Drop on the root; wire to Cloud SQL sources and a target database" },
 ];
 
 export function Palette({
