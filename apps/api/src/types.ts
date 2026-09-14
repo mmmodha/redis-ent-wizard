@@ -42,6 +42,11 @@ export interface DatabaseSpec {
   oss_cluster?: boolean;
   /** Redis on Flash (Auto Tiering) — needs NVMe disks on the cluster. */
   flex?: boolean;
+  /**
+   * Marks a database that the tool synthesizes as the RDI pipeline state store.
+   * Set only by `withRdiInternalDatabases`; never authored by the user.
+   */
+  rdi_internal?: boolean;
 }
 
 export type ArtifactKind = "upload" | "url" | "gcs" | "git";
@@ -90,6 +95,37 @@ export interface CloudSqlSpec {
    * source; may force an instance restart.
    */
   cdc_enabled?: boolean;
+}
+
+/** One source table in an RDI pipeline and how its rows land in Redis. */
+export interface RdiTableSpec {
+  /** Source table, optionally schema-qualified (e.g. public.orders). */
+  table: string;
+  /** Target Redis key prefix for rows from this table (defaults to the table name). */
+  key_prefix?: string;
+}
+
+/** One RDI pipeline: change data from a single Cloud SQL source. */
+export interface RdiPipelineSpec {
+  /** Cloud SQL source instance short-name — a wired RDI→Cloud SQL edge. */
+  source: string;
+  /** Tables to ingest; empty means "all tables" (RDI default). */
+  tables?: RdiTableSpec[];
+}
+
+/**
+ * Redis Data Integration: a connector that ingests change data from one or
+ * more Cloud SQL sources into a target Redis database. One RDI per deployment.
+ */
+export interface RdiSpec {
+  /** Short name; the runtime is `<deploymentPrefix>-<slug>`. */
+  name: string;
+  /** VM-mode machine type for the dedicated RDI VM. */
+  machine_type?: string;
+  /** Target Redis database short-name — a wired RDI→database edge. */
+  target?: string;
+  /** One pipeline per wired Cloud SQL source. */
+  pipelines?: RdiPipelineSpec[];
 }
 
 /** A BigQuery dataset available to workloads. */
@@ -274,6 +310,8 @@ export interface CreateInstanceInput {
   bigquery_datasets?: BigquerySpec[];
   /** Cloud SQL instances provisioned for this deployment (VM and GKE). */
   cloud_sql_instances?: CloudSqlSpec[];
+  /** Redis Data Integration runtime + pipelines for this deployment (one per deployment). */
+  rdi?: RdiSpec;
   /** Connection references from the Set-of-VMs group (app VMs) to providers in this deployment. */
   vms_connect?: {
     clusters?: string[];

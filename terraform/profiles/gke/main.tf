@@ -95,6 +95,23 @@ module "app_k8s" {
   depends_on = [module.gke, module.re_k8s]
 }
 
+module "rdi_k8s" {
+  source = "../../modules/rdi-k8s"
+  count  = var.rdi_enabled ? 1 : 0
+
+  name_prefix      = local.name_prefix
+  project          = var.project
+  cluster_name     = module.gke.cluster_name
+  cluster_location = module.gke.location
+  credentials_file = abspath(var.credentials)
+  outputs_dir      = var.outputs_dir
+  chart_version    = var.rdi.chart_version
+  env              = var.rdi.env
+  pipeline_config  = var.rdi.pipeline_config
+
+  depends_on = [module.gke, module.re_k8s]
+}
+
 output "how_to_kubectl" {
   value = module.gke.how_to_kubectl
 }
@@ -141,6 +158,13 @@ output "bigquery_datasets" {
 
 output "cloud_sql_instances" {
   value = module.cloudsql.instances
+}
+
+output "rdi" {
+  value = var.rdi_enabled ? {
+    name      = var.rdi.name
+    namespace = module.rdi_k8s[0].namespace
+  } : null
 }
 
 output "deployment_mode" {

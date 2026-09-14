@@ -7,8 +7,9 @@ import { bucketFullName, bucketGrantRole, normalizeStorageBuckets } from "./stor
 import { grantsPublisher, grantsSubscriber, normalizePubsub, topicFullName } from "./pubsub.js";
 import { datasetFullId, datasetGrantRole, normalizeBigquery } from "./bigquery.js";
 import { normalizeCloudSql, sqlDatabaseVersion, sqlInstanceFullName, sqlPort } from "./cloudsql.js";
+import { normalizeRdi, rdiFullName, rdiSourceNames, rdiStateDbName, renderRdiPipelineConfig } from "./rdi.js";
 import { resolveGkeOperatorChart } from "./rs-releases.js";
-import type { CreateInstanceInput, DeploymentMode } from "./types.js";
+import type { CreateInstanceInput, DatabaseSpec, DeploymentMode } from "./types.js";
 
 const terraformDir =
   process.env.TERRAFORM_DIR || path.resolve(process.cwd(), "../../terraform");
@@ -425,8 +426,11 @@ function connectedSqlNames(input: CreateInstanceInput): Set<string> {
 }
 
 /** tfvars for the shared cloudsql module; grant_client set only for connected instances. */
-function buildCloudSql(input: CreateInstanceInput, prefix: string): Record<string, unknown>[] {
+export function buildCloudSql(input: CreateInstanceInput, prefix: string): Record<string, unknown>[] {
   const connected = connectedSqlNames(input);
+  // A Cloud SQL instance wired as an RDI source needs CDC enabled even if the
+  // user did not toggle it directly.
+  const rdiSources = rdiSourceNames(input);
   return normalizeCloudSql(input).map((s) => ({
     name: sqlInstanceFullName(prefix, s.name),
     database_version: sqlDatabaseVersion(s.engine),
@@ -435,8 +439,103 @@ function buildCloudSql(input: CreateInstanceInput, prefix: string): Record<strin
     db_user: s.db_user,
     connectivity: s.connectivity,
     grant_client: connected.has(s.name),
-    cdc_enabled: s.cdc_enabled,
+    cdc_enabled: s.cdc_enabled || rdiSources.has(s.name),
   }));
+}
+
+// Pinned RDI versions (overridable per deployment later). Verify against the
+// current Redis Data Integration release before relying on these in a real apply.
+const RDI_VM_VERSION = "1.6.4";
+const RDI_CHART_VERSION = "";
+
+interface RdiTfvars {
+  rdi_enabled: boolean;
+  rdi: Record<string, unknown>;
+  rdi_connect_cluster_admin: Record<string, number>;
+  rdi_connect_sql: Record<string, string>;
+}
+
+/**
+ * tfvars for the RDI runtime: static env values plus the apply-time reference
+ * maps that the VM profile resolves (cluster-admin password + Cloud SQL source
+ * host/password). Returns a disabled shell when no RDI is configured.
+ */
+export function buildRdi(input: CreateInstanceInput, prefix: string, mode: DeploymentMode): RdiTfvars {
+  const disabled: RdiTfvars = {
+    rdi_enabled: false,
+    rdi: { name: "", machine_type: "", version: "", chart_version: "", env: {}, pipeline_config: "" },
+    rdi_connect_cluster_admin: {},
+    rdi_connect_sql: {},
+  };
+  const rdi = normalizeRdi(input);
+  if (!rdi) return disabled;
+
+  const clusters = normalizeClusters(mode === "gke" ? { ...input, mode: "gke" } : input);
+  const dnsSuffix = input.dns_zone_dns_name || "demo.redislabs.com";
+  const endpointOf = (clusterIdx: number, db: DatabaseSpec): { host: string; port: number } => {
+    const port = db.port ?? 12000;
+    if (mode === "gke") return { host: `${db.name}.${GKE_REC_NS}.svc.cluster.local`, port };
+    const cprefix = clusterNamePrefix(prefix, clusterIdx, clusters[clusterIdx].name);
+    return { host: `redis-${port}.cluster.${cprefix}.${dnsSuffix}`, port };
+  };
+  const findDb = (name?: string): { db: DatabaseSpec; clusterIdx: number } | null => {
+    if (!name) return null;
+    for (let i = 0; i < clusters.length; i++) {
+      const db = (clusters[i].databases || []).find((d) => d.name === name);
+      if (db) return { db, clusterIdx: i };
+    }
+    return null;
+  };
+
+  const env: Record<string, string> = {};
+  const connectClusterAdmin: Record<string, number> = {};
+  const connectSql: Record<string, string> = {};
+
+  const target = findDb(rdi.target);
+  if (target) {
+    const { host, port } = endpointOf(target.clusterIdx, target.db);
+    env.RDI_TARGET_HOST = host;
+    env.RDI_TARGET_PORT = String(port);
+    if (target.db.password) env.RDI_TARGET_PASSWORD = target.db.password;
+    env.RDI_REDIS_ADMIN_USER = input.RS_admin || "admin@redis.io";
+    // Cluster admin password is apply-time on VM; on GKE it is read from the RE secret at deploy.
+    if (mode === "vm") connectClusterAdmin.RDI_REDIS_ADMIN_PASSWORD = target.clusterIdx;
+  }
+
+  const state = findDb(rdiStateDbName(rdi.name));
+  if (state) {
+    const { host, port } = endpointOf(state.clusterIdx, state.db);
+    env.RDI_STATE_HOST = host;
+    env.RDI_STATE_PORT = String(port);
+    if (state.db.password) env.RDI_STATE_PASSWORD = state.db.password;
+  }
+
+  // Source connection details: static parts inline; host/password apply-time (VM only).
+  const sqlMap = sqlEnvMap(input, prefix);
+  for (const p of rdi.pipelines) {
+    const ref = sqlMap.get(p.source);
+    if (!ref) continue;
+    const slug = envSlug(p.source);
+    env[`SQL_${slug}_DB`] = ref.db;
+    env[`SQL_${slug}_USER`] = ref.user;
+    env[`SQL_${slug}_PORT`] = String(ref.port);
+    env[`SQL_${slug}_CONNECTION_NAME`] = ref.connectionName;
+    if (mode === "vm") connectSql[slug] = ref.instanceFull;
+  }
+
+  return {
+    rdi_enabled: true,
+    rdi: {
+      name: rdiFullName(prefix, rdi.name),
+      machine_type: rdi.machine_type,
+      version: RDI_VM_VERSION,
+      chart_version: RDI_CHART_VERSION,
+      env,
+      pipeline_config: renderRdiPipelineConfig(rdi),
+    },
+    rdi_connect_cluster_admin: connectClusterAdmin,
+    rdi_connect_sql: connectSql,
+  };
 }
 
 /** Topic short-names that at least one consumer connects to. */
@@ -660,6 +759,10 @@ export function vmStackModuleArguments(): string {
   app_connect_cluster_admin = var.app_connect_cluster_admin
   app_connect_lb   = var.app_connect_lb
   app_connect_sql  = var.app_connect_sql
+  rdi_enabled      = var.rdi_enabled
+  rdi              = var.rdi
+  rdi_connect_cluster_admin = var.rdi_connect_cluster_admin
+  rdi_connect_sql  = var.rdi_connect_sql
 `;
 }
 
@@ -730,6 +833,8 @@ ${
   pubsub_topics            = var.pubsub_topics
   bigquery_datasets        = var.bigquery_datasets
   cloud_sql_instances      = var.cloud_sql_instances
+  rdi_enabled              = var.rdi_enabled
+  rdi                      = var.rdi
 `
 }
 }
@@ -767,6 +872,7 @@ output "storage_buckets" { value = module.stack.storage_buckets }
 output "pubsub_topics" { value = module.stack.pubsub_topics }
 output "bigquery_datasets" { value = module.stack.bigquery_datasets }
 output "cloud_sql_instances" { value = module.stack.cloud_sql_instances }
+output "rdi" { value = module.stack.rdi }
 output "deployment_mode" { value = module.stack.deployment_mode }
 `
     : `
@@ -782,6 +888,7 @@ output "storage_buckets" { value = module.stack.storage_buckets }
 output "pubsub_topics" { value = module.stack.pubsub_topics }
 output "bigquery_datasets" { value = module.stack.bigquery_datasets }
 output "cloud_sql_instances" { value = module.stack.cloud_sql_instances }
+output "rdi" { value = module.stack.rdi }
 output "deployment_mode" { value = module.stack.deployment_mode }
 `
 }
@@ -917,6 +1024,36 @@ variable "cloud_sql_instances" {
   }))
   default = []
 }
+variable "rdi_enabled" {
+  type    = bool
+  default = false
+}
+variable "rdi" {
+  type = object({
+    name            = string
+    machine_type    = string
+    version         = string
+    chart_version   = string
+    env             = map(string)
+    pipeline_config = string
+  })
+  default = {
+    name            = ""
+    machine_type    = ""
+    version         = ""
+    chart_version   = ""
+    env             = {}
+    pipeline_config = ""
+  }
+}
+variable "rdi_connect_cluster_admin" {
+  type    = map(number)
+  default = {}
+}
+variable "rdi_connect_sql" {
+  type    = map(string)
+  default = {}
+}
 `
       : `
 variable "yourname" { type = string }
@@ -1000,6 +1137,28 @@ variable "cloud_sql_instances" {
   }))
   default = []
 }
+variable "rdi_enabled" {
+  type    = bool
+  default = false
+}
+variable "rdi" {
+  type = object({
+    name            = string
+    machine_type    = string
+    version         = string
+    chart_version   = string
+    env             = map(string)
+    pipeline_config = string
+  })
+  default = {
+    name            = ""
+    machine_type    = ""
+    version         = ""
+    chart_version   = ""
+    env             = {}
+    pipeline_config = ""
+  }
+}
 `;
 
   const tfvars: Record<string, unknown> = {
@@ -1069,6 +1228,11 @@ variable "cloud_sql_instances" {
     tfvars.bigquery_datasets = buildBigquery(input, vmPrefix);
     tfvars.cloud_sql_instances = buildCloudSql(input, vmPrefix);
     tfvars.app_connect_sql = vmsConn.connectSql;
+    const rdiVars = buildRdi(input, vmPrefix, "vm");
+    tfvars.rdi_enabled = rdiVars.rdi_enabled;
+    tfvars.rdi = rdiVars.rdi;
+    tfvars.rdi_connect_cluster_admin = rdiVars.rdi_connect_cluster_admin;
+    tfvars.rdi_connect_sql = rdiVars.rdi_connect_sql;
   } else {
     const clusters = normalizeClusters({ ...input, mode: "gke" });
     const prefix = `${input.name}-${input.env || "default"}`;
@@ -1088,6 +1252,9 @@ variable "cloud_sql_instances" {
     tfvars.pubsub_topics = buildPubsub(input, prefix);
     tfvars.bigquery_datasets = buildBigquery(input, prefix);
     tfvars.cloud_sql_instances = buildCloudSql(input, prefix);
+    const rdiVars = buildRdi(input, prefix, "gke");
+    tfvars.rdi_enabled = rdiVars.rdi_enabled;
+    tfvars.rdi = rdiVars.rdi;
   }
 
   const tfvarsBody = Object.entries(tfvars)

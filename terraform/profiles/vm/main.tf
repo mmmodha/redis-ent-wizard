@@ -156,6 +156,34 @@ module "app_vm" {
   )
 }
 
+module "rdi_vm" {
+  source = "../../modules/rdi-vm"
+  count  = var.rdi_enabled ? 1 : 0
+
+  name_prefix        = local.name_prefix
+  youremail          = var.youremail
+  skip_deletion      = var.skip_deletion
+  region_name        = var.region_name
+  region_zones       = var.region_zones
+  machine_type       = var.rdi.machine_type
+  rdi_version        = var.rdi.version
+  public_subnet_name = module.network.public_subnet_name
+  ssh_public_key     = var.ssh_public_key
+  scripts_path       = local.scripts_path
+  dns_managed_zone   = var.dns_managed_zone
+  dns_zone_dns_name  = var.dns_zone_dns_name
+  oauth_scopes       = local.app_vm_scopes
+  pipeline_config    = var.rdi.pipeline_config
+  # Static env plus apply-time refs: target cluster admin password (from re_vm)
+  # and Cloud SQL source host/password (from the cloudsql module).
+  injected_env = merge(
+    var.rdi.env,
+    { for k, idx in var.rdi_connect_cluster_admin : k => module.re_vm[idx].admin_password },
+    { for slug, inst in var.rdi_connect_sql : "SQL_${slug}_HOST" => module.cloudsql.hosts[inst] },
+    { for slug, inst in var.rdi_connect_sql : "SQL_${slug}_PASSWORD" => module.cloudsql.passwords[inst] },
+  )
+}
+
 module "app_workload" {
   source   = "../../modules/app-workload"
   for_each = { for a in var.applications : a.name => a }
@@ -239,6 +267,21 @@ resource "google_compute_firewall" "app_workload_extra" {
   }
 
   target_tags   = ["app-extra"]
+  source_ranges = ["0.0.0.0/0"]
+}
+
+# Expose the RDI runtime's management/UI ports on the dedicated RDI VM.
+resource "google_compute_firewall" "rdi" {
+  count   = var.rdi_enabled ? 1 : 0
+  name    = "${local.name_prefix}-fw-rdi"
+  network = module.network.vpc_name
+
+  allow {
+    protocol = "tcp"
+    ports    = ["443", "8080"]
+  }
+
+  target_tags   = ["rdi"]
   source_ranges = ["0.0.0.0/0"]
 }
 
@@ -453,6 +496,15 @@ output "bigquery_datasets" {
 
 output "cloud_sql_instances" {
   value = module.cloudsql.instances
+}
+
+output "rdi" {
+  value = var.rdi_enabled ? {
+    name       = var.rdi.name
+    ip         = module.rdi_vm[0].rdi_ip
+    dns        = module.rdi_vm[0].rdi_dns
+    how_to_ssh = module.rdi_vm[0].how_to_ssh
+  } : null
 }
 
 output "deployment_mode" {

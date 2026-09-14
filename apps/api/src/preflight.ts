@@ -22,6 +22,7 @@ import { bucketFullName, normalizeStorageBuckets } from "./storage.js";
 import { normalizePubsub } from "./pubsub.js";
 import { normalizeBigquery } from "./bigquery.js";
 import { normalizeCloudSql } from "./cloudsql.js";
+import { normalizeRdi } from "./rdi.js";
 import { capacityFor } from "./databases.js";
 import { clusterTrialShardGate } from "./trial-shards.js";
 import { LOCAL_SSD_GIB, maxLocalSsdsForMachineType } from "./nvme.js";
@@ -1178,6 +1179,52 @@ export async function preflight(
         }
       } catch (err) {
         checks.push(warn("cloudsql_iam", "Cloud SQL IAM", `Could not verify: ${errorText(err)}`));
+      }
+    }
+  }
+
+  // 12k. RDI (Redis Data Integration)
+  {
+    let rdi: ReturnType<typeof normalizeRdi> = null;
+    try {
+      rdi = normalizeRdi(input);
+    } catch (err) {
+      checks.push(fail("rdi", "RDI", err instanceof Error ? err.message : String(err)));
+    }
+    if (rdi) {
+      const problems: string[] = [];
+      const dbNames = new Set<string>();
+      (Array.isArray(input.clusters) ? input.clusters : []).forEach((c) =>
+        (c.databases || []).forEach((d) => dbNames.add(d.name)),
+      );
+      const sqlNames = new Set<string>((input.cloud_sql_instances || []).map((s) => s.name));
+
+      if (rdi.target && !dbNames.has(rdi.target)) {
+        problems.push(`RDI target → unknown database "${rdi.target}"`);
+      }
+      for (const p of rdi.pipelines) {
+        if (!sqlNames.has(p.source)) problems.push(`RDI pipeline → unknown Cloud SQL source "${p.source}"`);
+      }
+
+      if (problems.length) {
+        checks.push(fail("rdi", "RDI", problems.join("; ")));
+      } else if (!rdi.target) {
+        checks.push(
+          warn("rdi", "RDI", "No target Redis database wired — RDI will deploy but start no pipeline"),
+        );
+      } else if (rdi.pipelines.length === 0) {
+        checks.push(
+          warn("rdi", "RDI", "No Cloud SQL source wired — RDI will deploy but start no pipeline"),
+        );
+      } else {
+        const sources = rdi.pipelines.map((p) => p.source).join(", ");
+        checks.push(
+          pass(
+            "rdi",
+            "RDI",
+            `Target "${rdi.target}", ${rdi.pipelines.length} pipeline(s) [${sources}]; CDC will be enabled on the source(s)`,
+          ),
+        );
       }
     }
   }

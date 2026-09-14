@@ -395,6 +395,11 @@ export default function InstanceDetailPage() {
     ? (inst!.endpoints!.cloud_sql_instances as Array<Record<string, unknown>>)
     : [];
   const showCloudSqlPanel = cloudSqlInstances.length > 0;
+  const rdiInfo =
+    inst?.endpoints?.rdi && typeof inst.endpoints.rdi === "object"
+      ? (inst.endpoints.rdi as Record<string, unknown>)
+      : null;
+  const showRdiPanel = Boolean(rdiInfo && rdiInfo.name);
   const dbStatusColor = (status: string) => statusToneColor(status);
   const showDbPanel = databases.length > 0 || licenses.length > 0 || configuredDbCount > 0;
   const showAppPanel = vmWorkloads.length > 0 || gkeAppServices.length > 0 || configuredAppCount > 0;
@@ -889,6 +894,37 @@ export default function InstanceDetailPage() {
                         </div>
                       );
                     })}
+                  </div>
+                </div>
+              ) : null}
+
+              {showRdiPanel ? (
+                <div className="access-section">
+                  <h3>Redis Data Integration</h3>
+                  <div className="summary-grid">
+                    <div className="summary-row">
+                      <div className="summary-label">
+                        {String(rdiInfo!.name)}
+                        {rdiInfo!.namespace ? <div className="hint">ns: {String(rdiInfo!.namespace)}</div> : null}
+                      </div>
+                      <div className="summary-value">
+                        {rdiInfo!.dns || rdiInfo!.ip ? (
+                          <span className="db-endpoint-row">
+                            <span className="mono">{String(rdiInfo!.dns || rdiInfo!.ip)}</span>
+                            <button
+                              type="button"
+                              className="btn btn-copy"
+                              onClick={() => copyEndpoint(String(rdiInfo!.dns || rdiInfo!.ip))}
+                              title="Copy RDI host to clipboard"
+                            >
+                              {copied === String(rdiInfo!.dns || rdiInfo!.ip) ? "Copied" : "Copy"}
+                            </button>
+                          </span>
+                        ) : (
+                          <span className="hint">deployed on the GKE cluster</span>
+                        )}
+                      </div>
+                    </div>
                   </div>
                 </div>
               ) : null}

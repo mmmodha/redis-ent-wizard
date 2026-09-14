@@ -156,3 +156,29 @@ variable "cloud_sql_instances" {
   description = "Cloud SQL instances provisioned for this deployment."
   default     = []
 }
+
+variable "rdi_enabled" {
+  type        = bool
+  description = "Deploy the Redis Data Integration runtime (Helm)."
+  default     = false
+}
+
+variable "rdi" {
+  type = object({
+    name            = string
+    machine_type    = string
+    version         = string
+    chart_version   = string
+    env             = map(string)
+    pipeline_config = string
+  })
+  description = "RDI runtime + rendered pipeline config."
+  default = {
+    name            = ""
+    machine_type    = ""
+    version         = ""
+    chart_version   = ""
+    env             = {}
+    pipeline_config = ""
+  }
+}

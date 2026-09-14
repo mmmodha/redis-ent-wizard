@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { buildVmRegistry, resolveVmConnections, resolveGkeConnections } from "./workspace.js";
+import { buildCloudSql, buildRdi, buildVmRegistry, resolveVmConnections, resolveGkeConnections } from "./workspace.js";
 import { normalizeClusters } from "./clusters.js";
+import { withRdiInternalDatabases } from "./rdi.js";
 import type { CreateInstanceInput } from "./types.js";
 
 const baseInput = (): CreateInstanceInput => ({
@@ -126,5 +127,51 @@ describe("resolveGkeConnections", () => {
         "REDIS_CACHE_ADMIN_PASSWORD:demo-default-cache-rec:password",
       ],
     );
+  });
+});
+
+describe("buildRdi", () => {
+  const rdiInput = (): CreateInstanceInput => {
+    const input = {
+      ...baseInput(),
+      app: 0,
+      clusters: [
+        {
+          name: "cache",
+          nodes: 3,
+          databases: [{ name: "target", memory_gb: 1, port: 12000, password: "userpw" }],
+        },
+      ],
+      applications: [],
+      rdi: { name: "ingest", target: "target", pipelines: [{ source: "orders" }] },
+    } as unknown as CreateInstanceInput;
+    // The create handler synthesizes the state DB before workspace generation.
+    return withRdiInternalDatabases(input);
+  };
+
+  it("builds the VM RDI env bundle with static + apply-time refs", () => {
+    const rdi = buildRdi(rdiInput(), "demo-default", "vm");
+    assert.equal(rdi.rdi_enabled, true);
+    assert.equal(rdi.rdi.name, "demo-default-ingest");
+    const env = rdi.rdi.env as Record<string, string>;
+    // Target endpoint + user-set password are static; admin user static, admin password apply-time.
+    assert.equal(env.RDI_TARGET_HOST, "redis-12000.cluster.demo-default-cache.demo.redislabs.com");
+    assert.equal(env.RDI_TARGET_PORT, "12000");
+    assert.equal(env.RDI_TARGET_PASSWORD, "userpw");
+    assert.equal(env.RDI_REDIS_ADMIN_USER, "admin@redis.io");
+    assert.deepEqual(rdi.rdi_connect_cluster_admin, { RDI_REDIS_ADMIN_PASSWORD: 0 });
+    // State DB endpoint present with its generated password.
+    assert.equal(env.RDI_STATE_HOST, "redis-13000.cluster.demo-default-cache.demo.redislabs.com");
+    assert.ok(env.RDI_STATE_PASSWORD && env.RDI_STATE_PASSWORD.length > 0);
+    // Source static parts inline; host/password apply-time via the ref map.
+    assert.equal(env.SQL_ORDERS_DB, "appdb");
+    assert.equal(env.SQL_ORDERS_HOST, undefined);
+    assert.deepEqual(rdi.rdi_connect_sql, { ORDERS: "demo-default-orders" });
+  });
+
+  it("enables CDC on Cloud SQL instances used as RDI sources", () => {
+    const sql = buildCloudSql(rdiInput(), "demo-default");
+    const orders = sql.find((s) => s.name === "demo-default-orders")!;
+    assert.equal(orders.cdc_enabled, true);
   });
 });

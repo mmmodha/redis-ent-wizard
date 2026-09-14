@@ -28,6 +28,7 @@ import {
 import { normalizeApplications, resolveApplicationArtifacts } from "./applications.js";
 import { probeHealth } from "./health.js";
 import { writeInstanceWorkspace } from "./workspace.js";
+import { withRdiInternalDatabases } from "./rdi.js";
 import { computeProgress, progressExtrasFromConfig } from "./progress.js";
 import { preflight } from "./preflight.js";
 import { clusterTrialShardGate } from "./trial-shards.js";
@@ -146,6 +147,27 @@ const bigquerySchema = z.object({
   access: z.enum(["read", "readwrite"]).optional(),
 });
 
+const rdiTableSchema = z.object({
+  table: z.string().min(1).max(128),
+  key_prefix: z.string().max(128).optional(),
+});
+
+const rdiPipelineSchema = z.object({
+  source: z.string().min(1).max(40),
+  tables: z.array(rdiTableSchema).max(100).optional(),
+});
+
+const rdiSchema = z.object({
+  name: z
+    .string()
+    .min(1)
+    .max(40)
+    .regex(/^[a-z][a-z0-9-]*$/, "RDI name must be lowercase alphanumeric/hyphen"),
+  machine_type: z.string().max(60).optional(),
+  target: z.string().max(40).optional(),
+  pipelines: z.array(rdiPipelineSchema).max(8).optional(),
+});
+
 const pubsubSchema = z.object({
   name: z
     .string()
@@ -230,6 +252,7 @@ const createSchema = z.object({
   pubsub_topics: z.array(pubsubSchema).max(8).optional(),
   bigquery_datasets: z.array(bigquerySchema).max(8).optional(),
   cloud_sql_instances: z.array(cloudSqlSchema).max(8).optional(),
+  rdi: rdiSchema.optional(),
   vms_connect: z
     .object({
       clusters: z.array(z.string().max(40)).max(3).optional(),
@@ -861,6 +884,12 @@ app.post("/instances", async (req, reply) => {
     } catch (err) {
       return reply.code(400).send({ error: err instanceof Error ? err.message : String(err) });
     }
+  }
+
+  // Synthesize the RDI pipeline-state database (once, persisted) so it flows
+  // into both workspace generation and post-bootstrap database creation.
+  if (input.rdi) {
+    Object.assign(input, withRdiInternalDatabases(input));
   }
 
   const workDir = instanceDir(id);

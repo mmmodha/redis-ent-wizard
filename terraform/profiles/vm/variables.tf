@@ -270,6 +270,44 @@ variable "cloud_sql_instances" {
   default     = []
 }
 
+variable "rdi_enabled" {
+  type        = bool
+  description = "Deploy the Redis Data Integration runtime."
+  default     = false
+}
+
+variable "rdi" {
+  type = object({
+    name            = string
+    machine_type    = string
+    version         = string
+    chart_version   = string
+    env             = map(string)
+    pipeline_config = string
+  })
+  description = "RDI runtime + rendered pipeline config."
+  default = {
+    name            = ""
+    machine_type    = ""
+    version         = ""
+    chart_version   = ""
+    env             = {}
+    pipeline_config = ""
+  }
+}
+
+variable "rdi_connect_cluster_admin" {
+  type        = map(number)
+  description = "RDI env-var name -> re_vm cluster index for the apply-time admin password."
+  default     = {}
+}
+
+variable "rdi_connect_sql" {
+  type        = map(string)
+  description = "RDI Cloud SQL source slug -> instance full name for apply-time host/password."
+  default     = {}
+}
+
 variable "app_connect_sql" {
   type        = map(string)
   description = "Set-of-VMs: SQL env-var slug -> Cloud SQL instance name for injected HOST/PASSWORD."
