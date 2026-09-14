@@ -21,6 +21,7 @@ import { normalizeApplications } from "./applications.js";
 import { bucketFullName, normalizeStorageBuckets } from "./storage.js";
 import { normalizePubsub } from "./pubsub.js";
 import { normalizeBigquery } from "./bigquery.js";
+import { normalizeCloudSql } from "./cloudsql.js";
 import { capacityFor } from "./databases.js";
 import { clusterTrialShardGate } from "./trial-shards.js";
 import { LOCAL_SSD_GIB, maxLocalSsdsForMachineType } from "./nvme.js";
@@ -865,6 +866,7 @@ export async function preflight(
     const bucketNames = new Set<string>((input.storage_buckets || []).map((b) => b.name));
     const topicNames = new Set<string>((input.pubsub_topics || []).map((t) => t.name));
     const datasetNames = new Set<string>((input.bigquery_datasets || []).map((d) => d.name));
+    const sqlNames = new Set<string>((input.cloud_sql_instances || []).map((d) => d.name));
     let connApps: ReturnType<typeof normalizeApplications> = [];
     try {
       connApps = normalizeApplications({ mode, applications: input.applications });
@@ -885,6 +887,7 @@ export async function preflight(
         connectStorage?: string[];
         connectPubsub?: string[];
         connectBigquery?: string[];
+        connectSql?: string[];
       },
       self: { app?: string; isVmsGroup?: boolean },
     ) => {
@@ -898,6 +901,8 @@ export async function preflight(
         if (!topicNames.has(p)) problems.push(`${label} → unknown Pub/Sub topic "${p}"`);
       for (const d of sel.connectBigquery || [])
         if (!datasetNames.has(d)) problems.push(`${label} → unknown BigQuery dataset "${d}"`);
+      for (const s of sel.connectSql || [])
+        if (!sqlNames.has(s)) problems.push(`${label} → unknown Cloud SQL instance "${s}"`);
       for (const a of sel.connectApps || []) {
         if (self.app && a === self.app) problems.push(`${label} cannot connect to itself`);
         else if (!appNames.has(a) && appCount === 0)
@@ -930,6 +935,7 @@ export async function preflight(
           connectStorage: input.vms_connect.storage,
           connectPubsub: input.vms_connect.pubsub,
           connectBigquery: input.vms_connect.bigquery,
+          connectSql: input.vms_connect.sql,
         },
         { isVmsGroup: true },
       );
@@ -944,7 +950,8 @@ export async function preflight(
             a.connectApps?.length ||
             a.connectStorage?.length ||
             a.connectPubsub?.length ||
-            a.connectBigquery?.length) ??
+            a.connectBigquery?.length ||
+            a.connectSql?.length) ??
           0,
       ) ||
       Boolean(
@@ -955,7 +962,8 @@ export async function preflight(
             input.vms_connect.apps?.length ||
             input.vms_connect.storage?.length ||
             input.vms_connect.pubsub?.length ||
-            input.vms_connect.bigquery?.length),
+            input.vms_connect.bigquery?.length ||
+            input.vms_connect.sql?.length),
       );
     if (problems.length) {
       checks.push(fail("connections", "Component connections", problems.join("; ")));
@@ -1107,6 +1115,69 @@ export async function preflight(
         }
       } catch (err) {
         checks.push(warn("bigquery_iam", "BigQuery IAM", `Could not verify: ${errorText(err)}`));
+      }
+    }
+  }
+
+  // 12j. Cloud SQL instances
+  {
+    let instances: ReturnType<typeof normalizeCloudSql> = [];
+    try {
+      instances = normalizeCloudSql(input);
+    } catch (err) {
+      checks.push(fail("cloudsql", "Cloud SQL", err instanceof Error ? err.message : String(err)));
+    }
+    if (instances.length) {
+      const connected = new Set<string>();
+      for (const a of input.applications || [])
+        for (const s of a.connectSql || []) connected.add(String(s));
+      for (const s of input.vms_connect?.sql || []) connected.add(String(s));
+      const anyPrivate = instances.some((i) => i.connectivity === "private");
+
+      try {
+        const enabled = await listEnabledServices(credentialsFile, project);
+        if (!enabled.includes("sqladmin.googleapis.com")) {
+          checks.push(fail("cloudsql_api", "Cloud SQL API", "Not enabled: sqladmin.googleapis.com"));
+        }
+        if (anyPrivate && !enabled.includes("servicenetworking.googleapis.com")) {
+          checks.push(
+            fail(
+              "cloudsql_psa",
+              "Service Networking API",
+              "Not enabled: servicenetworking.googleapis.com — required for a Private IP Cloud SQL instance",
+            ),
+          );
+        }
+      } catch {
+        /* covered by the APIs check */
+      }
+
+      try {
+        const perms = connected.size
+          ? ["cloudsql.instances.create", "resourcemanager.projects.setIamPolicy"]
+          : ["cloudsql.instances.create"];
+        const granted = await testIamPermissions(credentialsFile, project, perms);
+        const missing = perms.filter((p) => !granted.includes(p));
+        if (missing.length) {
+          checks.push(
+            fail(
+              "cloudsql_iam",
+              "Cloud SQL IAM",
+              `Missing ${missing.join(", ")} — grant roles/cloudsql.admin (+ project IAM admin for the client role)`,
+            ),
+          );
+        } else {
+          const modes = [...new Set(instances.map((i) => i.connectivity))].join(", ");
+          checks.push(
+            pass(
+              "cloudsql",
+              "Cloud SQL",
+              `${instances.length} instance(s) [${modes}], ${connected.size} connected to a consumer`,
+            ),
+          );
+        }
+      } catch (err) {
+        checks.push(warn("cloudsql_iam", "Cloud SQL IAM", `Could not verify: ${errorText(err)}`));
       }
     }
   }

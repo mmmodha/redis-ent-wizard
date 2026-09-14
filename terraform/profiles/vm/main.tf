@@ -70,6 +70,16 @@ module "bigquery" {
   youremail        = var.youremail
 }
 
+module "cloudsql" {
+  source = "../../modules/cloudsql"
+
+  instances        = var.cloud_sql_instances
+  region           = var.region_name
+  vpc_id           = module.network.vpc_id
+  compute_sa_email = local.compute_sa
+  youremail        = var.youremail
+}
+
 module "network" {
   source = "../../modules/network"
 
@@ -141,6 +151,8 @@ module "app_vm" {
     var.app_injected_env,
     { for k, idx in var.app_connect_cluster_admin : k => module.re_vm[idx].admin_password },
     { for k, lbname in var.app_connect_lb : k => "${google_compute_address.lb[lbname].address}:${local.lb_by_name[lbname].ports[0]}" },
+    { for slug, inst in var.app_connect_sql : "SQL_${slug}_HOST" => module.cloudsql.hosts[inst] },
+    { for slug, inst in var.app_connect_sql : "SQL_${slug}_PASSWORD" => module.cloudsql.passwords[inst] },
   )
 }
 
@@ -177,6 +189,8 @@ module "app_workload" {
     each.value.env,
     { for k, idx in each.value.connect_cluster_admin : k => module.re_vm[idx].admin_password },
     { for k, lbname in each.value.connect_lb : k => "${google_compute_address.lb[lbname].address}:${local.lb_by_name[lbname].ports[0]}" },
+    { for slug, inst in each.value.connect_sql : "SQL_${slug}_HOST" => module.cloudsql.hosts[inst] },
+    { for slug, inst in each.value.connect_sql : "SQL_${slug}_PASSWORD" => module.cloudsql.passwords[inst] },
   )
   expose_http  = each.value.expose_http
   expose_https = each.value.expose_https
@@ -435,6 +449,10 @@ output "pubsub_topics" {
 
 output "bigquery_datasets" {
   value = module.bigquery.datasets
+}
+
+output "cloud_sql_instances" {
+  value = module.cloudsql.instances
 }
 
 output "deployment_mode" {

@@ -12,7 +12,8 @@ export type IconName =
   | "gke"
   | "storage"
   | "pubsub"
-  | "bigquery";
+  | "bigquery"
+  | "cloudsql";
 
 export function BrandIcon({ name, size = 18 }: { name: IconName; size?: number }) {
   return (

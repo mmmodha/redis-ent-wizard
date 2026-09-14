@@ -15,6 +15,7 @@ import {
   type DatabaseData,
   type DesignNodeData,
   type BigqueryData,
+  type CloudSqlData,
   type LoadBalancerData,
   type PubsubData,
   type StorageData,
@@ -91,6 +92,7 @@ export function NodeDialog({
     storage: "Cloud Storage bucket",
     pubsub: "Pub/Sub topic",
     bigquery: "BigQuery dataset",
+    cloudsql: "Cloud SQL instance",
   };
 
   return (
@@ -186,9 +188,19 @@ export function NodeDialog({
             <BigqueryForm data={draft as BigqueryData} set={set} probeZone={probeZone} />
           ) : null}
 
-          {["cluster", "database", "vms", "application", "loadbalancer", "storage", "pubsub", "bigquery"].includes(
-            target.type,
-          ) ? (
+          {target.type === "cloudsql" ? <CloudSqlForm data={draft as CloudSqlData} set={set} /> : null}
+
+          {[
+            "cluster",
+            "database",
+            "vms",
+            "application",
+            "loadbalancer",
+            "storage",
+            "pubsub",
+            "bigquery",
+            "cloudsql",
+          ].includes(target.type) ? (
             <ExposesNote
               kind={target.type as NodeKind}
               name={target.type === "vms" ? "app" : String((draft as { name?: string }).name || "").trim()}
@@ -1215,6 +1227,60 @@ function BigqueryForm({
           <option value="read">Read-only (dataViewer)</option>
         </select>
         <span className="hint">Connected components also get project-level bigquery.jobUser to run queries.</span>
+      </label>
+    </div>
+  );
+}
+
+function CloudSqlForm({
+  data,
+  set,
+}: {
+  data: CloudSqlData;
+  set: <T extends DesignNodeData>(p: Partial<T>) => void;
+}) {
+  return (
+    <div className="grid">
+      <label>
+        Instance name
+        <input
+          value={data.name}
+          onChange={(e) => set<CloudSqlData>({ name: e.target.value.slice(0, 40) })}
+          placeholder="orders"
+        />
+        <span className="hint">The instance is prefixed with the deployment name.</span>
+      </label>
+      <label>
+        Engine
+        <select value={data.engine} onChange={(e) => set<CloudSqlData>({ engine: e.target.value as CloudSqlData["engine"] })}>
+          <option value="postgres">PostgreSQL 15</option>
+          <option value="mysql">MySQL 8.0</option>
+        </select>
+      </label>
+      <label>
+        Machine tier
+        <input value={data.tier} onChange={(e) => set<CloudSqlData>({ tier: e.target.value })} placeholder="db-f1-micro" />
+      </label>
+      <label>
+        Connectivity
+        <select
+          value={data.connectivity}
+          onChange={(e) => set<CloudSqlData>({ connectivity: e.target.value as CloudSqlData["connectivity"] })}
+        >
+          <option value="private">Private IP (VPC peering)</option>
+          <option value="proxy">Public IP + Auth Proxy</option>
+          <option value="public">Public IP + open networks</option>
+        </select>
+        <span className="hint">Private keeps the instance off the internet; peering is added to the VPC.</span>
+      </label>
+      <label>
+        Database name
+        <input value={data.db_name} onChange={(e) => set<CloudSqlData>({ db_name: e.target.value })} placeholder="appdb" />
+      </label>
+      <label>
+        Database user
+        <input value={data.db_user} onChange={(e) => set<CloudSqlData>({ db_user: e.target.value })} placeholder="appuser" />
+        <span className="hint">Password is auto-generated and injected into connected components.</span>
       </label>
     </div>
   );

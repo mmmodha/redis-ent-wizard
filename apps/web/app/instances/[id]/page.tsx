@@ -391,6 +391,10 @@ export default function InstanceDetailPage() {
     ? (inst!.endpoints!.bigquery_datasets as Array<Record<string, unknown>>)
     : [];
   const showBigqueryPanel = bigqueryDatasets.length > 0;
+  const cloudSqlInstances = Array.isArray(inst?.endpoints?.cloud_sql_instances)
+    ? (inst!.endpoints!.cloud_sql_instances as Array<Record<string, unknown>>)
+    : [];
+  const showCloudSqlPanel = cloudSqlInstances.length > 0;
   const dbStatusColor = (status: string) => statusToneColor(status);
   const showDbPanel = databases.length > 0 || licenses.length > 0 || configuredDbCount > 0;
   const showAppPanel = vmWorkloads.length > 0 || gkeAppServices.length > 0 || configuredAppCount > 0;
@@ -845,6 +849,40 @@ export default function InstanceDetailPage() {
                                 title="Copy dataset id to clipboard"
                               >
                                 {copied === name ? "Copied" : "Copy"}
+                              </button>
+                            </span>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              ) : null}
+
+              {showCloudSqlPanel ? (
+                <div className="access-section">
+                  <h3>Cloud SQL</h3>
+                  <div className="summary-grid">
+                    {cloudSqlInstances.map((d, i) => {
+                      const name = String(d.name || "");
+                      const connectionName = String(d.connection_name || "");
+                      const connectivity = String(d.connectivity || "");
+                      return (
+                        <div className="summary-row" key={`sql-${name}-${i}`}>
+                          <div className="summary-label">
+                            {name}
+                            {connectivity ? <div className="hint">{connectivity}</div> : null}
+                          </div>
+                          <div className="summary-value">
+                            <span className="db-endpoint-row">
+                              <span className="mono">{connectionName || name}</span>
+                              <button
+                                type="button"
+                                className="btn btn-copy"
+                                onClick={() => copyEndpoint(connectionName || name)}
+                                title="Copy connection name to clipboard"
+                              >
+                                {copied === (connectionName || name) ? "Copied" : "Copy"}
                               </button>
                             </span>
                           </div>

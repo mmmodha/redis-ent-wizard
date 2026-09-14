@@ -6,6 +6,7 @@ import { clusterNamePrefix, normalizeClusters } from "./clusters.js";
 import { bucketFullName, bucketGrantRole, normalizeStorageBuckets } from "./storage.js";
 import { grantsPublisher, grantsSubscriber, normalizePubsub, topicFullName } from "./pubsub.js";
 import { datasetFullId, datasetGrantRole, normalizeBigquery } from "./bigquery.js";
+import { normalizeCloudSql, sqlDatabaseVersion, sqlInstanceFullName, sqlPort } from "./cloudsql.js";
 import { resolveGkeOperatorChart } from "./rs-releases.js";
 import type { CreateInstanceInput, DeploymentMode } from "./types.js";
 
@@ -130,6 +131,7 @@ interface ConnectSelections {
   connectStorage?: string[];
   connectPubsub?: string[];
   connectBigquery?: string[];
+  connectSql?: string[];
 }
 
 /** Static Pub/Sub env values (global, identical for VM and GKE). */
@@ -168,6 +170,31 @@ function bigqueryEnvMap(input: CreateInstanceInput, prefix: string): Map<string,
   return m;
 }
 
+/** Static Cloud SQL env values; HOST + PASSWORD are apply-time (Terraform-merged). */
+interface SqlRef {
+  db: string;
+  user: string;
+  port: number;
+  connectionName: string;
+  instanceFull: string;
+}
+function sqlEnvMap(input: CreateInstanceInput, prefix: string): Map<string, SqlRef> {
+  const project = input.project || "";
+  const region = input.region_name || "europe-west1";
+  const m = new Map<string, SqlRef>();
+  for (const s of normalizeCloudSql(input)) {
+    const instanceFull = sqlInstanceFullName(prefix, s.name);
+    m.set(s.name, {
+      db: s.db_name,
+      user: s.db_user,
+      port: sqlPort(s.engine),
+      connectionName: `${project}:${region}:${instanceFull}`,
+      instanceFull,
+    });
+  }
+  return m;
+}
+
 /** Static env plus the apply-time refs that Terraform resolves in profiles/vm. */
 interface ResolvedConnections {
   env: Record<string, string>;
@@ -175,6 +202,8 @@ interface ResolvedConnections {
   connectClusterAdmin: Record<string, number>;
   /** LB_<LB>_ENDPOINT env-var name -> load-balancer name. */
   connectLb: Record<string, string>;
+  /** SQL env-var slug -> Cloud SQL instance full name (TF fills HOST + PASSWORD). */
+  connectSql: Record<string, string>;
 }
 
 interface VmRegistry {
@@ -189,6 +218,8 @@ interface VmRegistry {
   pubsub: Map<string, PubsubRef>;
   /** Dataset slug -> static BigQuery env values. */
   bigquery: Map<string, BigqueryRef>;
+  /** Instance slug -> static Cloud SQL env values. */
+  sql: Map<string, SqlRef>;
   adminUser: string;
   vmPrefix: string;
   dnsSuffix: string;
@@ -239,6 +270,7 @@ export function buildVmRegistry(
     storageBuckets,
     pubsub: pubsubEnvMap(input, vmPrefix),
     bigquery: bigqueryEnvMap(input, vmPrefix),
+    sql: sqlEnvMap(input, vmPrefix),
     adminUser: input.RS_admin || "admin@redis.io",
     vmPrefix,
     dnsSuffix,
@@ -251,6 +283,7 @@ export function resolveVmConnections(sel: ConnectSelections, reg: VmRegistry): R
   const env: Record<string, string> = {};
   const connectClusterAdmin: Record<string, number> = {};
   const connectLb: Record<string, string> = {};
+  const connectSql: Record<string, string> = {};
 
   (sel.connectClusters || []).filter(Boolean).forEach((name, i) => {
     const host = reg.clusterHosts.get(name);
@@ -291,7 +324,19 @@ export function resolveVmConnections(sel: ConnectSelections, reg: VmRegistry): R
   injectPubsubEnv(env, sel.connectPubsub, reg.pubsub);
   injectBigqueryEnv(env, sel.connectBigquery, reg.bigquery);
 
-  return { env, connectClusterAdmin, connectLb };
+  for (const s of (sel.connectSql || []).filter(Boolean)) {
+    const ref = reg.sql.get(s);
+    if (!ref) continue;
+    const slug = envSlug(s);
+    // Static parts inline; HOST + PASSWORD are filled by Terraform from the instance.
+    env[`SQL_${slug}_DB`] = ref.db;
+    env[`SQL_${slug}_USER`] = ref.user;
+    env[`SQL_${slug}_PORT`] = String(ref.port);
+    env[`SQL_${slug}_CONNECTION_NAME`] = ref.connectionName;
+    connectSql[slug] = ref.instanceFull;
+  }
+
+  return { env, connectClusterAdmin, connectLb, connectSql };
 }
 
 /** Shared Pub/Sub env injection (VM and GKE produce identical values). */
@@ -345,6 +390,7 @@ function buildVmApplications(input: CreateInstanceInput, reg: VmRegistry): Recor
       env: { ...(app.env || {}), ...conn.env },
       connect_cluster_admin: conn.connectClusterAdmin,
       connect_lb: conn.connectLb,
+      connect_sql: conn.connectSql,
       expose_http: app.expose === "http" || app.expose === "lb",
       expose_https: app.expose === "https" || app.expose === "lb",
       requirements: app.requirements || [],
@@ -364,9 +410,32 @@ function buildVmSetConnections(input: CreateInstanceInput, reg: VmRegistry): Res
       connectStorage: vc.storage,
       connectPubsub: vc.pubsub,
       connectBigquery: vc.bigquery,
+      connectSql: vc.sql,
     },
     reg,
   );
+}
+
+/** Instance short-names that at least one consumer connects to. */
+function connectedSqlNames(input: CreateInstanceInput): Set<string> {
+  const set = new Set<string>();
+  for (const a of input.applications || []) for (const s of a.connectSql || []) set.add(String(s));
+  for (const s of input.vms_connect?.sql || []) set.add(String(s));
+  return set;
+}
+
+/** tfvars for the shared cloudsql module; grant_client set only for connected instances. */
+function buildCloudSql(input: CreateInstanceInput, prefix: string): Record<string, unknown>[] {
+  const connected = connectedSqlNames(input);
+  return normalizeCloudSql(input).map((s) => ({
+    name: sqlInstanceFullName(prefix, s.name),
+    database_version: sqlDatabaseVersion(s.engine),
+    tier: s.tier,
+    db_name: s.db_name,
+    db_user: s.db_user,
+    connectivity: s.connectivity,
+    grant_client: connected.has(s.name),
+  }));
 }
 
 /** Topic short-names that at least one consumer connects to. */
@@ -455,6 +524,7 @@ export function resolveGkeConnections(
   storageBuckets: Map<string, string> = new Map(),
   pubsub: Map<string, PubsubRef> = new Map(),
   bigquery: Map<string, BigqueryRef> = new Map(),
+  sql: Map<string, SqlRef> = new Map(),
 ): { env: Record<string, string>; secretRefs: GkeSecretRef[] } {
   const env: Record<string, string> = {};
   const secretRefs: GkeSecretRef[] = [];
@@ -515,6 +585,18 @@ export function resolveGkeConnections(
   injectPubsubEnv(env, sel.connectPubsub, pubsub);
   injectBigqueryEnv(env, sel.connectBigquery, bigquery);
 
+  // GKE gets the static Cloud SQL vars; host/password are apply-time — pods use
+  // the Cloud SQL Auth Proxy + connection name (documented, not injected here).
+  for (const s of (sel.connectSql || []).filter(Boolean)) {
+    const ref = sql.get(s);
+    if (!ref) continue;
+    const slug = envSlug(s);
+    env[`SQL_${slug}_DB`] = ref.db;
+    env[`SQL_${slug}_USER`] = ref.user;
+    env[`SQL_${slug}_PORT`] = String(ref.port);
+    env[`SQL_${slug}_CONNECTION_NAME`] = ref.connectionName;
+  }
+
   return { env, secretRefs };
 }
 
@@ -527,8 +609,9 @@ function buildGkeApplications(input: CreateInstanceInput): Record<string, unknow
   for (const b of normalizeStorageBuckets(input)) storageBuckets.set(b.name, bucketFullName(prefix, b.name));
   const pubsub = pubsubEnvMap(input, prefix);
   const bigquery = bigqueryEnvMap(input, prefix);
+  const sql = sqlEnvMap(input, prefix);
   return apps.map((app) => {
-    const conn = resolveGkeConnections(app, clusters, prefix, appNames, storageBuckets, pubsub, bigquery);
+    const conn = resolveGkeConnections(app, clusters, prefix, appNames, storageBuckets, pubsub, bigquery, sql);
     return {
       name: app.name,
       image: app.image || "",
@@ -571,9 +654,11 @@ export function vmStackModuleArguments(): string {
   storage_buckets  = var.storage_buckets
   pubsub_topics    = var.pubsub_topics
   bigquery_datasets = var.bigquery_datasets
+  cloud_sql_instances = var.cloud_sql_instances
   app_injected_env = var.app_injected_env
   app_connect_cluster_admin = var.app_connect_cluster_admin
   app_connect_lb   = var.app_connect_lb
+  app_connect_sql  = var.app_connect_sql
 `;
 }
 
@@ -643,6 +728,7 @@ ${
   storage_buckets          = var.storage_buckets
   pubsub_topics            = var.pubsub_topics
   bigquery_datasets        = var.bigquery_datasets
+  cloud_sql_instances      = var.cloud_sql_instances
 `
 }
 }
@@ -679,6 +765,7 @@ output "load_balancers" { value = module.stack.load_balancers }
 output "storage_buckets" { value = module.stack.storage_buckets }
 output "pubsub_topics" { value = module.stack.pubsub_topics }
 output "bigquery_datasets" { value = module.stack.bigquery_datasets }
+output "cloud_sql_instances" { value = module.stack.cloud_sql_instances }
 output "deployment_mode" { value = module.stack.deployment_mode }
 `
     : `
@@ -693,6 +780,7 @@ output "app_outputs_file" { value = module.stack.app_outputs_file }
 output "storage_buckets" { value = module.stack.storage_buckets }
 output "pubsub_topics" { value = module.stack.pubsub_topics }
 output "bigquery_datasets" { value = module.stack.bigquery_datasets }
+output "cloud_sql_instances" { value = module.stack.cloud_sql_instances }
 output "deployment_mode" { value = module.stack.deployment_mode }
 `
 }
@@ -754,6 +842,7 @@ variable "applications" {
     env                   = map(string)
     connect_cluster_admin = map(number)
     connect_lb            = map(string)
+    connect_sql           = map(string)
     expose_http           = bool
     expose_https          = bool
     requirements          = list(string)
@@ -778,6 +867,10 @@ variable "app_connect_cluster_admin" {
   default = {}
 }
 variable "app_connect_lb" {
+  type    = map(string)
+  default = {}
+}
+variable "app_connect_sql" {
   type    = map(string)
   default = {}
 }
@@ -807,6 +900,18 @@ variable "bigquery_datasets" {
     location      = string
     grant_role    = string
     grant_jobuser = bool
+  }))
+  default = []
+}
+variable "cloud_sql_instances" {
+  type = list(object({
+    name             = string
+    database_version = string
+    tier             = string
+    db_name          = string
+    db_user          = string
+    connectivity     = string
+    grant_client     = bool
   }))
   default = []
 }
@@ -880,6 +985,18 @@ variable "bigquery_datasets" {
   }))
   default = []
 }
+variable "cloud_sql_instances" {
+  type = list(object({
+    name             = string
+    database_version = string
+    tier             = string
+    db_name          = string
+    db_user          = string
+    connectivity     = string
+    grant_client     = bool
+  }))
+  default = []
+}
 `;
 
   const tfvars: Record<string, unknown> = {
@@ -947,6 +1064,8 @@ variable "bigquery_datasets" {
     tfvars.storage_buckets = buildStorageBuckets(input, vmPrefix);
     tfvars.pubsub_topics = buildPubsub(input, vmPrefix);
     tfvars.bigquery_datasets = buildBigquery(input, vmPrefix);
+    tfvars.cloud_sql_instances = buildCloudSql(input, vmPrefix);
+    tfvars.app_connect_sql = vmsConn.connectSql;
   } else {
     const clusters = normalizeClusters({ ...input, mode: "gke" });
     const prefix = `${input.name}-${input.env || "default"}`;
@@ -965,6 +1084,7 @@ variable "bigquery_datasets" {
     tfvars.storage_buckets = buildStorageBuckets(input, prefix);
     tfvars.pubsub_topics = buildPubsub(input, prefix);
     tfvars.bigquery_datasets = buildBigquery(input, prefix);
+    tfvars.cloud_sql_instances = buildCloudSql(input, prefix);
   }
 
   const tfvarsBody = Object.entries(tfvars)

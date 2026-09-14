@@ -48,6 +48,7 @@ function buildDiagram(): { nodes: DesignNode[]; edges: DesignEdge[] } {
     node("s1", "storage", { name: "assets", location: "", storage_class: "STANDARD", versioning: false, force_destroy: true, access: "readwrite" }, ROOT_ID),
     node("p1", "pubsub", { name: "events", create_subscription: true, role: "both" }, ROOT_ID),
     node("bq1", "bigquery", { name: "analytics", location: "", access: "readwrite" }, ROOT_ID),
+    node("sql1", "cloudsql", { name: "orders", engine: "postgres", tier: "db-f1-micro", db_name: "appdb", db_user: "appuser", connectivity: "private" }, ROOT_ID),
   ];
   const edges: DesignEdge[] = [
     { id: "e1", source: "lb1", target: "app1" }, // LB fronts the app
@@ -58,6 +59,8 @@ function buildDiagram(): { nodes: DesignNode[]; edges: DesignEdge[] } {
     { id: "e6", source: "app1", target: "s1" }, //  app consumes the storage bucket
     { id: "e7", source: "app1", target: "p1" }, //  app consumes the Pub/Sub topic
     { id: "e8", source: "app1", target: "bq1" }, // app consumes the BigQuery dataset
+    { id: "e9", source: "app1", target: "sql1" }, // app consumes the Cloud SQL instance
+    { id: "e10", source: "v1", target: "sql1" }, //  Set-of-VMs consumes the Cloud SQL instance
   ];
   return { nodes, edges };
 }
@@ -87,6 +90,11 @@ describe("diagramToCreateInput connections", () => {
     const ds = payload.bigquery_datasets.find((d: any) => d.name === "analytics");
     assert.ok(ds, "bigquery dataset present");
     assert.equal(ds.access, "readwrite");
+    assert.deepEqual(app.connectSql, ["orders"]);
+    const sql = payload.cloud_sql_instances.find((s: any) => s.name === "orders");
+    assert.ok(sql, "cloud sql instance present");
+    assert.equal(sql.engine, "postgres");
+    assert.equal(sql.connectivity, "private");
   });
 
   it("derives vms_connect for the Set-of-VMs group", () => {
@@ -94,6 +102,7 @@ describe("diagramToCreateInput connections", () => {
     const payload = diagramToCreateInput(nodes, edges, settings) as Record<string, any>;
     assert.deepEqual(payload.vms_connect.databases, ["sessions"]);
     assert.deepEqual(payload.vms_connect.load_balancers, ["front"]);
+    assert.deepEqual(payload.vms_connect.sql, ["orders"]);
     assert.equal(payload.app, 2);
   });
 
@@ -108,10 +117,13 @@ describe("diagramToCreateInput connections", () => {
     assert.deepEqual(app.connectStorage, ["assets"]);
     assert.deepEqual(app.connectPubsub, ["events"]);
     assert.deepEqual(app.connectBigquery, ["analytics"]);
+    assert.deepEqual(app.connectSql, ["orders"]);
     assert.deepEqual(again.vms_connect.databases, ["sessions"]);
+    assert.deepEqual(again.vms_connect.sql, ["orders"]);
     assert.equal((again.storage_buckets as any[]).length, 1);
     assert.equal((again.pubsub_topics as any[]).length, 1);
     assert.equal((again.bigquery_datasets as any[]).length, 1);
+    assert.equal((again.cloud_sql_instances as any[]).length, 1);
   });
 });
 
@@ -144,6 +156,17 @@ describe("exposedVariables", () => {
     assert.deepEqual(
       exposedVariables("bigquery", "analytics").map((v) => v.name),
       ["BIGQUERY_ANALYTICS_DATASET", "BIGQUERY_ANALYTICS_PROJECT", "BIGQUERY_ANALYTICS_LOCATION"],
+    );
+    assert.deepEqual(
+      exposedVariables("cloudsql", "orders").map((v) => v.name),
+      [
+        "SQL_ORDERS_HOST",
+        "SQL_ORDERS_PORT",
+        "SQL_ORDERS_DB",
+        "SQL_ORDERS_USER",
+        "SQL_ORDERS_PASSWORD",
+        "SQL_ORDERS_CONNECTION_NAME",
+      ],
     );
   });
 });

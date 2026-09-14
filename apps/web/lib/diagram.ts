@@ -16,7 +16,8 @@ export type NodeKind =
   | "loadbalancer"
   | "storage"
   | "pubsub"
-  | "bigquery";
+  | "bigquery"
+  | "cloudsql";
 
 export type RootData = {
   kind: "network" | "gke";
@@ -132,6 +133,17 @@ export type BigqueryData = {
   [k: string]: unknown;
 };
 
+export type CloudSqlData = {
+  kind: "cloudsql";
+  name: string;
+  engine: "postgres" | "mysql";
+  tier: string;
+  db_name: string;
+  db_user: string;
+  connectivity: "private" | "proxy" | "public";
+  [k: string]: unknown;
+};
+
 export type DesignNodeData =
   | RootData
   | ClusterData
@@ -141,7 +153,8 @@ export type DesignNodeData =
   | LoadBalancerData
   | StorageData
   | PubsubData
-  | BigqueryData;
+  | BigqueryData
+  | CloudSqlData;
 
 export type DesignNode = Node<DesignNodeData>;
 export type DesignEdge = Edge;
@@ -261,6 +274,9 @@ function isPubsub(n: DesignNode): n is Node<PubsubData> {
 function isBigquery(n: DesignNode): n is Node<BigqueryData> {
   return n.data.kind === "bigquery";
 }
+function isCloudSql(n: DesignNode): n is Node<CloudSqlData> {
+  return n.data.kind === "cloudsql";
+}
 
 /** Human-facing name for a cluster node, used for edge connect references. */
 export function clusterName(node: Node<ClusterData>, index: number): string {
@@ -346,6 +362,15 @@ export function exposedVariables(
         { name: `BIGQUERY_${s}_PROJECT`, description: "GCP project id" },
         { name: `BIGQUERY_${s}_LOCATION`, description: "Dataset location" },
       ];
+    case "cloudsql":
+      return [
+        { name: `SQL_${s}_HOST`, description: "Instance IP" },
+        { name: `SQL_${s}_PORT`, description: "Database port" },
+        { name: `SQL_${s}_DB`, description: "Database name" },
+        { name: `SQL_${s}_USER`, description: "Database user" },
+        { name: `SQL_${s}_PASSWORD`, description: "Database password (auto-generated)" },
+        { name: `SQL_${s}_CONNECTION_NAME`, description: "Cloud SQL connection name" },
+      ];
     case "application":
     case "vms":
       return [{ name: `${s}_HOST`, description: "Component hostname" }];
@@ -371,6 +396,7 @@ export function diagramToCreateInput(
   const storageNodes = nodes.filter(isStorage);
   const pubsubNodes = nodes.filter(isPubsub);
   const bigqueryNodes = nodes.filter(isBigquery);
+  const cloudsqlNodes = nodes.filter(isCloudSql);
 
   const clusterNameById = new Map<string, string>();
   clusters.forEach((c, i) => clusterNameById.set(c.id, clusterName(c, i)));
@@ -385,6 +411,8 @@ export function diagramToCreateInput(
   pubsubNodes.forEach((p) => pubsubNameById.set(p.id, p.data.name.trim() || "topic"));
   const bigqueryNameById = new Map<string, string>();
   bigqueryNodes.forEach((b) => bigqueryNameById.set(b.id, b.data.name.trim() || "dataset"));
+  const cloudsqlNameById = new Map<string, string>();
+  cloudsqlNodes.forEach((s) => cloudsqlNameById.set(s.id, s.data.name.trim() || "sql"));
   const hostNameById = new Map<string, string>();
   apps.forEach((a) => hostNameById.set(a.id, a.data.name.trim() || "app"));
   vmsNodes.forEach((v) => hostNameById.set(v.id, "app"));
@@ -460,6 +488,9 @@ export function diagramToCreateInput(
     const connectBigquery = uniq(
       outgoing.filter((e) => bigqueryNameById.has(e.target)).map((e) => bigqueryNameById.get(e.target) as string),
     );
+    const connectSql = uniq(
+      outgoing.filter((e) => cloudsqlNameById.has(e.target)).map((e) => cloudsqlNameById.get(e.target) as string),
+    );
     const common: Record<string, unknown> = {
       name: a.data.name.trim() || "app",
     };
@@ -475,6 +506,7 @@ export function diagramToCreateInput(
     if (connectStorage.length) common.connectStorage = connectStorage;
     if (connectPubsub.length) common.connectPubsub = connectPubsub;
     if (connectBigquery.length) common.connectBigquery = connectBigquery;
+    if (connectSql.length) common.connectSql = connectSql;
     if (settings.mode === "vm") {
       Object.assign(common, {
         artifact: {
@@ -541,6 +573,16 @@ export function diagramToCreateInput(
     access: b.data.access,
   }));
   if (bigqueryDatasets.length) base.bigquery_datasets = bigqueryDatasets;
+
+  const cloudSqlInstances = cloudsqlNodes.map((s) => ({
+    name: s.data.name.trim() || "sql",
+    engine: s.data.engine,
+    tier: s.data.tier.trim() || undefined,
+    db_name: s.data.db_name.trim() || undefined,
+    db_user: s.data.db_user.trim() || undefined,
+    connectivity: s.data.connectivity,
+  }));
+  if (cloudSqlInstances.length) base.cloud_sql_instances = cloudSqlInstances;
 
   if (settings.mode === "vm") {
     const clusterNodes = clusters;
@@ -615,6 +657,9 @@ export function diagramToCreateInput(
       bigquery: uniq(
         vmsOutgoing.filter((e) => bigqueryNameById.has(e.target)).map((e) => bigqueryNameById.get(e.target) as string),
       ),
+      sql: uniq(
+        vmsOutgoing.filter((e) => cloudsqlNameById.has(e.target)).map((e) => cloudsqlNameById.get(e.target) as string),
+      ),
     };
 
     Object.assign(base, {
@@ -666,7 +711,8 @@ export function diagramToCreateInput(
       vmsConnect.apps.length ||
       vmsConnect.storage.length ||
       vmsConnect.pubsub.length ||
-      vmsConnect.bigquery.length
+      vmsConnect.bigquery.length ||
+      vmsConnect.sql.length
     ) {
       base.vms_connect = vmsConnect;
     }
@@ -720,6 +766,7 @@ export const NODE_SIZE: Record<string, { width: number; height: number }> = {
   storage: { width: 232, height: 120 },
   pubsub: { width: 232, height: 120 },
   bigquery: { width: 232, height: 120 },
+  cloudsql: { width: 232, height: 120 },
 };
 
 /** Initial style for a freshly dropped node, if the kind has a preset size. */
@@ -882,6 +929,7 @@ type StoredAppCfg = {
   connectStorage?: unknown[];
   connectPubsub?: unknown[];
   connectBigquery?: unknown[];
+  connectSql?: unknown[];
   requirements?: unknown[];
   artifact?: { kind?: string; ref?: string; type?: string; branch?: string; runInDocker?: boolean };
   vm_count?: number;
@@ -1081,6 +1129,35 @@ export function createInputToDiagram(
     if (name) bigqueryNameToId.set(name, id);
   });
 
+  // Cloud SQL instances (both modes).
+  const cloudsqlCfgs = Array.isArray(cfg.cloud_sql_instances)
+    ? (cfg.cloud_sql_instances as Record<string, unknown>[])
+    : [];
+  const cloudsqlNameToId = new Map<string, string>();
+  cloudsqlCfgs.forEach((s, i) => {
+    const id = nextId("cloudsql");
+    const name = dstr(s.name);
+    const conn = dstr(s.connectivity);
+    nodes.push({
+      id,
+      type: "cloudsql",
+      parentId: ROOT_ID,
+      extent: "parent",
+      position: { x: 760 + i * 220, y: 460 },
+      style: { width: NODE_SIZE.cloudsql.width, height: NODE_SIZE.cloudsql.height },
+      data: {
+        kind: "cloudsql",
+        name,
+        engine: s.engine === "mysql" ? "mysql" : "postgres",
+        tier: dstr(s.tier) || "db-f1-micro",
+        db_name: dstr(s.db_name) || "appdb",
+        db_user: dstr(s.db_user) || "appuser",
+        connectivity: conn === "proxy" || conn === "public" ? conn : "private",
+      },
+    });
+    if (name) cloudsqlNameToId.set(name, id);
+  });
+
   // Custom application workloads.
   const apps = Array.isArray(cfg.applications) ? (cfg.applications as StoredAppCfg[]) : [];
   const arr = (x: unknown): string[] => (Array.isArray(x) ? x.map(String) : []);
@@ -1095,6 +1172,7 @@ export function createInputToDiagram(
       storage: string[];
       pubsub: string[];
       bigquery: string[];
+      sql: string[];
     };
   }[] = [];
   apps.forEach((a, k) => {
@@ -1143,6 +1221,7 @@ export function createInputToDiagram(
         storage: arr(a.connectStorage),
         pubsub: arr(a.connectPubsub),
         bigquery: arr(a.connectBigquery),
+        sql: arr(a.connectSql),
       },
     });
   });
@@ -1214,6 +1293,7 @@ export function createInputToDiagram(
       storage: string[];
       pubsub: string[];
       bigquery: string[];
+      sql: string[];
     },
   ) => {
     const push = (targetId: string | undefined, isLb = false) => {
@@ -1234,6 +1314,7 @@ export function createInputToDiagram(
     sel.storage.forEach((n) => push(storageNameToId.get(n)));
     sel.pubsub.forEach((n) => push(pubsubNameToId.get(n)));
     sel.bigquery.forEach((n) => push(bigqueryNameToId.get(n)));
+    sel.sql.forEach((n) => push(cloudsqlNameToId.get(n)));
   };
   for (const { sourceId, sel } of appConnects) addConsumerEdges(sourceId, sel);
   const vc = cfg.vms_connect as
@@ -1245,6 +1326,7 @@ export function createInputToDiagram(
         storage?: unknown;
         pubsub?: unknown;
         bigquery?: unknown;
+        sql?: unknown;
       }
     | undefined;
   if (vmsId && vc) {
@@ -1256,6 +1338,7 @@ export function createInputToDiagram(
       storage: arr(vc.storage),
       pubsub: arr(vc.pubsub),
       bigquery: arr(vc.bigquery),
+      sql: arr(vc.sql),
     });
   }
 

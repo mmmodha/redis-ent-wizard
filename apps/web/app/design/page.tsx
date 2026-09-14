@@ -345,7 +345,12 @@ function DesignCanvas() {
       if (!a || !b || a.id === b.id) return null;
       const isConsumer = (k: string) => k === "application" || k === "vms";
       const isProviderOnly = (k: string) =>
-        k === "cluster" || k === "database" || k === "storage" || k === "pubsub" || k === "bigquery";
+        k === "cluster" ||
+        k === "database" ||
+        k === "storage" ||
+        k === "pubsub" ||
+        k === "bigquery" ||
+        k === "cloudsql";
 
       const orientLb = (lb: DesignNode, host: DesignNode) => {
         const backend = lbBackendId(lb);

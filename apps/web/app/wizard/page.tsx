@@ -7,6 +7,7 @@ import { MachineTypePicker } from "@/components/MachineTypePicker";
 import {
   ApplicationsEditor,
   BigqueryEditor,
+  CloudSqlEditor,
   DatabaseEditor,
   LoadBalancerEditor,
   PubsubEditor,
@@ -14,15 +15,18 @@ import {
   VmsConnectEditor,
   blankApplication,
   blankBigquery,
+  blankCloudSql,
   blankLb,
   blankPubsub,
   blankStorage,
   bigqueryDraftFromConfig,
+  cloudsqlDraftFromConfig,
   databaseDraftFromConfig,
   pubsubDraftFromConfig,
   storageDraftFromConfig,
   type ApplicationDraft,
   type BigqueryDraft,
+  type CloudSqlDraft,
   type DatabaseDraft,
   type LbDraft,
   type PubsubDraft,
@@ -187,6 +191,7 @@ type WizardForm = {
   storage_buckets: StorageDraft[];
   pubsub_topics: PubsubDraft[];
   bigquery_datasets: BigqueryDraft[];
+  cloud_sql_instances: CloudSqlDraft[];
   vms_connect: {
     clusters: string[];
     databases: string[];
@@ -195,6 +200,7 @@ type WizardForm = {
     storage: string[];
     pubsub: string[];
     bigquery: string[];
+    sql: string[];
   };
   RS_admin: string;
   app: number;
@@ -233,6 +239,7 @@ function applicationDraftFromConfig(a: Record<string, unknown>): ApplicationDraf
     connectStorage: strArray(a.connectStorage),
     connectPubsub: strArray(a.connectPubsub),
     connectBigquery: strArray(a.connectBigquery),
+    connectSql: strArray(a.connectSql),
     requirements: strArray(a.requirements),
     artifact: {
       kind:
@@ -318,6 +325,9 @@ function formFromConfig(
     bigquery_datasets: Array.isArray(cfg.bigquery_datasets)
       ? (cfg.bigquery_datasets as Record<string, unknown>[]).map(bigqueryDraftFromConfig)
       : [],
+    cloud_sql_instances: Array.isArray(cfg.cloud_sql_instances)
+      ? (cfg.cloud_sql_instances as Record<string, unknown>[]).map(cloudsqlDraftFromConfig)
+      : [],
     vms_connect: (() => {
       const vc = (cfg.vms_connect as Record<string, unknown> | undefined) || {};
       return {
@@ -328,6 +338,7 @@ function formFromConfig(
         storage: strArray(vc.storage),
         pubsub: strArray(vc.pubsub),
         bigquery: strArray(vc.bigquery),
+        sql: strArray(vc.sql),
       };
     })(),
     RS_admin: str(cfg.RS_admin) || prev.RS_admin,
@@ -391,6 +402,7 @@ function WizardInner() {
     storage_buckets: [] as StorageDraft[],
     pubsub_topics: [] as PubsubDraft[],
     bigquery_datasets: [] as BigqueryDraft[],
+    cloud_sql_instances: [] as CloudSqlDraft[],
     vms_connect: {
       clusters: [],
       databases: [],
@@ -399,6 +411,7 @@ function WizardInner() {
       storage: [],
       pubsub: [],
       bigquery: [],
+      sql: [],
     } as {
       clusters: string[];
       databases: string[];
@@ -407,6 +420,7 @@ function WizardInner() {
       storage: string[];
       pubsub: string[];
       bigquery: string[];
+      sql: string[];
     },
     RS_admin: "admin@redis.io",
     app: 0,
@@ -488,6 +502,10 @@ function WizardInner() {
   const bigqueryConnectNames = useMemo(
     () => form.bigquery_datasets.map((d) => d.name.trim()).filter(Boolean),
     [form.bigquery_datasets],
+  );
+  const cloudsqlConnectNames = useMemo(
+    () => form.cloud_sql_instances.map((d) => d.name.trim()).filter(Boolean),
+    [form.cloud_sql_instances],
   );
 
   useEffect(() => {
@@ -687,6 +705,7 @@ function WizardInner() {
       if (a.connectStorage.length) app.connectStorage = a.connectStorage;
       if (a.connectPubsub.length) app.connectPubsub = a.connectPubsub;
       if (a.connectBigquery.length) app.connectBigquery = a.connectBigquery;
+      if (a.connectSql.length) app.connectSql = a.connectSql;
       if (a.requirements.length) app.requirements = a.requirements;
       if (form.mode === "vm") {
         Object.assign(app, {
@@ -729,6 +748,18 @@ function WizardInner() {
       .map((d) => ({ name: d.name.trim(), location: d.location.trim() || undefined, access: d.access }))
       .filter((d) => d.name);
     if (bigqueryDatasets.length) base.bigquery_datasets = bigqueryDatasets;
+
+    const cloudSqlInstances = form.cloud_sql_instances
+      .map((d) => ({
+        name: d.name.trim(),
+        engine: d.engine,
+        tier: d.tier.trim() || undefined,
+        db_name: d.db_name.trim() || undefined,
+        db_user: d.db_user.trim() || undefined,
+        connectivity: d.connectivity,
+      }))
+      .filter((d) => d.name);
+    if (cloudSqlInstances.length) base.cloud_sql_instances = cloudSqlInstances;
 
     if (form.mode === "vm") {
       if (form.clusters.length === 0) {
@@ -807,6 +838,7 @@ function WizardInner() {
           storage: form.vms_connect.storage,
           pubsub: form.vms_connect.pubsub,
           bigquery: form.vms_connect.bigquery,
+          sql: form.vms_connect.sql,
         };
         if (
           vc.clusters.length ||
@@ -815,7 +847,8 @@ function WizardInner() {
           vc.apps.length ||
           vc.storage.length ||
           vc.pubsub.length ||
-          vc.bigquery.length
+          vc.bigquery.length ||
+          vc.sql.length
         )
           base.vms_connect = vc;
       }
@@ -1713,6 +1746,7 @@ function WizardInner() {
               storageNames={storageConnectNames}
               pubsubNames={pubsubConnectNames}
               bigqueryNames={bigqueryConnectNames}
+              cloudsqlNames={cloudsqlConnectNames}
               onChange={(applications) => {
                 setForm((prev) => ({ ...prev, applications }));
                 setPreflightResult(null);
@@ -1754,6 +1788,15 @@ function WizardInner() {
               }}
             />
 
+            <CloudSqlEditor
+              instances={form.cloud_sql_instances}
+              region={form.region_name}
+              onChange={(cloud_sql_instances) => {
+                setForm((prev) => ({ ...prev, cloud_sql_instances }));
+                setPreflightResult(null);
+              }}
+            />
+
             {form.app > 0 ? (
               <VmsConnectEditor
                 value={form.vms_connect}
@@ -1764,6 +1807,7 @@ function WizardInner() {
                 storageNames={storageConnectNames}
                 pubsubNames={pubsubConnectNames}
                 bigqueryNames={bigqueryConnectNames}
+                cloudsqlNames={cloudsqlConnectNames}
                 onChange={(vms_connect) => {
                   setForm((prev) => ({ ...prev, vms_connect }));
                   setPreflightResult(null);
@@ -1958,6 +2002,7 @@ function WizardInner() {
               storageNames={storageConnectNames}
               pubsubNames={pubsubConnectNames}
               bigqueryNames={bigqueryConnectNames}
+              cloudsqlNames={cloudsqlConnectNames}
               onChange={(applications) => {
                 setForm((prev) => ({ ...prev, applications }));
                 setPreflightResult(null);
@@ -1986,6 +2031,15 @@ function WizardInner() {
               region={form.region_name}
               onChange={(bigquery_datasets) => {
                 setForm((prev) => ({ ...prev, bigquery_datasets }));
+                setPreflightResult(null);
+              }}
+            />
+
+            <CloudSqlEditor
+              instances={form.cloud_sql_instances}
+              region={form.region_name}
+              onChange={(cloud_sql_instances) => {
+                setForm((prev) => ({ ...prev, cloud_sql_instances }));
                 setPreflightResult(null);
               }}
             />

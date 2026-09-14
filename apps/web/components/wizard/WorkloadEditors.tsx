@@ -48,6 +48,7 @@ export type ApplicationDraft = {
   connectStorage: string[];
   connectPubsub: string[];
   connectBigquery: string[];
+  connectSql: string[];
   requirements: string[];
   // VM mode
   artifact: ArtifactSource;
@@ -106,6 +107,40 @@ export function bigqueryDraftFromConfig(d: Record<string, unknown>): BigqueryDra
     name: s(d.name),
     location: s(d.location),
     access: d.access === "read" ? "read" : "readwrite",
+  };
+}
+
+/** A Cloud SQL instance draft. */
+export type CloudSqlDraft = {
+  name: string;
+  engine: "postgres" | "mysql";
+  tier: string;
+  db_name: string;
+  db_user: string;
+  connectivity: "private" | "proxy" | "public";
+};
+
+export function blankCloudSql(): CloudSqlDraft {
+  return {
+    name: "",
+    engine: "postgres",
+    tier: "db-f1-micro",
+    db_name: "appdb",
+    db_user: "appuser",
+    connectivity: "private",
+  };
+}
+
+export function cloudsqlDraftFromConfig(d: Record<string, unknown>): CloudSqlDraft {
+  const s = (v: unknown) => (typeof v === "string" ? v : "");
+  const conn = s(d.connectivity);
+  return {
+    name: s(d.name),
+    engine: d.engine === "mysql" ? "mysql" : "postgres",
+    tier: s(d.tier) || "db-f1-micro",
+    db_name: s(d.db_name) || "appdb",
+    db_user: s(d.db_user) || "appuser",
+    connectivity: (["private", "proxy", "public"].includes(conn) ? conn : "private") as CloudSqlDraft["connectivity"],
   };
 }
 
@@ -176,6 +211,7 @@ export function blankApplication(machineType = ""): ApplicationDraft {
     connectStorage: [],
     connectPubsub: [],
     connectBigquery: [],
+    connectSql: [],
     requirements: [],
     artifact: { kind: "upload", ref: "", type: "jar" },
     vm_count: 1,
@@ -265,6 +301,7 @@ export function VmsConnectEditor({
   storageNames,
   pubsubNames,
   bigqueryNames,
+  cloudsqlNames,
 }: {
   value: {
     clusters: string[];
@@ -274,6 +311,7 @@ export function VmsConnectEditor({
     storage: string[];
     pubsub: string[];
     bigquery: string[];
+    sql: string[];
   };
   onChange: (v: {
     clusters: string[];
@@ -283,6 +321,7 @@ export function VmsConnectEditor({
     storage: string[];
     pubsub: string[];
     bigquery: string[];
+    sql: string[];
   }) => void;
   clusterNames: string[];
   databaseNames: string[];
@@ -291,6 +330,7 @@ export function VmsConnectEditor({
   storageNames: string[];
   pubsubNames: string[];
   bigqueryNames: string[];
+  cloudsqlNames: string[];
 }) {
   const toggle = (field: keyof typeof value, name: string, on: boolean) =>
     onChange({ ...value, [field]: on ? [...value[field], name] : value[field].filter((x) => x !== name) });
@@ -301,7 +341,8 @@ export function VmsConnectEditor({
     !appHostNames.length &&
     !storageNames.length &&
     !pubsubNames.length &&
-    !bigqueryNames.length
+    !bigqueryNames.length &&
+    !cloudsqlNames.length
   ) {
     return null;
   }
@@ -359,6 +400,13 @@ export function VmsConnectEditor({
         options={bigqueryNames}
         selected={value.bigquery}
         onToggle={(n, on) => toggle("bigquery", n, on)}
+      />
+      <ConnectPicker
+        label="Connect to Cloud SQL"
+        hint="Injects SQL_<NAME>_HOST / _CONNECTION_NAME / _DB / _USER / _PASSWORD and grants the Cloud SQL client role."
+        options={cloudsqlNames}
+        selected={value.sql}
+        onToggle={(n, on) => toggle("sql", n, on)}
       />
     </div>
   );
@@ -587,6 +635,7 @@ export function ApplicationsEditor({
   storageNames = [],
   pubsubNames = [],
   bigqueryNames = [],
+  cloudsqlNames = [],
 }: {
   applications: ApplicationDraft[];
   onChange: (apps: ApplicationDraft[]) => void;
@@ -602,6 +651,7 @@ export function ApplicationsEditor({
   storageNames?: string[];
   pubsubNames?: string[];
   bigqueryNames?: string[];
+  cloudsqlNames?: string[];
 }) {
   const [uploading, setUploading] = useState<Record<number, boolean>>({});
   const [uploadErrors, setUploadErrors] = useState<Record<number, string>>({});
@@ -1019,6 +1069,23 @@ export function ApplicationsEditor({
                 })
               }
             />
+            <ConnectPicker
+              label="Connect to Cloud SQL"
+              hint={
+                mode === "vm"
+                  ? "Injects SQL_<NAME>_HOST / _CONNECTION_NAME / _DB / _USER / _PASSWORD and grants the Cloud SQL client role."
+                  : "Injects SQL_<NAME>_CONNECTION_NAME / _DB / _USER / _PORT and grants the Cloud SQL client role (reach it via the Auth Proxy)."
+              }
+              options={cloudsqlNames}
+              selected={app.connectSql}
+              onToggle={(cn, on) =>
+                patch(i, {
+                  connectSql: on
+                    ? [...app.connectSql, cn]
+                    : app.connectSql.filter((x) => x !== cn),
+                })
+              }
+            />
 
             <div className="wiz-field-wide">
               <span className="machine-picker-label">Environment variables</span>
@@ -1380,6 +1447,84 @@ export function BigqueryEditor({
       <div style={{ marginTop: 12 }}>
         <button type="button" className="btn" onClick={() => onChange([...datasets, blankBigquery()])}>
           Add dataset
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/** Cloud SQL instances editor (VM and GKE). */
+export function CloudSqlEditor({
+  instances,
+  onChange,
+  region,
+}: {
+  instances: CloudSqlDraft[];
+  onChange: (instances: CloudSqlDraft[]) => void;
+  region: string;
+}) {
+  const patch = (i: number, p: Partial<CloudSqlDraft>) =>
+    onChange(instances.map((d, idx) => (idx === i ? { ...d, ...p } : d)));
+
+  return (
+    <div className="companion-block">
+      <h3 className="companion-title">Cloud SQL (optional)</h3>
+      <p className="hint" style={{ marginTop: 0 }}>
+        Managed Postgres/MySQL instances{region ? ` in ${region}` : ""}. Connect an application or the
+        Set-of-VMs group to inject the connection details and grant the Cloud SQL client role. The user
+        password is generated and injected on VMs.
+      </p>
+      {instances.map((d, i) => (
+        <div className="wiz-workload-card" key={`sql-${i}`}>
+          <div className="wiz-workload-head">
+            <h4>{d.name.trim() || `Instance ${i + 1}`}</h4>
+            <button type="button" className="btn" onClick={() => onChange(instances.filter((_, idx) => idx !== i))}>
+              Remove
+            </button>
+          </div>
+          <div className="grid grid-2">
+            <label>
+              Instance name
+              <input value={d.name} onChange={(e) => patch(i, { name: e.target.value.slice(0, 40) })} placeholder="orders" />
+              <span className="hint">Prefixed with the deployment name.</span>
+            </label>
+            <label>
+              Engine
+              <select value={d.engine} onChange={(e) => patch(i, { engine: e.target.value as CloudSqlDraft["engine"] })}>
+                <option value="postgres">PostgreSQL 15</option>
+                <option value="mysql">MySQL 8.0</option>
+              </select>
+            </label>
+            <label>
+              Tier
+              <input value={d.tier} onChange={(e) => patch(i, { tier: e.target.value })} placeholder="db-f1-micro" />
+              <span className="hint">Machine tier, e.g. db-f1-micro or db-custom-1-3840.</span>
+            </label>
+            <label>
+              Connectivity
+              <select
+                value={d.connectivity}
+                onChange={(e) => patch(i, { connectivity: e.target.value as CloudSqlDraft["connectivity"] })}
+              >
+                <option value="private">Private IP (VPC peering)</option>
+                <option value="proxy">Public IP + Auth Proxy</option>
+                <option value="public">Public IP + open networks</option>
+              </select>
+            </label>
+            <label>
+              Database name
+              <input value={d.db_name} onChange={(e) => patch(i, { db_name: e.target.value.slice(0, 40) })} placeholder="appdb" />
+            </label>
+            <label>
+              User
+              <input value={d.db_user} onChange={(e) => patch(i, { db_user: e.target.value.slice(0, 40) })} placeholder="appuser" />
+            </label>
+          </div>
+        </div>
+      ))}
+      <div style={{ marginTop: 12 }}>
+        <button type="button" className="btn" onClick={() => onChange([...instances, blankCloudSql()])}>
+          Add instance
         </button>
       </div>
     </div>

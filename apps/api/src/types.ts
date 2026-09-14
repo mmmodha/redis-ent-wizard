@@ -71,6 +71,21 @@ export interface LoadBalancerSpec {
   ports: number[];
 }
 
+/** A Cloud SQL instance (Postgres or MySQL) available to workloads. */
+export interface CloudSqlSpec {
+  /** Short name; the actual instance is `<deploymentPrefix>-<slug>`. */
+  name: string;
+  engine?: "postgres" | "mysql";
+  /** Machine tier, e.g. db-f1-micro, db-custom-1-3840. */
+  tier?: string;
+  /** Application database created on the instance. */
+  db_name?: string;
+  /** Application database user (password is auto-generated). */
+  db_user?: string;
+  /** How consumers reach the instance. */
+  connectivity?: "private" | "proxy" | "public";
+}
+
 /** A BigQuery dataset available to workloads. */
 export interface BigquerySpec {
   /** Short name; the actual dataset id is `<deploymentPrefix>_<slug>` (underscores). */
@@ -127,6 +142,8 @@ export interface Application {
   connectPubsub?: string[];
   /** Names of BigQuery datasets injected as BIGQUERY_<NAME>_DATASET / _PROJECT / _LOCATION. */
   connectBigquery?: string[];
+  /** Names of Cloud SQL instances injected as SQL_<NAME>_HOST / _DB / _USER / _PASSWORD / _CONNECTION_NAME. */
+  connectSql?: string[];
   // VM
   artifact?: ApplicationArtifact;
   vm_count?: number;
@@ -249,6 +266,8 @@ export interface CreateInstanceInput {
   pubsub_topics?: PubsubSpec[];
   /** BigQuery datasets provisioned for this deployment (VM and GKE). */
   bigquery_datasets?: BigquerySpec[];
+  /** Cloud SQL instances provisioned for this deployment (VM and GKE). */
+  cloud_sql_instances?: CloudSqlSpec[];
   /** Connection references from the Set-of-VMs group (app VMs) to providers in this deployment. */
   vms_connect?: {
     clusters?: string[];
@@ -258,6 +277,7 @@ export interface CreateInstanceInput {
     storage?: string[];
     pubsub?: string[];
     bigquery?: string[];
+    sql?: string[];
   };
   // GKE
   gke_clustersize?: number;

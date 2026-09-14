@@ -182,6 +182,7 @@ variable "applications" {
     env                   = map(string)
     connect_cluster_admin = map(number)
     connect_lb            = map(string)
+    connect_sql           = map(string)
     expose_http           = bool
     expose_https          = bool
     requirements          = list(string)
@@ -252,4 +253,24 @@ variable "bigquery_datasets" {
   }))
   description = "BigQuery datasets provisioned for this deployment."
   default     = []
+}
+
+variable "cloud_sql_instances" {
+  type = list(object({
+    name             = string
+    database_version = string
+    tier             = string
+    db_name          = string
+    db_user          = string
+    connectivity     = string
+    grant_client     = bool
+  }))
+  description = "Cloud SQL instances provisioned for this deployment."
+  default     = []
+}
+
+variable "app_connect_sql" {
+  type        = map(string)
+  description = "Set-of-VMs: SQL env-var slug -> Cloud SQL instance name for injected HOST/PASSWORD."
+  default     = {}
 }

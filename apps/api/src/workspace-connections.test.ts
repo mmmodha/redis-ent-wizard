@@ -24,6 +24,7 @@ const baseInput = (): CreateInstanceInput => ({
   storage_buckets: [{ name: "assets", access: "readwrite" }],
   pubsub_topics: [{ name: "events", create_subscription: true, role: "both" }],
   bigquery_datasets: [{ name: "analytics", access: "readwrite" }],
+  cloud_sql_instances: [{ name: "orders", engine: "postgres", connectivity: "private" }],
 });
 
 describe("resolveVmConnections", () => {
@@ -40,6 +41,7 @@ describe("resolveVmConnections", () => {
         connectStorage: ["assets"],
         connectPubsub: ["events"],
         connectBigquery: ["analytics"],
+        connectSql: ["orders"],
       },
       reg,
     );
@@ -51,6 +53,14 @@ describe("resolveVmConnections", () => {
     assert.equal(conn.env.PUBSUB_EVENTS_PROJECT, "proj");
     assert.equal(conn.env.BIGQUERY_ANALYTICS_DATASET, "demo_default_analytics");
     assert.equal(conn.env.BIGQUERY_ANALYTICS_PROJECT, "proj");
+    // Cloud SQL static parts inline; HOST + PASSWORD are apply-time Terraform refs.
+    assert.equal(conn.env.SQL_ORDERS_DB, "appdb");
+    assert.equal(conn.env.SQL_ORDERS_USER, "appuser");
+    assert.equal(conn.env.SQL_ORDERS_PORT, "5432");
+    assert.equal(conn.env.SQL_ORDERS_CONNECTION_NAME, "proj:europe-west1:demo-default-orders");
+    assert.equal(conn.env.SQL_ORDERS_HOST, undefined);
+    assert.equal(conn.env.SQL_ORDERS_PASSWORD, undefined);
+    assert.deepEqual(conn.connectSql, { ORDERS: "demo-default-orders" });
     assert.equal(conn.env.REDIS_CACHE_ADMIN_USER, "admin@redis.io");
     assert.equal(conn.env.REDIS_HOST, "cluster.demo-default-cache.demo.redislabs.com");
     assert.equal(
@@ -80,15 +90,35 @@ describe("resolveGkeConnections", () => {
       applications: [{ name: "web", image: "nginx" }],
     };
     const clusters = normalizeClusters({ ...input, mode: "gke" });
+    const sql = new Map([
+      [
+        "orders",
+        {
+          db: "appdb",
+          user: "appuser",
+          port: 5432,
+          connectionName: "proj:europe-west1:demo-default-orders",
+          instanceFull: "demo-default-orders",
+        },
+      ],
+    ]);
     const { env, secretRefs } = resolveGkeConnections(
-      { connectClusters: ["cache"], connectDatabases: ["sessions"], connectApps: ["web"] },
+      { connectClusters: ["cache"], connectDatabases: ["sessions"], connectApps: ["web"], connectSql: ["orders"] },
       clusters,
       "demo-default",
       ["web"],
+      [],
+      [],
+      [],
+      sql,
     );
     assert.equal(env.REDIS_CACHE_HOST, "demo-default-cache-rec.rec-ns.svc.cluster.local");
     assert.equal(env.REDIS_SESSIONS_ENDPOINT, "sessions.rec-ns.svc.cluster.local:12000");
     assert.equal(env.WEB_HOST, "web.apps.svc.cluster.local");
+    // GKE gets only the static Cloud SQL vars (host/password reach it via the Auth Proxy).
+    assert.equal(env.SQL_ORDERS_CONNECTION_NAME, "proj:europe-west1:demo-default-orders");
+    assert.equal(env.SQL_ORDERS_DB, "appdb");
+    assert.equal(env.SQL_ORDERS_HOST, undefined);
     assert.deepEqual(
       secretRefs.map((r) => `${r.name}:${r.secret}:${r.key}`),
       [

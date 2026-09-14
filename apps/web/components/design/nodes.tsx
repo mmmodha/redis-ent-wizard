@@ -10,6 +10,7 @@ import { clusterRedisNodeCount, effectiveDbReplication } from "@/lib/db-replicat
 import type {
   ApplicationData,
   BigqueryData,
+  CloudSqlData,
   ClusterData,
   DatabaseData,
   LoadBalancerData,
@@ -254,6 +255,19 @@ export function BigqueryNode({ data }: NodeProps) {
   );
 }
 
+export function CloudSqlNode({ data }: NodeProps) {
+  const d = data as CloudSqlData;
+  const meta = [d.engine === "mysql" ? "MySQL" : "Postgres", d.connectivity].join(" · ");
+  return (
+    <div className="design-cloudsql">
+      <Handle type="target" position={Position.Left} className="design-hit" />
+      <NodeHeader icon="cloudsql" title={d.name.trim() || "Cloud SQL"} />
+      <div className="design-node-meta mono">{meta}</div>
+      <ExposesLine kind="cloudsql" name={d.name.trim()} />
+    </div>
+  );
+}
+
 export const nodeTypes: NodeTypes = {
   network: RootNode,
   gke: RootNode,
@@ -265,4 +279,5 @@ export const nodeTypes: NodeTypes = {
   storage: StorageNode,
   pubsub: PubsubNode,
   bigquery: BigqueryNode,
+  cloudsql: CloudSqlNode,
 };

@@ -141,3 +141,17 @@ variable "bigquery_datasets" {
   description = "BigQuery datasets provisioned for this deployment."
   default     = []
 }
+
+variable "cloud_sql_instances" {
+  type = list(object({
+    name             = string
+    database_version = string
+    tier             = string
+    db_name          = string
+    db_user          = string
+    connectivity     = string
+    grant_client     = bool
+  }))
+  description = "Cloud SQL instances provisioned for this deployment."
+  default     = []
+}

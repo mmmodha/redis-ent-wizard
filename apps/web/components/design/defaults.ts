@@ -113,6 +113,16 @@ export function defaultNodeData(
         location: "",
         access: "readwrite",
       };
+    case "cloudsql":
+      return {
+        kind: "cloudsql",
+        name: "",
+        engine: "postgres",
+        tier: "db-f1-micro",
+        db_name: "appdb",
+        db_user: "appuser",
+        connectivity: "private",
+      };
     default:
       return { kind: "network", label: "VPC network" };
   }

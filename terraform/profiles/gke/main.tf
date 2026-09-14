@@ -30,6 +30,16 @@ module "bigquery" {
   youremail        = var.youremail
 }
 
+module "cloudsql" {
+  source = "../../modules/cloudsql"
+
+  instances        = var.cloud_sql_instances
+  region           = var.region_name
+  vpc_id           = module.network.vpc_id
+  compute_sa_email = local.compute_sa
+  youremail        = var.youremail
+}
+
 module "network" {
   source = "../../modules/network"
 
@@ -127,6 +137,10 @@ output "pubsub_topics" {
 
 output "bigquery_datasets" {
   value = module.bigquery.datasets
+}
+
+output "cloud_sql_instances" {
+  value = module.cloudsql.instances
 }
 
 output "deployment_mode" {
