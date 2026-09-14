@@ -8,12 +8,14 @@ import {
   ARTIFACT_SOURCE_OPTIONS,
   DB_MODULES,
   EVICTION_POLICIES,
+  exposedVariables,
   withGitSourceRequirements,
   type ApplicationData,
   type ClusterData,
   type DatabaseData,
   type DesignNodeData,
   type LoadBalancerData,
+  type NodeKind,
   type RootData,
   type VmsData,
 } from "@/lib/diagram";
@@ -167,6 +169,13 @@ export function NodeDialog({
           {target.type === "loadbalancer" ? (
             <LoadBalancerForm data={draft as LoadBalancerData} set={set} />
           ) : null}
+
+          {["cluster", "database", "vms", "application", "loadbalancer"].includes(target.type) ? (
+            <ExposesNote
+              kind={target.type as NodeKind}
+              name={target.type === "vms" ? "app" : String((draft as { name?: string }).name || "").trim()}
+            />
+          ) : null}
         </div>
         <div className="design-modal-foot">
           {onDelete ? (
@@ -199,6 +208,25 @@ export function NodeDialog({
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+/** Read-only list of the env vars a provider injects into components wired to it. */
+function ExposesNote({ kind, name }: { kind: NodeKind; name: string }) {
+  const vars = exposedVariables(kind, name);
+  if (!vars.length) return null;
+  return (
+    <div className="design-field design-exposes-note">
+      <label>Exposes to connected components</label>
+      <ul className="design-exposes-list">
+        {vars.map((v) => (
+          <li key={v.name}>
+            <code className="mono">{v.name}</code>
+            <span className="design-exposes-desc"> — {v.description}</span>
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }

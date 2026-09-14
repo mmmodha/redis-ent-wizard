@@ -845,6 +845,90 @@ export async function preflight(
     }
   }
 
+  // 12f. Component connection references resolve, and no self-LB loops
+  {
+    const clusterConnectNames = new Set<string>();
+    clusters.forEach((c, i) => {
+      clusterConnectNames.add(c.name || `cluster${i + 1}`);
+      if (c.name) clusterConnectNames.add(c.name);
+    });
+    const dbNames = new Set<string>();
+    (Array.isArray(input.clusters) ? input.clusters : []).forEach((c) =>
+      (c.databases || []).forEach((d) => dbNames.add(d.name)),
+    );
+    const lbByName = new Map((input.load_balancers || []).map((lb) => [lb.name, lb]));
+    let connApps: ReturnType<typeof normalizeApplications> = [];
+    try {
+      connApps = normalizeApplications({ mode, applications: input.applications });
+    } catch {
+      connApps = [];
+    }
+    const appNames = new Set(connApps.map((a) => a.name));
+    const appCount = mode === "vm" ? input.app ?? 0 : 0;
+    const problems: string[] = [];
+
+    const check = (
+      label: string,
+      sel: { connectClusters?: string[]; connectDatabases?: string[]; connectLoadBalancers?: string[]; connectApps?: string[] },
+      self: { app?: string; isVmsGroup?: boolean },
+    ) => {
+      for (const c of sel.connectClusters || [])
+        if (!clusterConnectNames.has(c)) problems.push(`${label} → unknown cluster "${c}"`);
+      for (const d of sel.connectDatabases || [])
+        if (!dbNames.has(d)) problems.push(`${label} → unknown database "${d}"`);
+      for (const a of sel.connectApps || []) {
+        if (self.app && a === self.app) problems.push(`${label} cannot connect to itself`);
+        else if (!appNames.has(a) && appCount === 0)
+          problems.push(`${label} → unknown app/VMs "${a}"`);
+      }
+      if (mode === "vm") {
+        for (const lb of sel.connectLoadBalancers || []) {
+          const def = lbByName.get(lb);
+          if (!def) {
+            problems.push(`${label} → unknown load balancer "${lb}"`);
+          } else if (
+            (self.app && def.target_kind === "application" && def.target === self.app) ||
+            (self.isVmsGroup && def.target_kind === "vms")
+          ) {
+            problems.push(`${label} cannot consume its own load balancer "${lb}"`);
+          }
+        }
+      }
+    };
+
+    for (const a of connApps) check(`Application ${a.name}`, a, { app: a.name });
+    if (input.vms_connect) {
+      check(
+        "Set-of-VMs",
+        {
+          connectClusters: input.vms_connect.clusters,
+          connectDatabases: input.vms_connect.databases,
+          connectLoadBalancers: input.vms_connect.load_balancers,
+          connectApps: input.vms_connect.apps,
+        },
+        { isVmsGroup: true },
+      );
+    }
+
+    const anySelection =
+      connApps.some(
+        (a) =>
+          (a.connectClusters?.length || a.connectDatabases?.length || a.connectLoadBalancers?.length || a.connectApps?.length) ?? 0,
+      ) ||
+      Boolean(
+        input.vms_connect &&
+          (input.vms_connect.clusters?.length ||
+            input.vms_connect.databases?.length ||
+            input.vms_connect.load_balancers?.length ||
+            input.vms_connect.apps?.length),
+      );
+    if (problems.length) {
+      checks.push(fail("connections", "Component connections", problems.join("; ")));
+    } else if (anySelection) {
+      checks.push(pass("connections", "Component connections", "All wired endpoints resolve"));
+    }
+  }
+
   // 13. Terraform binary present in this container
   const terraformOnPath = (process.env.PATH || "")
     .split(":")

@@ -121,6 +121,12 @@ variable "app_extra_ports" {
   default     = []
 }
 
+variable "injected_env" {
+  type        = map(string)
+  description = "Connection env (endpoints/credentials) written to /opt/rew/connections.env on each VM."
+  default     = {}
+}
+
 resource "google_compute_disk" "app_data" {
   for_each = {
     for i, size in local.app_disk_gib : tostring(i) => size if size > 0
@@ -170,6 +176,10 @@ resource "google_compute_instance" "app" {
       memviz_repo_url    = var.memviz_repo_url
       memviz_repo_ref    = var.memviz_repo_ref
       extra_disk_gib     = local.app_disk_gib[count.index]
+      # Single-quoted export lines so special chars in values (e.g. passwords) survive sourcing.
+      connections_env = join("\n", [
+        for k, v in var.injected_env : "export ${k}='${replace(v, "'", "'\\''")}'"
+      ])
     })
   }
 

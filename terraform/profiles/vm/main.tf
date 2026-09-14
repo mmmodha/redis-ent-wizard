@@ -103,6 +103,12 @@ module "app_vm" {
   app_expose_https   = var.app_expose_https
   app_disk_gib       = var.app_disk_gib
   app_extra_ports    = var.app_extra_ports
+  # Connection env for the Set-of-VMs group, same merge as app_workload.
+  injected_env = merge(
+    var.app_injected_env,
+    { for k, idx in var.app_connect_cluster_admin : k => module.re_vm[idx].admin_password },
+    { for k, lbname in var.app_connect_lb : k => "${google_compute_address.lb[lbname].address}:${local.lb_by_name[lbname].ports[0]}" },
+  )
 }
 
 module "app_workload" {
@@ -131,10 +137,16 @@ module "app_workload" {
   machine_type        = each.value.machine_type
   disk_gib            = each.value.disk_gib
   ports               = each.value.ports
-  env                 = each.value.env
-  expose_http         = each.value.expose_http
-  expose_https        = each.value.expose_https
-  requirements        = each.value.requirements
+  # Merge static connection env with apply-time refs: cluster admin passwords
+  # (from re_vm) and internal LB VIPs (from the reserved internal address).
+  env = merge(
+    each.value.env,
+    { for k, idx in each.value.connect_cluster_admin : k => module.re_vm[idx].admin_password },
+    { for k, lbname in each.value.connect_lb : k => "${google_compute_address.lb[lbname].address}:${local.lb_by_name[lbname].ports[0]}" },
+  )
+  expose_http  = each.value.expose_http
+  expose_https = each.value.expose_https
+  requirements = each.value.requirements
 }
 
 # The network module opens app-http/app-https/app-extra only for companion App

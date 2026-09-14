@@ -96,7 +96,12 @@ variable "applications" {
     replicas = number
     ports    = list(number)
     env      = map(string)
-    expose   = string
+    env_secret_refs = list(object({
+      name        = string
+      secret_name = string
+      secret_key  = string
+    }))
+    expose = string
   }))
   description = "Custom application workloads deployed as containers on GKE."
   default     = []

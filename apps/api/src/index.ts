@@ -90,6 +90,9 @@ const applicationSchema = z.object({
   ports: z.array(z.number().int().min(1).max(65535)).max(16).optional(),
   env: z.record(z.string()).optional(),
   connectClusters: z.array(z.string().max(40)).max(3).optional(),
+  connectDatabases: z.array(z.string().max(40)).max(16).optional(),
+  connectLoadBalancers: z.array(z.string().max(40)).max(8).optional(),
+  connectApps: z.array(z.string().max(40)).max(8).optional(),
   artifact: z
     .object({
       kind: z.enum(["upload", "url", "gcs", "git"]),
@@ -172,6 +175,14 @@ const createSchema = z.object({
     .optional(),
   applications: z.array(applicationSchema).max(8).optional(),
   load_balancers: z.array(loadBalancerSchema).max(8).optional(),
+  vms_connect: z
+    .object({
+      clusters: z.array(z.string().max(40)).max(3).optional(),
+      databases: z.array(z.string().max(40)).max(16).optional(),
+      load_balancers: z.array(z.string().max(40)).max(8).optional(),
+      apps: z.array(z.string().max(40)).max(8).optional(),
+    })
+    .optional(),
   dns_managed_zone: z.string().optional(),
   dns_zone_dns_name: z.string().optional(),
   rs_private_subnet: z.string().optional(),

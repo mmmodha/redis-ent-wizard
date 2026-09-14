@@ -630,6 +630,7 @@ export default function InstanceDetailPage() {
                       </span>
                     ) : null}
                     {d.error ? <div className="hint">{d.error}</div> : null}
+                    {d.warning ? <div className="notice notice-warn">{d.warning}</div> : null}
                   </div>
                 </div>
               ))}

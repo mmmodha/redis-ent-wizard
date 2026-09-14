@@ -42,6 +42,9 @@ export type ApplicationDraft = {
   ports: string;
   env: { key: string; value: string }[];
   connectClusters: string[];
+  connectDatabases: string[];
+  connectLoadBalancers: string[];
+  connectApps: string[];
   requirements: string[];
   // VM mode
   artifact: ArtifactSource;
@@ -87,6 +90,9 @@ export function blankApplication(machineType = ""): ApplicationDraft {
     ports: "",
     env: [],
     connectClusters: [],
+    connectDatabases: [],
+    connectLoadBalancers: [],
+    connectApps: [],
     requirements: [],
     artifact: { kind: "upload", ref: "", type: "jar" },
     vm_count: 1,
@@ -128,6 +134,100 @@ export function databaseDraftFromConfig(d: Record<string, unknown>): DatabaseDra
     oss_cluster: Boolean(d.oss_cluster),
     flex: Boolean(d.flex),
   };
+}
+
+/** A checkbox multi-select of connectable provider names. */
+function ConnectPicker({
+  label,
+  hint,
+  options,
+  selected,
+  onToggle,
+}: {
+  label: string;
+  hint: string;
+  options: string[];
+  selected: string[];
+  onToggle: (name: string, on: boolean) => void;
+}) {
+  if (!options.length) return null;
+  return (
+    <div className="wiz-field-wide">
+      <span className="machine-picker-label">{label}</span>
+      <div className="wiz-badges">
+        {options.map((cn) => (
+          <label key={cn} className="wiz-check-row">
+            <input
+              type="checkbox"
+              checked={selected.includes(cn)}
+              onChange={(e) => onToggle(cn, e.target.checked)}
+            />
+            {cn}
+          </label>
+        ))}
+      </div>
+      <span className="hint">{hint}</span>
+    </div>
+  );
+}
+
+/** Connections from the Set-of-VMs group to providers (emits vms_connect). */
+export function VmsConnectEditor({
+  value,
+  onChange,
+  clusterNames,
+  databaseNames,
+  loadBalancerNames,
+  appHostNames,
+}: {
+  value: { clusters: string[]; databases: string[]; load_balancers: string[]; apps: string[] };
+  onChange: (v: { clusters: string[]; databases: string[]; load_balancers: string[]; apps: string[] }) => void;
+  clusterNames: string[];
+  databaseNames: string[];
+  loadBalancerNames: string[];
+  appHostNames: string[];
+}) {
+  const toggle = (field: keyof typeof value, name: string, on: boolean) =>
+    onChange({ ...value, [field]: on ? [...value[field], name] : value[field].filter((x) => x !== name) });
+  if (!clusterNames.length && !databaseNames.length && !loadBalancerNames.length && !appHostNames.length) {
+    return null;
+  }
+  return (
+    <div className="companion-block">
+      <h3 className="companion-title">Set-of-VMs connections (optional)</h3>
+      <p className="hint" style={{ marginTop: 0 }}>
+        Injects endpoints and credentials into every app VM (readable at /opt/rew/connections.env).
+      </p>
+      <ConnectPicker
+        label="Connect to clusters"
+        hint="Injects REDIS_<CLUSTER>_HOST and admin credentials."
+        options={clusterNames}
+        selected={value.clusters}
+        onToggle={(n, on) => toggle("clusters", n, on)}
+      />
+      <ConnectPicker
+        label="Connect to databases"
+        hint="Injects REDIS_<DB>_ENDPOINT."
+        options={databaseNames}
+        selected={value.databases}
+        onToggle={(n, on) => toggle("databases", n, on)}
+      />
+      <ConnectPicker
+        label="Connect to load balancers"
+        hint="Injects LB_<LB>_ENDPOINT (its VIP)."
+        options={loadBalancerNames}
+        selected={value.load_balancers}
+        onToggle={(n, on) => toggle("load_balancers", n, on)}
+      />
+      <ConnectPicker
+        label="Connect to apps"
+        hint="Injects <NAME>_HOST (the target's hostname)."
+        options={appHostNames.filter((n) => n !== "app")}
+        selected={value.apps}
+        onToggle={(n, on) => toggle("apps", n, on)}
+      />
+    </div>
+  );
 }
 
 /** Per-cluster databases editor, shown inside each cluster card. */
@@ -347,6 +447,9 @@ export function ApplicationsEditor({
   probeZone,
   defaultMachineType,
   clusterNames,
+  databaseNames = [],
+  loadBalancerNames = [],
+  appHostNames = [],
 }: {
   applications: ApplicationDraft[];
   onChange: (apps: ApplicationDraft[]) => void;
@@ -356,6 +459,9 @@ export function ApplicationsEditor({
   probeZone: string;
   defaultMachineType: string;
   clusterNames: string[];
+  databaseNames?: string[];
+  loadBalancerNames?: string[];
+  appHostNames?: string[];
 }) {
   const [uploading, setUploading] = useState<Record<number, boolean>>({});
   const [uploadErrors, setUploadErrors] = useState<Record<number, string>>({});
@@ -680,33 +786,60 @@ export function ApplicationsEditor({
               </>
             )}
 
-            {clusterNames.length ? (
-              <div className="wiz-field-wide">
-                <span className="machine-picker-label">Connect to clusters</span>
-                <div className="wiz-badges">
-                  {clusterNames.map((cn) => {
-                    const on = app.connectClusters.includes(cn);
-                    return (
-                      <label key={cn} className="wiz-check-row">
-                        <input
-                          type="checkbox"
-                          checked={on}
-                          onChange={(e) =>
-                            patch(i, {
-                              connectClusters: e.target.checked
-                                ? [...app.connectClusters, cn]
-                                : app.connectClusters.filter((x) => x !== cn),
-                            })
-                          }
-                        />
-                        {cn}
-                      </label>
-                    );
-                  })}
-                </div>
-                <span className="hint">Injects the cluster endpoint into the app environment.</span>
-              </div>
+            <ConnectPicker
+              label="Connect to clusters"
+              hint="Injects REDIS_<CLUSTER>_HOST and admin credentials into the app environment."
+              options={clusterNames}
+              selected={app.connectClusters}
+              onToggle={(cn, on) =>
+                patch(i, {
+                  connectClusters: on
+                    ? [...app.connectClusters, cn]
+                    : app.connectClusters.filter((x) => x !== cn),
+                })
+              }
+            />
+            <ConnectPicker
+              label="Connect to databases"
+              hint="Injects REDIS_<DB>_ENDPOINT into the app environment."
+              options={databaseNames}
+              selected={app.connectDatabases}
+              onToggle={(cn, on) =>
+                patch(i, {
+                  connectDatabases: on
+                    ? [...app.connectDatabases, cn]
+                    : app.connectDatabases.filter((x) => x !== cn),
+                })
+              }
+            />
+            {mode === "vm" ? (
+              <ConnectPicker
+                label="Connect to load balancers"
+                hint="Injects LB_<LB>_ENDPOINT (its VIP) into the app environment."
+                options={loadBalancerNames}
+                selected={app.connectLoadBalancers}
+                onToggle={(cn, on) =>
+                  patch(i, {
+                    connectLoadBalancers: on
+                      ? [...app.connectLoadBalancers, cn]
+                      : app.connectLoadBalancers.filter((x) => x !== cn),
+                  })
+                }
+              />
             ) : null}
+            <ConnectPicker
+              label="Connect to apps / VMs"
+              hint="Injects <NAME>_HOST (the target's hostname) into the app environment."
+              options={appHostNames.filter((n) => n !== (app.name.trim() || ""))}
+              selected={app.connectApps}
+              onToggle={(cn, on) =>
+                patch(i, {
+                  connectApps: on
+                    ? [...app.connectApps, cn]
+                    : app.connectApps.filter((x) => x !== cn),
+                })
+              }
+            />
 
             <div className="wiz-field-wide">
               <span className="machine-picker-label">Environment variables</span>

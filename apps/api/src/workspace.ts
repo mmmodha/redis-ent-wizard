@@ -109,45 +109,164 @@ function vendorTerraform(workDir: string): string {
   return dest;
 }
 
-function injectClusterEnv(
-  env: Record<string, string> | undefined,
-  connectClusters: string[] | undefined,
-  clusterEndpoints: Map<string, string>,
-): Record<string, string> {
-  const out: Record<string, string> = { ...(env || {}) };
-  const connected = (connectClusters || []).filter(Boolean);
-  connected.forEach((name, i) => {
-    const host = clusterEndpoints.get(name);
-    if (!host) return;
-    const slug = name.toUpperCase().replace(/[^A-Z0-9]+/g, "_").replace(/^_+|_+$/g, "");
-    out[`REDIS_${slug}_HOST`] = host;
-    if (i === 0) out.REDIS_HOST = host;
-  });
-  return out;
+// In-cluster namespaces for GKE DNS wiring — must match the Terraform modules.
+const GKE_REC_NS = "rec-ns"; // terraform/modules/re-k8s (local.namespace)
+const GKE_APP_NS = "apps"; //  terraform/modules/app-k8s (var.namespace default)
+
+/** Uppercased env-var slug from a component name (e.g. "cache-1" -> "CACHE_1"). */
+function envSlug(name: string): string {
+  return name.toUpperCase().replace(/[^A-Z0-9]+/g, "_").replace(/^_+|_+$/g, "");
 }
 
-function buildVmApplications(
+/** A consumer's connection selections, from an app or the Set-of-VMs group. */
+interface ConnectSelections {
+  connectClusters?: string[];
+  connectDatabases?: string[];
+  connectLoadBalancers?: string[];
+  connectApps?: string[];
+}
+
+/** Static env plus the apply-time refs that Terraform resolves in profiles/vm. */
+interface ResolvedConnections {
+  env: Record<string, string>;
+  /** REDIS_<C>_ADMIN_PASSWORD env-var name -> re_vm module index. */
+  connectClusterAdmin: Record<string, number>;
+  /** LB_<LB>_ENDPOINT env-var name -> load-balancer name. */
+  connectLb: Record<string, string>;
+}
+
+interface VmRegistry {
+  clusterHosts: Map<string, string>;
+  clusterIndex: Map<string, number>;
+  dbEndpoints: Map<string, string>;
+  appHosts: Map<string, string>;
+  lbNames: Set<string>;
+  adminUser: string;
+  vmPrefix: string;
+  dnsSuffix: string;
+  appCount: number;
+}
+
+/** Provider registry for VM mode: predicted DNS hosts + apply-time ref keys. */
+export function buildVmRegistry(
   input: CreateInstanceInput,
-  clusterEndpoints: Map<string, string>,
-): Record<string, unknown>[] {
+  clusters: ReturnType<typeof normalizeClusters>,
+  vmPrefix: string,
+  dnsSuffix: string,
+): VmRegistry {
+  const clusterHosts = new Map<string, string>();
+  const clusterIndex = new Map<string, number>();
+  const dbEndpoints = new Map<string, string>();
+  clusters.forEach((c, i) => {
+    const prefix = clusterNamePrefix(vmPrefix, i, c.name);
+    const host = `cluster.${prefix}.${dnsSuffix}`;
+    const connectName = c.name || `cluster${i + 1}`;
+    clusterHosts.set(connectName, host);
+    clusterIndex.set(connectName, i);
+    if (c.name) {
+      clusterHosts.set(c.name, host);
+      clusterIndex.set(c.name, i);
+    }
+    if (i === 0) {
+      clusterHosts.set(vmPrefix, host);
+      clusterIndex.set(vmPrefix, i);
+    }
+    for (const db of c.databases || []) {
+      const port = db.port ?? 12000;
+      dbEndpoints.set(db.name, `redis-${port}.cluster.${prefix}.${dnsSuffix}:${port}`);
+    }
+  });
   const apps = normalizeApplications({ mode: "vm", applications: input.applications });
-  return apps.map((app) => ({
-    name: app.name,
-    artifact_local_path: app.artifactLocalPath || "",
-    artifact_type: app.artifact?.type || "binary",
-    artifact_filename: app.artifactFilename || (app.artifact?.type === "jar" ? "app.jar" : "app"),
-    git_url: app.artifact?.kind === "git" ? app.artifact.ref : "",
-    git_ref: app.artifact?.kind === "git" ? app.artifact.branch || "" : "",
-    command: app.command || "",
-    vm_count: app.vm_count ?? 1,
-    machine_type: app.machine_type || "e2-standard-2",
-    disk_gib: app.disk_gib ?? 0,
-    ports: app.ports || [],
-    env: injectClusterEnv(app.env, app.connectClusters, clusterEndpoints),
-    expose_http: app.expose === "http" || app.expose === "lb",
-    expose_https: app.expose === "https" || app.expose === "lb",
-    requirements: app.requirements || [],
-  }));
+  const appHosts = new Map<string, string>();
+  for (const a of apps) appHosts.set(a.name, `${a.name}.${vmPrefix}.${dnsSuffix}`);
+  const lbNames = new Set<string>((input.load_balancers || []).map((lb) => lb.name));
+  return {
+    clusterHosts,
+    clusterIndex,
+    dbEndpoints,
+    appHosts,
+    lbNames,
+    adminUser: input.RS_admin || "admin@redis.io",
+    vmPrefix,
+    dnsSuffix,
+    appCount: input.app ?? 0,
+  };
+}
+
+/** Resolve one consumer's connections against the VM registry. */
+export function resolveVmConnections(sel: ConnectSelections, reg: VmRegistry): ResolvedConnections {
+  const env: Record<string, string> = {};
+  const connectClusterAdmin: Record<string, number> = {};
+  const connectLb: Record<string, string> = {};
+
+  (sel.connectClusters || []).filter(Boolean).forEach((name, i) => {
+    const host = reg.clusterHosts.get(name);
+    if (host === undefined) return;
+    const slug = envSlug(name);
+    env[`REDIS_${slug}_HOST`] = host;
+    env[`REDIS_${slug}_ADMIN_USER`] = reg.adminUser;
+    if (i === 0) env.REDIS_HOST = host;
+    const idx = reg.clusterIndex.get(name);
+    if (idx !== undefined) connectClusterAdmin[`REDIS_${slug}_ADMIN_PASSWORD`] = idx;
+  });
+
+  for (const db of (sel.connectDatabases || []).filter(Boolean)) {
+    const endpoint = reg.dbEndpoints.get(db);
+    if (endpoint) env[`REDIS_${envSlug(db)}_ENDPOINT`] = endpoint;
+  }
+
+  for (const name of (sel.connectApps || []).filter(Boolean)) {
+    // Known application name, otherwise the single Set-of-VMs group ("app.<prefix>").
+    const host =
+      reg.appHosts.get(name) ?? (reg.appCount > 0 ? `app.${reg.vmPrefix}.${reg.dnsSuffix}` : undefined);
+    if (host) env[`${envSlug(name)}_HOST`] = host;
+  }
+
+  for (const lb of (sel.connectLoadBalancers || []).filter(Boolean)) {
+    if (reg.lbNames.has(lb)) connectLb[`LB_${envSlug(lb)}_ENDPOINT`] = lb;
+  }
+
+  return { env, connectClusterAdmin, connectLb };
+}
+
+function buildVmApplications(input: CreateInstanceInput, reg: VmRegistry): Record<string, unknown>[] {
+  const apps = normalizeApplications({ mode: "vm", applications: input.applications });
+  return apps.map((app) => {
+    const conn = resolveVmConnections(app, reg);
+    return {
+      name: app.name,
+      artifact_local_path: app.artifactLocalPath || "",
+      artifact_type: app.artifact?.type || "binary",
+      artifact_filename: app.artifactFilename || (app.artifact?.type === "jar" ? "app.jar" : "app"),
+      git_url: app.artifact?.kind === "git" ? app.artifact.ref : "",
+      git_ref: app.artifact?.kind === "git" ? app.artifact.branch || "" : "",
+      command: app.command || "",
+      vm_count: app.vm_count ?? 1,
+      machine_type: app.machine_type || "e2-standard-2",
+      disk_gib: app.disk_gib ?? 0,
+      ports: app.ports || [],
+      env: { ...(app.env || {}), ...conn.env },
+      connect_cluster_admin: conn.connectClusterAdmin,
+      connect_lb: conn.connectLb,
+      expose_http: app.expose === "http" || app.expose === "lb",
+      expose_https: app.expose === "https" || app.expose === "lb",
+      requirements: app.requirements || [],
+    };
+  });
+}
+
+/** Connections for the single Set-of-VMs group (app_vm), from input.vms_connect. */
+function buildVmSetConnections(input: CreateInstanceInput, reg: VmRegistry): ResolvedConnections {
+  const vc = input.vms_connect || {};
+  return resolveVmConnections(
+    {
+      connectClusters: vc.clusters,
+      connectDatabases: vc.databases,
+      connectLoadBalancers: vc.load_balancers,
+      connectApps: vc.apps,
+    },
+    reg,
+  );
 }
 
 function buildLoadBalancers(input: CreateInstanceInput): Record<string, unknown>[] {
@@ -160,17 +279,91 @@ function buildLoadBalancers(input: CreateInstanceInput): Record<string, unknown>
   }));
 }
 
+interface GkeSecretRef {
+  name: string;
+  secret: string;
+  key: string;
+}
+
+/** Resolve GKE connections to in-cluster DNS; admin creds via optional secretKeyRef. */
+export function resolveGkeConnections(
+  sel: ConnectSelections,
+  clusters: ReturnType<typeof normalizeClusters>,
+  prefix: string,
+  apps: string[],
+): { env: Record<string, string>; secretRefs: GkeSecretRef[] } {
+  const env: Record<string, string> = {};
+  const secretRefs: GkeSecretRef[] = [];
+
+  const clusterHost = new Map<string, string>();
+  const clusterSecret = new Map<string, string>();
+  const dbEndpoints = new Map<string, string>();
+  clusters.forEach((c, i) => {
+    const recName = `${clusterNamePrefix(prefix, i, c.name)}-rec`;
+    const connectName = c.name || `cluster${i + 1}`;
+    const host = `${recName}.${GKE_REC_NS}.svc.cluster.local`;
+    clusterHost.set(connectName, host);
+    clusterSecret.set(connectName, recName);
+    if (c.name) {
+      clusterHost.set(c.name, host);
+      clusterSecret.set(c.name, recName);
+    }
+    for (const db of c.databases || []) {
+      const port = db.port ?? 12000;
+      dbEndpoints.set(db.name, `${db.name}.${GKE_REC_NS}.svc.cluster.local:${port}`);
+    }
+  });
+
+  (sel.connectClusters || []).filter(Boolean).forEach((name, i) => {
+    const host = clusterHost.get(name);
+    if (host === undefined) return;
+    const slug = envSlug(name);
+    env[`REDIS_${slug}_HOST`] = host;
+    if (i === 0) env.REDIS_HOST = host;
+    const secret = clusterSecret.get(name);
+    if (secret) {
+      // The redis-enterprise operator stores REC credentials in a secret named
+      // after the REC; optional so a name/key mismatch never blocks the pod.
+      secretRefs.push({ name: `REDIS_${slug}_ADMIN_USER`, secret, key: "username" });
+      secretRefs.push({ name: `REDIS_${slug}_ADMIN_PASSWORD`, secret, key: "password" });
+    }
+  });
+
+  for (const db of (sel.connectDatabases || []).filter(Boolean)) {
+    const endpoint = dbEndpoints.get(db);
+    if (endpoint) env[`REDIS_${envSlug(db)}_ENDPOINT`] = endpoint;
+  }
+
+  const appSet = new Set(apps);
+  for (const name of (sel.connectApps || []).filter(Boolean)) {
+    if (appSet.has(name)) env[`${envSlug(name)}_HOST`] = `${name}.${GKE_APP_NS}.svc.cluster.local`;
+  }
+
+  return { env, secretRefs };
+}
+
 function buildGkeApplications(input: CreateInstanceInput): Record<string, unknown>[] {
   const apps = normalizeApplications({ mode: "gke", applications: input.applications });
-  return apps.map((app) => ({
-    name: app.name,
-    image: app.image || "",
-    command: app.command || "",
-    replicas: app.replicas ?? 1,
-    ports: app.ports || [],
-    env: app.env || {},
-    expose: app.expose || "none",
-  }));
+  const clusters = normalizeClusters({ ...input, mode: "gke" });
+  const prefix = `${input.name}-${input.env || "default"}`;
+  const appNames = apps.map((a) => a.name);
+  return apps.map((app) => {
+    const conn = resolveGkeConnections(app, clusters, prefix, appNames);
+    return {
+      name: app.name,
+      image: app.image || "",
+      command: app.command || "",
+      replicas: app.replicas ?? 1,
+      ports: app.ports || [],
+      env: { ...(app.env || {}), ...conn.env },
+      env_secret_refs: conn.secretRefs.map((r) => ({
+        name: r.name,
+        secret_name: r.secret,
+        secret_key: r.key,
+      })),
+      expose: app.expose || "none",
+    };
+  });
 }
 
 export function vmStackModuleArguments(): string {
@@ -195,6 +388,9 @@ export function vmStackModuleArguments(): string {
   ssh_private_key_path = var.ssh_private_key_path
   applications     = var.applications
   load_balancers   = var.load_balancers
+  app_injected_env = var.app_injected_env
+  app_connect_cluster_admin = var.app_connect_cluster_admin
+  app_connect_lb   = var.app_connect_lb
 `;
 }
 
@@ -352,21 +548,23 @@ variable "ssh_public_key" { type = string }
 variable "ssh_private_key_path" { type = string }
 variable "applications" {
   type = list(object({
-    name                = string
-    artifact_local_path = string
-    artifact_type       = string
-    artifact_filename   = string
-    git_url             = string
-    git_ref             = string
-    command             = string
-    vm_count            = number
-    machine_type        = string
-    disk_gib            = number
-    ports               = list(number)
-    env                 = map(string)
-    expose_http         = bool
-    expose_https        = bool
-    requirements        = list(string)
+    name                  = string
+    artifact_local_path   = string
+    artifact_type         = string
+    artifact_filename     = string
+    git_url               = string
+    git_ref               = string
+    command               = string
+    vm_count              = number
+    machine_type          = string
+    disk_gib              = number
+    ports                 = list(number)
+    env                   = map(string)
+    connect_cluster_admin = map(number)
+    connect_lb            = map(string)
+    expose_http           = bool
+    expose_https          = bool
+    requirements          = list(string)
   }))
   default = []
 }
@@ -378,6 +576,18 @@ variable "load_balancers" {
     ports       = list(number)
   }))
   default = []
+}
+variable "app_injected_env" {
+  type    = map(string)
+  default = {}
+}
+variable "app_connect_cluster_admin" {
+  type    = map(number)
+  default = {}
+}
+variable "app_connect_lb" {
+  type    = map(string)
+  default = {}
 }
 `
       : `
@@ -411,7 +621,12 @@ variable "applications" {
     replicas = number
     ports    = list(number)
     env      = map(string)
-    expose   = string
+    env_secret_refs = list(object({
+      name        = string
+      secret_name = string
+      secret_key  = string
+    }))
+    expose = string
   }))
   default = []
 }
@@ -471,14 +686,14 @@ variable "applications" {
     });
     const vmPrefix = `${input.name}-${input.env || "default"}`;
     const dnsSuffix = String(tfvars.dns_zone_dns_name);
-    const clusterEndpoints = new Map<string, string>();
-    clusters.forEach((c, i) => {
-      const host = `cluster.${clusterNamePrefix(vmPrefix, i, c.name)}.${dnsSuffix}`;
-      if (c.name) clusterEndpoints.set(c.name, host);
-      if (i === 0) clusterEndpoints.set(vmPrefix, host);
-    });
-    tfvars.applications = buildVmApplications(input, clusterEndpoints);
+    const registry = buildVmRegistry(input, clusters, vmPrefix, dnsSuffix);
+    tfvars.applications = buildVmApplications(input, registry);
     tfvars.load_balancers = buildLoadBalancers(input);
+    // Connections for the Set-of-VMs group (app_vm); TF fills in admin pw + LB VIP.
+    const vmsConn = buildVmSetConnections(input, registry);
+    tfvars.app_injected_env = vmsConn.env;
+    tfvars.app_connect_cluster_admin = vmsConn.connectClusterAdmin;
+    tfvars.app_connect_lb = vmsConn.connectLb;
   } else {
     const clusters = normalizeClusters({ ...input, mode: "gke" });
     const prefix = `${input.name}-${input.env || "default"}`;

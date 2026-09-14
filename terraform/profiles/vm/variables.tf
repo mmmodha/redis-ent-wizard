@@ -168,24 +168,44 @@ variable "ssh_private_key_path" {
 
 variable "applications" {
   type = list(object({
-    name                = string
-    artifact_local_path = string
-    artifact_type       = string
-    artifact_filename   = string
-    git_url             = string
-    git_ref             = string
-    command             = string
-    vm_count            = number
-    machine_type        = string
-    disk_gib            = number
-    ports               = list(number)
-    env                 = map(string)
-    expose_http         = bool
-    expose_https        = bool
-    requirements        = list(string)
+    name                  = string
+    artifact_local_path   = string
+    artifact_type         = string
+    artifact_filename     = string
+    git_url               = string
+    git_ref               = string
+    command               = string
+    vm_count              = number
+    machine_type          = string
+    disk_gib              = number
+    ports                 = list(number)
+    env                   = map(string)
+    connect_cluster_admin = map(number)
+    connect_lb            = map(string)
+    expose_http           = bool
+    expose_https          = bool
+    requirements          = list(string)
   }))
   description = "Custom application workloads run on dedicated VMs."
   default     = []
+}
+
+variable "app_injected_env" {
+  type        = map(string)
+  description = "Static connection env for the Set-of-VMs group (app_vm)."
+  default     = {}
+}
+
+variable "app_connect_cluster_admin" {
+  type        = map(number)
+  description = "Set-of-VMs: env-var name -> re_vm index for the injected cluster admin password."
+  default     = {}
+}
+
+variable "app_connect_lb" {
+  type        = map(string)
+  description = "Set-of-VMs: env-var name -> load-balancer name for the injected LB endpoint."
+  default     = {}
 }
 
 variable "load_balancers" {

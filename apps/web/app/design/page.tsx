@@ -7,6 +7,7 @@ import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "rea
 import { useRouter, useSearchParams } from "next/navigation";
 import {
   Background,
+  ConnectionMode,
   Controls,
   Panel,
   ReactFlow,
@@ -312,39 +313,77 @@ function DesignCanvas() {
     [canvasReady],
   );
 
-  const isValidConnection = useCallback(
-    (c: Connection | Edge) => {
-      const source = nodeById(c.source ?? "");
-      const target = nodeById(c.target ?? "");
-      if (!source || !target || source.id === target.id) return false;
-      // Application to cluster wiring.
-      if (source.data.kind === "application" && target.data.kind === "cluster") return true;
-      // Load balancer to a set of VMs or an application, in either direction.
-      const kinds = [source.data.kind, target.data.kind];
-      const hasLb = kinds.includes("loadbalancer");
-      const hasHost = kinds.includes("vms") || kinds.includes("application");
-      return hasLb && hasHost;
+  // The single backend a load balancer fronts (its parent, or the host its own
+  // edge points at). Used to forbid a component consuming its own load balancer.
+  const lbBackendId = useCallback(
+    (lb: DesignNode): string | undefined => {
+      const isHost = (n?: DesignNode) => n?.data.kind === "vms" || n?.data.kind === "application";
+      if (lb.parentId && isHost(nodeById(lb.parentId))) return lb.parentId;
+      for (const e of edges) if (e.source === lb.id && isHost(nodeById(e.target))) return e.target;
+      return undefined;
     },
-    [nodeById],
+    [nodeById, edges],
+  );
+
+  // Orient an attempted connection into a canonical consumer -> provider edge,
+  // regardless of which end the user dragged from. Returns null when the pair is
+  // not a valid wiring. `isLbEdge` styles load-balancer links distinctly.
+  const orientConnection = useCallback(
+    (aId?: string | null, bId?: string | null): { source: string; target: string; isLbEdge: boolean } | null => {
+      const a = nodeById(aId ?? "");
+      const b = nodeById(bId ?? "");
+      if (!a || !b || a.id === b.id) return null;
+      const isConsumer = (k: string) => k === "application" || k === "vms";
+      const isProviderOnly = (k: string) => k === "cluster" || k === "database";
+
+      const orientLb = (lb: DesignNode, host: DesignNode) => {
+        const backend = lbBackendId(lb);
+        if (backend === undefined) return { source: lb.id, target: host.id, isLbEdge: true }; // LB fronts host
+        if (backend === host.id) return null; // can't consume your own load balancer
+        return { source: host.id, target: lb.id, isLbEdge: true }; // host consumes the LB's VIP
+      };
+
+      const ka = a.data.kind;
+      const kb = b.data.kind;
+      if (isProviderOnly(ka) && isConsumer(kb)) return { source: b.id, target: a.id, isLbEdge: false };
+      if (isProviderOnly(kb) && isConsumer(ka)) return { source: a.id, target: b.id, isLbEdge: false };
+      if (ka === "loadbalancer" && isConsumer(kb)) return orientLb(a, b);
+      if (kb === "loadbalancer" && isConsumer(ka)) return orientLb(b, a);
+      if (isConsumer(ka) && isConsumer(kb)) return { source: a.id, target: b.id, isLbEdge: false };
+      return null;
+    },
+    [nodeById, lbBackendId],
+  );
+
+  const isValidConnection = useCallback(
+    (c: Connection | Edge) => orientConnection(c.source, c.target) !== null,
+    [orientConnection],
   );
 
   const onConnect = useCallback(
     (params: Connection) => {
       if (!canvasReady) return;
-      if (!isValidConnection(params)) {
-        showToast("Connect an application to a cluster, or a load balancer to a set of VMs or application.");
+      const oriented = orientConnection(params.source, params.target);
+      if (!oriented) {
+        showToast("Wire a consumer (app or set of VMs) to a cluster, database, load balancer, or another app — not to its own load balancer.");
         return;
       }
-      const source = nodeById(params.source ?? "");
-      const target = nodeById(params.target ?? "");
-      const isLbEdge = source?.data.kind === "loadbalancer" || target?.data.kind === "loadbalancer";
       setEdges((eds) =>
-        addEdge({ ...params, animated: true, ...(isLbEdge ? { className: "design-edge-lb" } : {}) }, eds),
+        addEdge(
+          {
+            id: `edge-${oriented.source}-${oriented.target}`,
+            source: oriented.source,
+            target: oriented.target,
+            animated: true,
+            ...(oriented.isLbEdge ? { className: "design-edge-lb" } : {}),
+          },
+          eds,
+        ),
       );
       setNodes((prev) => layoutDiagram(prev));
       resetPreflight();
     },
-    [canvasReady, isValidConnection, nodeById, setEdges, setNodes, resetPreflight, showToast],
+    [canvasReady, orientConnection, setEdges, setNodes, resetPreflight, showToast],
   );
 
   const onNodeClick = useCallback(
@@ -540,6 +579,7 @@ function DesignCanvas() {
               onEdgesChange={onEdgesChange}
               onConnect={onConnect}
               isValidConnection={isValidConnection}
+              connectionMode={ConnectionMode.Loose}
               onDrop={onDrop}
               onDragOver={onDragOver}
               onNodeClick={onNodeClick}

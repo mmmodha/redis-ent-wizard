@@ -250,7 +250,16 @@ export async function createDatabases(record: InstanceRecord): Promise<DatabaseS
       const port = db.port ?? 12000;
       if (existing.has(db.name)) {
         const bdb = existing.get(db.name);
-        states.push({ cluster: clusterLabel, name: db.name, status: "active", uid: bdb?.uid, port, endpoint: endpointFromBdb(bdb, port, clusterFqdn, target.host) });
+        const endpoint = endpointFromBdb(bdb, port, clusterFqdn, target.host);
+        states.push({
+          cluster: clusterLabel,
+          name: db.name,
+          status: "active",
+          uid: bdb?.uid,
+          port,
+          endpoint,
+          ...endpointWarning(record.mode, endpoint, port, clusterFqdn),
+        });
         continue;
       }
       try {
@@ -271,7 +280,16 @@ export async function createDatabases(record: InstanceRecord): Promise<DatabaseS
           } catch {
             /* ignore */
           }
-          states.push({ cluster: clusterLabel, name: db.name, status: "active", uid: bdb?.uid, port, endpoint: endpointFromBdb(bdb, port, clusterFqdn, target.host) });
+          const endpoint = endpointFromBdb(bdb, port, clusterFqdn, target.host);
+          states.push({
+            cluster: clusterLabel,
+            name: db.name,
+            status: "active",
+            uid: bdb?.uid,
+            port,
+            endpoint,
+            ...endpointWarning(record.mode, endpoint, port, clusterFqdn),
+          });
         } else {
           states.push({ cluster: clusterLabel, name: db.name, status: "failed", error: `HTTP ${res.status}: ${res.body.slice(0, 200)}` });
         }
@@ -300,6 +318,26 @@ function endpointFromBdb(bdb: BdbObj | undefined, port: number, clusterFqdn: str
   if (dns) return `${dns}:${port}`;
   if (clusterFqdn) return `redis-${port}.${clusterFqdn}:${port}`;
   return `${host}:${port}`;
+}
+
+/**
+ * On VM the DB endpoint injected into wired consumers is the predicted RE DNS
+ * name; flag when the cluster actually assigned a different one (no auto-fix —
+ * mechanism (C) is intentionally deferred). GKE consumers use the in-cluster
+ * service DNS, which legitimately differs from the bdb's external DNS, so skip.
+ */
+function endpointWarning(
+  mode: InstanceRecord["mode"],
+  actual: string,
+  port: number,
+  clusterFqdn: string,
+): { warning?: string } {
+  if (mode !== "vm" || !clusterFqdn) return {};
+  const predicted = `redis-${port}.${clusterFqdn}:${port}`;
+  if (actual !== predicted) {
+    return { warning: `Wired consumers point at ${predicted}, but the cluster assigned ${actual}` };
+  }
+  return {};
 }
 
 // --- licensing ------------------------------------------------------------

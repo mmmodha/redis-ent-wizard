@@ -260,6 +260,41 @@ export function predictedDatabaseEndpoint(
   return { endpoint: `${fqdn}:${p}`, resolved: true };
 }
 
+/** Env-var slug from a component name (mirrors the API's envSlug). */
+export function envVarSlug(name: string): string {
+  return String(name || "").toUpperCase().replace(/[^A-Z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+}
+
+/**
+ * The environment variables a provider component injects into any consumer wired
+ * to it. Used to show an "Exposes" hint on nodes, dialogs, and wizard editors.
+ * `connectName` is the reference name a consumer uses (cluster/db/lb/app name;
+ * the Set-of-VMs group is "app").
+ */
+export function exposedVariables(
+  kind: NodeKind,
+  connectName: string,
+): { name: string; description: string }[] {
+  const s = envVarSlug(connectName) || "<NAME>";
+  switch (kind) {
+    case "cluster":
+      return [
+        { name: `REDIS_${s}_HOST`, description: "Cluster endpoint host" },
+        { name: `REDIS_${s}_ADMIN_USER`, description: "Cluster admin username" },
+        { name: `REDIS_${s}_ADMIN_PASSWORD`, description: "Cluster admin password (auto-generated)" },
+      ];
+    case "database":
+      return [{ name: `REDIS_${s}_ENDPOINT`, description: "Database endpoint (host:port)" }];
+    case "loadbalancer":
+      return [{ name: `LB_${s}_ENDPOINT`, description: "Internal load-balancer VIP (host:port)" }];
+    case "application":
+    case "vms":
+      return [{ name: `${s}_HOST`, description: "Component hostname" }];
+    default:
+      return [];
+  }
+}
+
 /**
  * Convert the diagram into the create payload consumed by POST /instances.
  * Mirrors the wizard's `payload()` shape and layers on the new fields.
@@ -277,6 +312,38 @@ export function diagramToCreateInput(
 
   const clusterNameById = new Map<string, string>();
   clusters.forEach((c, i) => clusterNameById.set(c.id, clusterName(c, i)));
+
+  // Provider registries for connection edges. Databases inject their endpoint;
+  // apps and the single Set-of-VMs group ("app") inject a host.
+  const dbNameById = new Map<string, string>();
+  databases.forEach((d) => dbNameById.set(d.id, d.data.name.trim() || "db"));
+  const hostNameById = new Map<string, string>();
+  apps.forEach((a) => hostNameById.set(a.id, a.data.name.trim() || "app"));
+  vmsNodes.forEach((v) => hostNameById.set(v.id, "app"));
+
+  // A load balancer FRONTS a target when the LB is the edge source (or the
+  // target is its parent). An edge INTO the LB is a consumer reading its VIP.
+  const hostIds = [...apps.map((a) => a.id), ...vmsNodes.map((v) => v.id)];
+  const frontingTargetId = (lb: Node<LoadBalancerData>): string | undefined => {
+    if (lb.parentId && hostIds.includes(lb.parentId)) return lb.parentId;
+    for (const e of edges) if (e.source === lb.id && hostIds.includes(e.target)) return e.target;
+    return undefined;
+  };
+  // Final LB names must match load_balancers[].name so the Terraform VIP merge
+  // (google_compute_address.lb[name]) resolves; derive them once here.
+  const lbFinalNameById = new Map<string, string>();
+  lbs.forEach((lb) => {
+    const nm = lb.data.name.trim();
+    const tId = frontingTargetId(lb);
+    if (tId && apps.some((a) => a.id === tId)) {
+      lbFinalNameById.set(lb.id, nm || `${hostNameById.get(tId)}-lb`);
+    } else if (tId) {
+      lbFinalNameById.set(lb.id, nm || "app-lb");
+    } else {
+      lbFinalNameById.set(lb.id, nm || "lb");
+    }
+  });
+  const uniq = (xs: string[]) => [...new Set(xs)];
 
   const databasesFor = (clusterId: string) => {
     const cluster = clusters.find((c) => c.id === clusterId);
@@ -301,9 +368,21 @@ export function diagramToCreateInput(
   };
 
   const applications = apps.map((a) => {
-    const connectClusters = edges
-      .filter((e) => e.source === a.id && clusterNameById.has(e.target))
-      .map((e) => clusterNameById.get(e.target) as string);
+    const outgoing = edges.filter((e) => e.source === a.id);
+    const connectClusters = uniq(
+      outgoing.filter((e) => clusterNameById.has(e.target)).map((e) => clusterNameById.get(e.target) as string),
+    );
+    const connectDatabases = uniq(
+      outgoing.filter((e) => dbNameById.has(e.target)).map((e) => dbNameById.get(e.target) as string),
+    );
+    const connectLoadBalancers = uniq(
+      outgoing.filter((e) => lbFinalNameById.has(e.target)).map((e) => lbFinalNameById.get(e.target) as string),
+    );
+    const connectApps = uniq(
+      outgoing
+        .filter((e) => hostNameById.has(e.target) && e.target !== a.id)
+        .map((e) => hostNameById.get(e.target) as string),
+    );
     const common: Record<string, unknown> = {
       name: a.data.name.trim() || "app",
     };
@@ -313,6 +392,9 @@ export function diagramToCreateInput(
     const env = envToRecord(a.data.env);
     if (Object.keys(env).length) common.env = env;
     if (connectClusters.length) common.connectClusters = connectClusters;
+    if (connectDatabases.length) common.connectDatabases = connectDatabases;
+    if (connectLoadBalancers.length) common.connectLoadBalancers = connectLoadBalancers;
+    if (connectApps.length) common.connectApps = connectApps;
     if (settings.mode === "vm") {
       Object.assign(common, {
         artifact: {
@@ -368,22 +450,15 @@ export function diagramToCreateInput(
         appDiskGib.push(Number(v.data.disk_gib));
       }
     }
-    // A load balancer nested on (or edged to) a Set-of-VMs node opens its ports.
+    // A load balancer fronting the Set-of-VMs node opens its ports.
     const vmsLb = lbs.find((lb) => {
-      if (lb.parentId && vmsNodes.some((v) => v.id === lb.parentId)) return true;
-      return edges.some(
-        (e) =>
-          (e.source === lb.id && vmsNodes.some((v) => v.id === e.target)) ||
-          (e.target === lb.id && vmsNodes.some((v) => v.id === e.source)),
-      );
+      const t = frontingTargetId(lb);
+      return t !== undefined && vmsNodes.some((v) => v.id === t);
     });
 
-    // Internal LB spec: each load balancer node fronts either an application
-    // node or a Set-of-VMs node, detected by parentId or a connecting edge
-    // (mirrors the vmsLb detection). Ports come from the target application when
-    // known, otherwise from the load balancer node's own exposure settings.
-    const appNameById = new Map<string, string>();
-    apps.forEach((a) => appNameById.set(a.id, a.data.name.trim() || "app"));
+    // Internal LB spec: each load balancer node fronts either an application or
+    // the Set-of-VMs group (LB is the edge source or the target is its parent).
+    // Ports come from the target application when known, else the LB's own settings.
     const appPortsById = new Map<string, number[]>();
     apps.forEach((a) => appPortsById.set(a.id, parsePorts(a.data.ports)));
     const lbNodePorts = (lb: Node<LoadBalancerData>): number[] => {
@@ -392,16 +467,6 @@ export function diagramToCreateInput(
       if (lb.data.expose_https) ports.push(443);
       return [...ports, ...parsePorts(String(lb.data.extra_ports))];
     };
-    const attachedNodeId = (lb: Node<LoadBalancerData>, ids: string[]): string | undefined => {
-      if (lb.parentId && ids.includes(lb.parentId)) return lb.parentId;
-      for (const e of edges) {
-        if (e.source === lb.id && ids.includes(e.target)) return e.target;
-        if (e.target === lb.id && ids.includes(e.source)) return e.source;
-      }
-      return undefined;
-    };
-    const appIds = apps.map((a) => a.id);
-    const vmsIds = vmsNodes.map((v) => v.id);
     const loadBalancers: {
       name: string;
       target: string;
@@ -409,29 +474,34 @@ export function diagramToCreateInput(
       ports: number[];
     }[] = [];
     for (const lb of lbs) {
-      const lbName = lb.data.name.trim();
-      const appId = attachedNodeId(lb, appIds);
-      if (appId) {
-        const appName = appNameById.get(appId) as string;
-        const appPorts = appPortsById.get(appId) as number[];
+      const tId = frontingTargetId(lb);
+      if (!tId) continue;
+      const name = lbFinalNameById.get(lb.id) as string;
+      if (apps.some((a) => a.id === tId)) {
+        const appPorts = appPortsById.get(tId) || [];
         loadBalancers.push({
-          name: lbName || `${appName}-lb`,
-          target: appName,
+          name,
+          target: hostNameById.get(tId) as string,
           target_kind: "application",
           ports: appPorts.length ? appPorts : lbNodePorts(lb),
         });
-        continue;
-      }
-      const vmsId = attachedNodeId(lb, vmsIds);
-      if (vmsId) {
-        loadBalancers.push({
-          name: lbName || "app-lb",
-          target: "app",
-          target_kind: "vms",
-          ports: lbNodePorts(lb),
-        });
+      } else {
+        loadBalancers.push({ name, target: "app", target_kind: "vms", ports: lbNodePorts(lb) });
       }
     }
+
+    // Connections from the Set-of-VMs group to providers (vms_connect).
+    const vmsOutgoing = edges.filter((e) => vmsNodes.some((v) => v.id === e.source));
+    const vmsConnect = {
+      clusters: uniq(vmsOutgoing.filter((e) => clusterNameById.has(e.target)).map((e) => clusterNameById.get(e.target) as string)),
+      databases: uniq(vmsOutgoing.filter((e) => dbNameById.has(e.target)).map((e) => dbNameById.get(e.target) as string)),
+      load_balancers: uniq(vmsOutgoing.filter((e) => lbFinalNameById.has(e.target)).map((e) => lbFinalNameById.get(e.target) as string)),
+      apps: uniq(
+        vmsOutgoing
+          .filter((e) => hostNameById.has(e.target) && !vmsNodes.some((v) => v.id === e.target))
+          .map((e) => hostNameById.get(e.target) as string),
+      ),
+    };
 
     Object.assign(base, {
       clustersize: first ? Number(first.data.nodes) : 0,
@@ -475,6 +545,14 @@ export function diagramToCreateInput(
       dns_zone_dns_name: settings.dns_zone_dns_name,
     });
     if (loadBalancers.length) base.load_balancers = loadBalancers;
+    if (
+      vmsConnect.clusters.length ||
+      vmsConnect.databases.length ||
+      vmsConnect.load_balancers.length ||
+      vmsConnect.apps.length
+    ) {
+      base.vms_connect = vmsConnect;
+    }
   } else {
     const root = nodes.find((n) => n.data.kind === "gke");
     const rootData = (root?.data as RootData | undefined) || undefined;
@@ -678,6 +756,9 @@ type StoredAppCfg = {
   ports?: unknown[];
   env?: Record<string, unknown>;
   connectClusters?: unknown[];
+  connectDatabases?: unknown[];
+  connectLoadBalancers?: unknown[];
+  connectApps?: unknown[];
   requirements?: unknown[];
   artifact?: { kind?: string; ref?: string; type?: string; branch?: string; runInDocker?: boolean };
   vm_count?: number;
@@ -798,9 +879,15 @@ export function createInputToDiagram(
 
   // Custom application workloads.
   const apps = Array.isArray(cfg.applications) ? (cfg.applications as StoredAppCfg[]) : [];
-  const appConnects: { appId: string; connect: string[] }[] = [];
+  const arr = (x: unknown): string[] => (Array.isArray(x) ? x.map(String) : []);
+  const appIdByName = new Map<string, string>();
+  const appConnects: {
+    sourceId: string;
+    sel: { clusters: string[]; databases: string[]; load_balancers: string[]; apps: string[] };
+  }[] = [];
   apps.forEach((a, k) => {
     const appId = nextId("application");
+    appIdByName.set(dstr(a.name), appId);
     const env =
       a.env && typeof a.env === "object"
         ? Object.entries(a.env).map(([key, value]) => ({ key, value: String(value) }))
@@ -834,26 +921,30 @@ export function createInputToDiagram(
         expose: a.expose === "lb" ? "lb" : "none",
       },
     });
-    if (Array.isArray(a.connectClusters) && a.connectClusters.length) {
-      appConnects.push({ appId, connect: a.connectClusters.map(String) });
-    }
+    appConnects.push({
+      sourceId: appId,
+      sel: {
+        clusters: arr(a.connectClusters),
+        databases: arr(a.connectDatabases),
+        load_balancers: arr(a.connectLoadBalancers),
+        apps: arr(a.connectApps),
+      },
+    });
   });
 
-  // Edges: application -> cluster, matched by the cluster's slug name.
+  // Name -> id maps for rebuilding consumer edges.
   const clusterNameToId = new Map<string, string>();
   clusterCfgs.forEach((c, i) => {
     clusterNameToId.set(clusterSlug(c.name || "") || `cluster${i + 1}`, clusterIds[i]);
   });
+  const dbNameToId = new Map<string, string>();
+  nodes.forEach((n) => {
+    if (n.data.kind === "database") dbNameToId.set((n.data as DatabaseData).name, n.id);
+  });
+  const hostNameToId = new Map<string, string>();
+  appIdByName.forEach((id, name) => hostNameToId.set(name, id));
+  if (vmsId) hostNameToId.set("app", vmsId);
   let edgeCounter = 0;
-  for (const { appId, connect } of appConnects) {
-    for (const cn of connect) {
-      const targetId = clusterNameToId.get(cn);
-      if (targetId) {
-        edgeCounter += 1;
-        edges.push({ id: `edge-${edgeCounter}`, source: appId, target: targetId, animated: true });
-      }
-    }
-  }
 
   // Load balancer on the Set of VMs when VM app exposure is configured.
   const exposeHttp = Boolean(cfg.app_expose_http);
@@ -864,9 +955,10 @@ export function createInputToDiagram(
       : Array.isArray(cfg.app_extra_ports)
         ? (cfg.app_extra_ports as unknown[]).join(", ")
         : "";
+  const lbNameToId = new Map<string, string>();
   if (vmsId && (exposeHttp || exposeHttps || extraPortsStr.trim())) {
     const lbId = nextId("loadbalancer");
-    // The load balancer is a root peer, linked to its target by an edge.
+    // The load balancer is a root peer, linked to its target by a fronting edge.
     nodes.push({
       id: lbId,
       type: "loadbalancer",
@@ -882,6 +974,9 @@ export function createInputToDiagram(
         extra_ports: extraPortsStr,
       },
     });
+    // The Set-of-VMs LB is named "app-lb" by diagramToCreateInput; map both so
+    // consumer references (connectLoadBalancers) reconnect.
+    lbNameToId.set("app-lb", lbId);
     edgeCounter += 1;
     edges.push({
       id: `edge-${edgeCounter}`,
@@ -889,6 +984,41 @@ export function createInputToDiagram(
       target: vmsId,
       animated: true,
       className: "design-edge-lb",
+    });
+  }
+
+  // Rebuild consumer edges (consumer source -> provider target) for every
+  // connection reference recorded on apps and the Set-of-VMs group.
+  const addConsumerEdges = (
+    sourceId: string,
+    sel: { clusters: string[]; databases: string[]; load_balancers: string[]; apps: string[] },
+  ) => {
+    const push = (targetId: string | undefined, isLb = false) => {
+      if (!targetId || targetId === sourceId) return;
+      edgeCounter += 1;
+      edges.push({
+        id: `edge-${edgeCounter}`,
+        source: sourceId,
+        target: targetId,
+        animated: true,
+        ...(isLb ? { className: "design-edge-lb" } : {}),
+      });
+    };
+    sel.clusters.forEach((n) => push(clusterNameToId.get(n)));
+    sel.databases.forEach((n) => push(dbNameToId.get(n)));
+    sel.load_balancers.forEach((n) => push(lbNameToId.get(n), true));
+    sel.apps.forEach((n) => push(hostNameToId.get(n)));
+  };
+  for (const { sourceId, sel } of appConnects) addConsumerEdges(sourceId, sel);
+  const vc = cfg.vms_connect as
+    | { clusters?: unknown; databases?: unknown; load_balancers?: unknown; apps?: unknown }
+    | undefined;
+  if (vmsId && vc) {
+    addConsumerEdges(vmsId, {
+      clusters: arr(vc.clusters),
+      databases: arr(vc.databases),
+      load_balancers: arr(vc.load_balancers),
+      apps: arr(vc.apps),
     });
   }
 

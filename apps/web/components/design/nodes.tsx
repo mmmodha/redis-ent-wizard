@@ -5,13 +5,14 @@ import { Handle, Position, type NodeProps, type NodeTypes } from "@xyflow/react"
 import { BrandIcon, type IconName } from "@/components/design/BrandIcon";
 import { clusterCapacityMB, useDesignContext } from "@/components/design/DesignContext";
 import { clusterCapacityCaption, clusterCapacityClass } from "@/lib/cluster-capacity";
-import { predictedDatabaseEndpoint } from "@/lib/diagram";
+import { exposedVariables, predictedDatabaseEndpoint } from "@/lib/diagram";
 import { clusterRedisNodeCount, effectiveDbReplication } from "@/lib/db-replication";
 import type {
   ApplicationData,
   ClusterData,
   DatabaseData,
   LoadBalancerData,
+  NodeKind,
   RootData,
   VmsData,
 } from "@/lib/diagram";
@@ -22,6 +23,20 @@ function NodeHeader({ icon, title, tag }: { icon: IconName; title: string; tag?:
       <BrandIcon name={icon} size={16} />
       <span className="design-node-title">{title}</span>
       {tag ? <span className="design-node-tag mono">{tag}</span> : null}
+    </div>
+  );
+}
+
+/** Compact list of the env vars this provider injects into wired consumers. */
+function ExposesLine({ kind, name }: { kind: NodeKind; name: string }) {
+  const vars = exposedVariables(kind, name);
+  if (!vars.length) return null;
+  return (
+    <div
+      className="design-exposes mono"
+      title={vars.map((v) => `${v.name} — ${v.description}`).join("\n")}
+    >
+      <span className="design-exposes-label">exposes</span> {vars.map((v) => v.name).join(" · ")}
     </div>
   );
 }
@@ -65,6 +80,7 @@ export function ClusterNode({ id, data }: NodeProps) {
       <NodeHeader icon="cluster" title={d.name.trim() || "Redis cluster"} tag={`${count} nodes`} />
       <div className="design-node-meta mono">{d.machine_type || "machine type"}</div>
       {caption ? <div className={`design-cap ${capClass}`.trim()}>{caption}</div> : null}
+      <ExposesLine kind="cluster" name={d.name.trim()} />
     </div>
   );
 }
@@ -87,6 +103,7 @@ export function DatabaseNode({ id, data }: NodeProps) {
     : null;
   return (
     <div className="design-db">
+      <Handle type="target" position={Position.Left} className="design-handle" />
       <NodeHeader icon="database" title={d.name.trim() || "database"} />
       <div className="design-node-meta mono">{d.memory_gb} GB</div>
       <div className="design-badges">
@@ -124,6 +141,7 @@ export function DatabaseNode({ id, data }: NodeProps) {
           ) : null}
         </div>
       ) : null}
+      <ExposesLine kind="database" name={d.name.trim()} />
     </div>
   );
 }
@@ -142,6 +160,8 @@ export function VmsNode({ data }: NodeProps) {
       <NodeHeader icon="vm" title={d.name.trim() || "Set of VMs"} tag={`${d.count} VMs`} />
       <div className="design-node-meta mono">{d.machine_type || "machine type"}</div>
       {extras.length ? <div className="design-node-meta mono">{extras.join(" · ")}</div> : null}
+      <ExposesLine kind="vms" name="app" />
+      <Handle type="source" position={Position.Right} className="design-handle" />
     </div>
   );
 }
@@ -166,6 +186,7 @@ export function ApplicationNode({ data }: NodeProps) {
           <span className={`design-badge design-badge-live design-badge-${d.liveStatus}`}>{String(d.liveStatus)}</span>
         </div>
       ) : null}
+      <ExposesLine kind="application" name={d.name.trim()} />
       <Handle type="source" position={Position.Right} className="design-handle" />
     </div>
   );
@@ -183,6 +204,7 @@ export function LoadBalancerNode({ data }: NodeProps) {
       <Handle type="target" position={Position.Left} className="design-handle" />
       <NodeHeader icon="load-balancer" title={d.name.trim() || "Load balancer"} />
       <div className="design-node-meta mono">{ports.length ? ports.join(" · ") : "closed"}</div>
+      <ExposesLine kind="loadbalancer" name={d.name.trim()} />
       <Handle type="source" position={Position.Right} className="design-handle" />
     </div>
   );

@@ -81,6 +81,12 @@ export interface Application {
   requirements?: string[];
   /** Names of clusters in this deployment whose endpoint is injected as env. */
   connectClusters?: string[];
+  /** Names of databases whose endpoint is injected as REDIS_<DB>_ENDPOINT. */
+  connectDatabases?: string[];
+  /** Names of load balancers whose VIP is injected as LB_<LB>_ENDPOINT. */
+  connectLoadBalancers?: string[];
+  /** Names of other applications / Set-of-VMs whose host is injected as <NAME>_HOST. */
+  connectApps?: string[];
   // VM
   artifact?: ApplicationArtifact;
   vm_count?: number;
@@ -104,6 +110,8 @@ export interface DatabaseState {
   endpoint?: string;
   port?: number;
   error?: string;
+  /** Set when the actual bdb endpoint differs from the predicted one injected into consumers. */
+  warning?: string;
 }
 
 /** Per-cluster license application state recorded after the cluster forms. */
@@ -195,6 +203,13 @@ export interface CreateInstanceInput {
   applications?: Application[];
   /** Internal load balancers fronting application / Set-of-VMs groups (VM mode). */
   load_balancers?: LoadBalancerSpec[];
+  /** Connection references from the Set-of-VMs group (app VMs) to providers in this deployment. */
+  vms_connect?: {
+    clusters?: string[];
+    databases?: string[];
+    load_balancers?: string[];
+    apps?: string[];
+  };
   // GKE
   gke_clustersize?: number;
   gke_machine_type?: string;

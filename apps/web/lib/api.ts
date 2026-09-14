@@ -63,6 +63,7 @@ export type DatabaseState = {
   endpoint?: string;
   port?: number;
   error?: string;
+  warning?: string;
 };
 
 export type LicenseState = {

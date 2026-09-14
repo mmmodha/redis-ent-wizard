@@ -136,10 +136,10 @@ locals {
     var.expose_https ? ["app-https"] : [],
     length(var.ports) > 0 ? ["app-extra"] : [],
   )
-  command_set = trimspace(var.command) != ""
-  env_file    = join("\n", [for k, v in var.env : "${k}=${v}"])
-  is_git      = trimspace(var.git_url) != ""
-  needs_docker = contains(var.requirements, "docker")
+  command_set   = trimspace(var.command) != ""
+  env_file      = join("\n", [for k, v in var.env : "${k}=${v}"])
+  is_git        = trimspace(var.git_url) != ""
+  needs_docker  = contains(var.requirements, "docker")
   deploy_source = local.is_git ? "${path.module}/placeholder.txt" : var.artifact_local_path
   deploy_dest   = local.is_git ? "/tmp/placeholder.txt" : "/tmp/${var.artifact_filename}"
 

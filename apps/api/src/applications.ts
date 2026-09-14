@@ -124,6 +124,15 @@ export function normalizeApplications(input: {
     const connectClusters = Array.isArray(raw.connectClusters)
       ? raw.connectClusters.map((c) => String(c)).filter(Boolean)
       : [];
+    const connectDatabases = Array.isArray(raw.connectDatabases)
+      ? raw.connectDatabases.map((c) => String(c)).filter(Boolean)
+      : [];
+    const connectLoadBalancers = Array.isArray(raw.connectLoadBalancers)
+      ? raw.connectLoadBalancers.map((c) => String(c)).filter(Boolean)
+      : [];
+    const connectApps = Array.isArray(raw.connectApps)
+      ? raw.connectApps.map((c) => String(c)).filter(Boolean)
+      : [];
 
     if (mode === "vm") {
       if (!raw.artifact || !raw.artifact.ref) {
@@ -158,6 +167,9 @@ export function normalizeApplications(input: {
         ports,
         env,
         connectClusters,
+        connectDatabases,
+        connectLoadBalancers,
+        connectApps,
         artifact: {
           kind,
           ref: artifactRef,
@@ -185,6 +197,9 @@ export function normalizeApplications(input: {
       ports,
       env,
       connectClusters,
+      connectDatabases,
+      connectLoadBalancers,
+      connectApps,
       image: String(raw.image).trim(),
       replicas: clampInt(raw.replicas, 1, MAX_REPLICAS, 1),
       expose: raw.expose === "lb" || raw.expose === "http" || raw.expose === "https" ? raw.expose : "none",

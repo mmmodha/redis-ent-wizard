@@ -269,6 +269,40 @@
   flex-shrink: 0;
 }
 
+/* "Exposes" hint on provider nodes — the env vars injected into consumers. */
+.design-exposes {
+  margin-top: auto;
+  padding: 4px 8px 6px;
+  font-size: 10px;
+  line-height: 1.35;
+  color: var(--redis-text-secondary);
+  border-top: 1px dashed var(--border-soft);
+  word-break: break-word;
+}
+
+.design-exposes-label {
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.7;
+  margin-right: 4px;
+}
+
+/* "Exposes" read-only section inside a node dialog. */
+.design-exposes-list {
+  margin: 4px 0 0;
+  padding-left: 0;
+  list-style: none;
+}
+
+.design-exposes-list li {
+  font-size: 12px;
+  margin-bottom: 2px;
+}
+
+.design-exposes-desc {
+  color: var(--redis-text-secondary);
+}
+
 .design-cluster,
 .design-db,
 .design-vms,

@@ -36,7 +36,12 @@ variable "applications" {
     replicas = number
     ports    = list(number)
     env      = map(string)
-    expose   = string
+    env_secret_refs = optional(list(object({
+      name        = string
+      secret_name = string
+      secret_key  = string
+    })), [])
+    expose = string
   }))
   default = []
 }
@@ -68,7 +73,17 @@ locals {
                     {
                       name  = a.name
                       image = a.image
-                      env   = [for k, v in a.env : { name = k, value = v }]
+                      env = concat(
+                        [for k, v in a.env : { name = k, value = v }],
+                        # Cluster admin creds come from the operator's REC secret;
+                        # optional so a missing secret/key never blocks the pod.
+                        [for r in a.env_secret_refs : {
+                          name = r.name
+                          valueFrom = {
+                            secretKeyRef = { name = r.secret_name, key = r.secret_key, optional = true }
+                          }
+                        }],
+                      )
                       ports = [for p in a.ports : { containerPort = p }]
                     },
                     trimspace(a.command) != "" ? { command = split(" ", trimspace(a.command)) } : {},

@@ -8,6 +8,7 @@ import {
   ApplicationsEditor,
   DatabaseEditor,
   LoadBalancerEditor,
+  VmsConnectEditor,
   blankApplication,
   blankLb,
   databaseDraftFromConfig,
@@ -171,6 +172,7 @@ type WizardForm = {
   clusters: ClusterDraft[];
   applications: ApplicationDraft[];
   load_balancers: LbDraft[];
+  vms_connect: { clusters: string[]; databases: string[]; load_balancers: string[]; apps: string[] };
   RS_admin: string;
   app: number;
   app_machine_types: string[];
@@ -202,6 +204,9 @@ function applicationDraftFromConfig(a: Record<string, unknown>): ApplicationDraf
     ports: Array.isArray(a.ports) ? a.ports.map(String).join(", ") : "",
     env,
     connectClusters: strArray(a.connectClusters),
+    connectDatabases: strArray(a.connectDatabases),
+    connectLoadBalancers: strArray(a.connectLoadBalancers),
+    connectApps: strArray(a.connectApps),
     requirements: strArray(a.requirements),
     artifact: {
       kind:
@@ -278,6 +283,15 @@ function formFromConfig(
     load_balancers: Array.isArray(cfg.load_balancers)
       ? (cfg.load_balancers as Record<string, unknown>[]).map(lbDraftFromConfig)
       : [],
+    vms_connect: (() => {
+      const vc = (cfg.vms_connect as Record<string, unknown> | undefined) || {};
+      return {
+        clusters: strArray(vc.clusters),
+        databases: strArray(vc.databases),
+        load_balancers: strArray(vc.load_balancers),
+        apps: strArray(vc.apps),
+      };
+    })(),
     RS_admin: str(cfg.RS_admin) || prev.RS_admin,
     app: Number(cfg.app) || 0,
     app_machine_types: strArray(cfg.app_machine_types),
@@ -336,6 +350,12 @@ function WizardInner() {
     clusters: [blankCluster()] as ClusterDraft[],
     applications: [] as ApplicationDraft[],
     load_balancers: [] as LbDraft[],
+    vms_connect: { clusters: [], databases: [], load_balancers: [], apps: [] } as {
+      clusters: string[];
+      databases: string[];
+      load_balancers: string[];
+      apps: string[];
+    },
     RS_admin: "admin@redis.io",
     app: 0,
     app_machine_types: [] as string[],
@@ -386,6 +406,24 @@ function WizardInner() {
   const appNames = useMemo(
     () => form.applications.map((a) => a.name.trim()).filter(Boolean),
     [form.applications],
+  );
+
+  // Connectable provider names for the application/Set-of-VMs multi-selects.
+  const databaseConnectNames = useMemo(
+    () => form.clusters.flatMap((c) => c.databases.map((d) => d.name.trim()).filter(Boolean)),
+    [form.clusters],
+  );
+  const lbConnectNames = useMemo(
+    () =>
+      form.load_balancers
+        .map((lb) => lb.name.trim() || `${lb.target_kind === "vms" ? "app" : lb.target}-lb`)
+        .filter(Boolean),
+    [form.load_balancers],
+  );
+  // Host providers: named applications, plus the Set-of-VMs group ("app").
+  const appHostConnectNames = useMemo(
+    () => [...(form.app > 0 ? ["app"] : []), ...appNames],
+    [form.app, appNames],
   );
 
   useEffect(() => {
@@ -578,6 +616,10 @@ function WizardInner() {
       if (ports.length) app.ports = ports;
       if (Object.keys(env).length) app.env = env;
       if (a.connectClusters.length) app.connectClusters = a.connectClusters;
+      if (a.connectDatabases.length) app.connectDatabases = a.connectDatabases;
+      if (form.mode === "vm" && a.connectLoadBalancers.length)
+        app.connectLoadBalancers = a.connectLoadBalancers;
+      if (a.connectApps.length) app.connectApps = a.connectApps;
       if (a.requirements.length) app.requirements = a.requirements;
       if (form.mode === "vm") {
         Object.assign(app, {
@@ -666,6 +708,16 @@ function WizardInner() {
         .filter((lb) => lb.ports.length && lb.target)
         .map((lb) => ({ ...lb, name: lb.name || `${lb.target}-lb` }));
       if (loadBalancers.length) base.load_balancers = loadBalancers;
+      }
+      if (form.app > 0) {
+        const vc = {
+          clusters: form.vms_connect.clusters,
+          databases: form.vms_connect.databases,
+          load_balancers: form.vms_connect.load_balancers,
+          apps: form.vms_connect.apps,
+        };
+        if (vc.clusters.length || vc.databases.length || vc.load_balancers.length || vc.apps.length)
+          base.vms_connect = vc;
       }
     } else {
       Object.assign(base, {
@@ -1555,6 +1607,9 @@ function WizardInner() {
               probeZone={probeZone}
               defaultMachineType={appDefaultMachineType}
               clusterNames={clusterConnectNames}
+              databaseNames={databaseConnectNames}
+              loadBalancerNames={lbConnectNames}
+              appHostNames={appHostConnectNames}
               onChange={(applications) => {
                 setForm((prev) => ({ ...prev, applications }));
                 setPreflightResult(null);
@@ -1569,6 +1624,20 @@ function WizardInner() {
                 setPreflightResult(null);
               }}
             />
+
+            {form.app > 0 ? (
+              <VmsConnectEditor
+                value={form.vms_connect}
+                clusterNames={clusterConnectNames}
+                databaseNames={databaseConnectNames}
+                loadBalancerNames={lbConnectNames}
+                appHostNames={appHostConnectNames}
+                onChange={(vms_connect) => {
+                  setForm((prev) => ({ ...prev, vms_connect }));
+                  setPreflightResult(null);
+                }}
+              />
+            ) : null}
           </div>
         )}
 
@@ -1752,6 +1821,8 @@ function WizardInner() {
               probeZone={probeZone}
               defaultMachineType={appDefaultMachineType}
               clusterNames={clusterConnectNames}
+              databaseNames={databaseConnectNames}
+              appHostNames={appHostConnectNames}
               onChange={(applications) => {
                 setForm((prev) => ({ ...prev, applications }));
                 setPreflightResult(null);
