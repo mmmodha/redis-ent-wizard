@@ -104,7 +104,7 @@ export default function CredentialsPage() {
             JSON here, save, and verify.
           </p>
         </div>
-        <Link className="btn" href="/wizard">
+        <Link className="btn" href="/edit">
           Create instance
         </Link>
       </div>

@@ -521,14 +521,9 @@ export default function InstanceDetailPage() {
               </button>
             ) : null}
             {inst?.status === "destroyed" ? (
-              <>
-                <Link className="btn" href={`/wizard?from=${encodeURIComponent(id)}`}>
-                  Edit in wizard
-                </Link>
-                <Link className="btn" href={`/design?from=${encodeURIComponent(id)}`}>
-                  Edit in designer
-                </Link>
-              </>
+              <Link className="btn" href={`/edit?from=${encodeURIComponent(id)}`}>
+                Edit
+              </Link>
             ) : null}
             {canForget ? (
               <button

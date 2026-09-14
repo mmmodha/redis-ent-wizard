@@ -260,7 +260,7 @@ export function InstanceBoard() {
       ) : !filtered.length ? (
         <div className="empty">
           No instances match.{" "}
-          <Link href="/wizard">Create one</Link> or clear filters.
+          <Link href="/edit">Create one</Link> or clear filters.
         </div>
       ) : (
         <div className="group-stack">
@@ -320,14 +320,7 @@ export function InstanceBoard() {
                             ) : null}
                             {inst.status === "destroyed" ? (
                               <div className="hint">
-                                Edit in{" "}
-                                <Link href={`/wizard?from=${encodeURIComponent(inst.id)}`}>
-                                  wizard
-                                </Link>{" "}
-                                or{" "}
-                                <Link href={`/design?from=${encodeURIComponent(inst.id)}`}>
-                                  designer
-                                </Link>
+                                <Link href={`/edit?from=${encodeURIComponent(inst.id)}`}>Edit</Link>
                               </div>
                             ) : null}
                           </td>

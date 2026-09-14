@@ -5,11 +5,17 @@ import { usePathname } from "next/navigation";
 import { RedisLogo } from "@/components/RedisLogo";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { useAuth } from "@/lib/auth";
+import { legacyCreateFlowsEnabled } from "@/lib/flags";
 
 const TABS = [
   { href: "/", label: "Instances", match: (p: string) => p === "/" || p.startsWith("/instances") },
-  { href: "/wizard", label: "Create", match: (p: string) => p.startsWith("/wizard") },
-  { href: "/design", label: "Design", match: (p: string) => p.startsWith("/design") },
+  { href: "/edit", label: "Wizard", match: (p: string) => p.startsWith("/edit") },
+  ...(legacyCreateFlowsEnabled()
+    ? [
+        { href: "/wizard", label: "Create (legacy)", match: (p: string) => p.startsWith("/wizard") },
+        { href: "/design", label: "Design (legacy)", match: (p: string) => p.startsWith("/design") },
+      ]
+    : []),
   { href: "/credentials", label: "Credentials", match: (p: string) => p.startsWith("/credentials") },
 ];
 

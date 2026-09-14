@@ -153,6 +153,13 @@ code,
   padding: calc(var(--space) * 3);
 }
 
+.edit-view-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: calc(var(--space) * 2) 0;
+}
+
 .appnav {
   margin-bottom: calc(var(--space) * 3);
 }

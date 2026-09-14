@@ -14,7 +14,7 @@ export default function HomePage() {
             Group by folder or owner, select many, destroy or move in bulk.
           </p>
         </div>
-        <Link className="btn btn-primary" href="/wizard">
+        <Link className="btn btn-primary" href="/edit">
           New instance
         </Link>
       </div>
