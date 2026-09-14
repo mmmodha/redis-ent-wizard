@@ -387,6 +387,10 @@ export default function InstanceDetailPage() {
     ? (inst!.endpoints!.pubsub_topics as Array<Record<string, unknown>>)
     : [];
   const showPubsubPanel = pubsubTopics.length > 0;
+  const bigqueryDatasets = Array.isArray(inst?.endpoints?.bigquery_datasets)
+    ? (inst!.endpoints!.bigquery_datasets as Array<Record<string, unknown>>)
+    : [];
+  const showBigqueryPanel = bigqueryDatasets.length > 0;
   const dbStatusColor = (status: string) => statusToneColor(status);
   const showDbPanel = databases.length > 0 || licenses.length > 0 || configuredDbCount > 0;
   const showAppPanel = vmWorkloads.length > 0 || gkeAppServices.length > 0 || configuredAppCount > 0;
@@ -810,6 +814,39 @@ export default function InstanceDetailPage() {
                               </button>
                             </span>
                             {subscription ? <div className="hint mono">{subscription}</div> : null}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              ) : null}
+
+              {showBigqueryPanel ? (
+                <div className="access-section">
+                  <h3>BigQuery</h3>
+                  <div className="summary-grid">
+                    {bigqueryDatasets.map((d, i) => {
+                      const name = String(d.name || "");
+                      const location = String(d.location || "");
+                      return (
+                        <div className="summary-row" key={`dataset-${name}-${i}`}>
+                          <div className="summary-label">
+                            {name}
+                            {location ? <div className="hint">{location}</div> : null}
+                          </div>
+                          <div className="summary-value">
+                            <span className="db-endpoint-row">
+                              <span className="mono">{name}</span>
+                              <button
+                                type="button"
+                                className="btn btn-copy"
+                                onClick={() => copyEndpoint(name)}
+                                title="Copy dataset id to clipboard"
+                              >
+                                {copied === name ? "Copied" : "Copy"}
+                              </button>
+                            </span>
                           </div>
                         </div>
                       );

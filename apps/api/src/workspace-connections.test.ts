@@ -23,6 +23,7 @@ const baseInput = (): CreateInstanceInput => ({
   load_balancers: [{ name: "front", target: "web", target_kind: "application", ports: [8080] }],
   storage_buckets: [{ name: "assets", access: "readwrite" }],
   pubsub_topics: [{ name: "events", create_subscription: true, role: "both" }],
+  bigquery_datasets: [{ name: "analytics", access: "readwrite" }],
 });
 
 describe("resolveVmConnections", () => {
@@ -38,6 +39,7 @@ describe("resolveVmConnections", () => {
         connectApps: ["web"],
         connectStorage: ["assets"],
         connectPubsub: ["events"],
+        connectBigquery: ["analytics"],
       },
       reg,
     );
@@ -47,6 +49,8 @@ describe("resolveVmConnections", () => {
     assert.equal(conn.env.PUBSUB_EVENTS_TOPIC, "projects/proj/topics/demo-default-events");
     assert.equal(conn.env.PUBSUB_EVENTS_SUBSCRIPTION, "projects/proj/subscriptions/demo-default-events-sub");
     assert.equal(conn.env.PUBSUB_EVENTS_PROJECT, "proj");
+    assert.equal(conn.env.BIGQUERY_ANALYTICS_DATASET, "demo_default_analytics");
+    assert.equal(conn.env.BIGQUERY_ANALYTICS_PROJECT, "proj");
     assert.equal(conn.env.REDIS_CACHE_ADMIN_USER, "admin@redis.io");
     assert.equal(conn.env.REDIS_HOST, "cluster.demo-default-cache.demo.redislabs.com");
     assert.equal(

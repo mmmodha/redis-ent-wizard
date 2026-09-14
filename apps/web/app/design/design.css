@@ -49,6 +49,10 @@
   -webkit-mask-image: url(/brand/icons/pubsub.svg);
   mask-image: url(/brand/icons/pubsub.svg);
 }
+.design-icon-bigquery {
+  -webkit-mask-image: url(/brand/icons/bigquery.svg);
+  mask-image: url(/brand/icons/bigquery.svg);
+}
 
 /* Settings panel */
 .design-settings-panel {
@@ -355,7 +359,8 @@
 .design-app,
 .design-lb,
 .design-storage,
-.design-pubsub {
+.design-pubsub,
+.design-bigquery {
   width: 100%;
   height: 100%;
   border: 1px solid var(--border-soft);
@@ -396,6 +401,10 @@
 
 .design-pubsub {
   border-left: 3px solid var(--redis-hyper);
+}
+
+.design-bigquery {
+  border-left: 3px solid var(--redis-text-link);
 }
 
 .design-cap {

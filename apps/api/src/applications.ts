@@ -139,6 +139,9 @@ export function normalizeApplications(input: {
     const connectPubsub = Array.isArray(raw.connectPubsub)
       ? raw.connectPubsub.map((c) => String(c)).filter(Boolean)
       : [];
+    const connectBigquery = Array.isArray(raw.connectBigquery)
+      ? raw.connectBigquery.map((c) => String(c)).filter(Boolean)
+      : [];
 
     if (mode === "vm") {
       if (!raw.artifact || !raw.artifact.ref) {
@@ -178,6 +181,7 @@ export function normalizeApplications(input: {
         connectApps,
         connectStorage,
         connectPubsub,
+        connectBigquery,
         artifact: {
           kind,
           ref: artifactRef,
@@ -210,6 +214,7 @@ export function normalizeApplications(input: {
       connectApps,
       connectStorage,
       connectPubsub,
+      connectBigquery,
       image: String(raw.image).trim(),
       replicas: clampInt(raw.replicas, 1, MAX_REPLICAS, 1),
       expose: raw.expose === "lb" || raw.expose === "http" || raw.expose === "https" ? raw.expose : "none",

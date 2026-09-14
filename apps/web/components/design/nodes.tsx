@@ -9,6 +9,7 @@ import { exposedVariables, predictedDatabaseEndpoint } from "@/lib/diagram";
 import { clusterRedisNodeCount, effectiveDbReplication } from "@/lib/db-replication";
 import type {
   ApplicationData,
+  BigqueryData,
   ClusterData,
   DatabaseData,
   LoadBalancerData,
@@ -240,6 +241,19 @@ export function PubsubNode({ data }: NodeProps) {
   );
 }
 
+export function BigqueryNode({ data }: NodeProps) {
+  const d = data as BigqueryData;
+  const meta = [d.location.trim() || "region", d.access === "read" ? "read-only" : "read+write"].join(" · ");
+  return (
+    <div className="design-bigquery">
+      <Handle type="target" position={Position.Left} className="design-hit" />
+      <NodeHeader icon="bigquery" title={d.name.trim() || "BigQuery"} />
+      <div className="design-node-meta mono">{meta}</div>
+      <ExposesLine kind="bigquery" name={d.name.trim()} />
+    </div>
+  );
+}
+
 export const nodeTypes: NodeTypes = {
   network: RootNode,
   gke: RootNode,
@@ -250,4 +264,5 @@ export const nodeTypes: NodeTypes = {
   loadbalancer: LoadBalancerNode,
   storage: StorageNode,
   pubsub: PubsubNode,
+  bigquery: BigqueryNode,
 };

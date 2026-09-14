@@ -20,6 +20,7 @@ import {
 import { normalizeApplications } from "./applications.js";
 import { bucketFullName, normalizeStorageBuckets } from "./storage.js";
 import { normalizePubsub } from "./pubsub.js";
+import { normalizeBigquery } from "./bigquery.js";
 import { capacityFor } from "./databases.js";
 import { clusterTrialShardGate } from "./trial-shards.js";
 import { LOCAL_SSD_GIB, maxLocalSsdsForMachineType } from "./nvme.js";
@@ -863,6 +864,7 @@ export async function preflight(
     const lbByName = new Map((input.load_balancers || []).map((lb) => [lb.name, lb]));
     const bucketNames = new Set<string>((input.storage_buckets || []).map((b) => b.name));
     const topicNames = new Set<string>((input.pubsub_topics || []).map((t) => t.name));
+    const datasetNames = new Set<string>((input.bigquery_datasets || []).map((d) => d.name));
     let connApps: ReturnType<typeof normalizeApplications> = [];
     try {
       connApps = normalizeApplications({ mode, applications: input.applications });
@@ -882,6 +884,7 @@ export async function preflight(
         connectApps?: string[];
         connectStorage?: string[];
         connectPubsub?: string[];
+        connectBigquery?: string[];
       },
       self: { app?: string; isVmsGroup?: boolean },
     ) => {
@@ -893,6 +896,8 @@ export async function preflight(
         if (!bucketNames.has(b)) problems.push(`${label} → unknown storage bucket "${b}"`);
       for (const p of sel.connectPubsub || [])
         if (!topicNames.has(p)) problems.push(`${label} → unknown Pub/Sub topic "${p}"`);
+      for (const d of sel.connectBigquery || [])
+        if (!datasetNames.has(d)) problems.push(`${label} → unknown BigQuery dataset "${d}"`);
       for (const a of sel.connectApps || []) {
         if (self.app && a === self.app) problems.push(`${label} cannot connect to itself`);
         else if (!appNames.has(a) && appCount === 0)
@@ -924,6 +929,7 @@ export async function preflight(
           connectApps: input.vms_connect.apps,
           connectStorage: input.vms_connect.storage,
           connectPubsub: input.vms_connect.pubsub,
+          connectBigquery: input.vms_connect.bigquery,
         },
         { isVmsGroup: true },
       );
@@ -937,7 +943,8 @@ export async function preflight(
             a.connectLoadBalancers?.length ||
             a.connectApps?.length ||
             a.connectStorage?.length ||
-            a.connectPubsub?.length) ??
+            a.connectPubsub?.length ||
+            a.connectBigquery?.length) ??
           0,
       ) ||
       Boolean(
@@ -947,7 +954,8 @@ export async function preflight(
             input.vms_connect.load_balancers?.length ||
             input.vms_connect.apps?.length ||
             input.vms_connect.storage?.length ||
-            input.vms_connect.pubsub?.length),
+            input.vms_connect.pubsub?.length ||
+            input.vms_connect.bigquery?.length),
       );
     if (problems.length) {
       checks.push(fail("connections", "Component connections", problems.join("; ")));
@@ -1056,6 +1064,49 @@ export async function preflight(
         }
       } catch (err) {
         checks.push(warn("pubsub_iam", "Pub/Sub IAM", `Could not verify: ${errorText(err)}`));
+      }
+    }
+  }
+
+  // 12i. BigQuery datasets
+  {
+    let datasets: ReturnType<typeof normalizeBigquery> = [];
+    try {
+      datasets = normalizeBigquery(input);
+    } catch (err) {
+      checks.push(fail("bigquery", "BigQuery", err instanceof Error ? err.message : String(err)));
+    }
+    if (datasets.length) {
+      const connected = new Set<string>();
+      for (const a of input.applications || [])
+        for (const d of a.connectBigquery || []) connected.add(String(d));
+      for (const d of input.vms_connect?.bigquery || []) connected.add(String(d));
+
+      try {
+        const enabled = await listEnabledServices(credentialsFile, project);
+        if (!enabled.includes("bigquery.googleapis.com")) {
+          checks.push(fail("bigquery_api", "BigQuery API", "Not enabled: bigquery.googleapis.com"));
+        }
+      } catch {
+        /* covered by the APIs check */
+      }
+
+      try {
+        // dataset create/IAM plus (when connected) the project-level jobUser binding.
+        const perms = connected.size
+          ? ["bigquery.datasets.create", "bigquery.datasets.setIamPolicy", "resourcemanager.projects.setIamPolicy"]
+          : ["bigquery.datasets.create"];
+        const granted = await testIamPermissions(credentialsFile, project, perms);
+        const missing = perms.filter((p) => !granted.includes(p));
+        if (missing.length) {
+          checks.push(
+            fail("bigquery_iam", "BigQuery IAM", `Missing ${missing.join(", ")} — grant roles/bigquery.admin (+ project IAM admin for jobUser)`),
+          );
+        } else {
+          checks.push(pass("bigquery", "BigQuery", `${datasets.length} dataset(s), ${connected.size} connected to a consumer`));
+        }
+      } catch (err) {
+        checks.push(warn("bigquery_iam", "BigQuery IAM", `Could not verify: ${errorText(err)}`));
       }
     }
   }

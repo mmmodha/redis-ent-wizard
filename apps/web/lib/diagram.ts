@@ -15,7 +15,8 @@ export type NodeKind =
   | "application"
   | "loadbalancer"
   | "storage"
-  | "pubsub";
+  | "pubsub"
+  | "bigquery";
 
 export type RootData = {
   kind: "network" | "gke";
@@ -123,6 +124,14 @@ export type PubsubData = {
   [k: string]: unknown;
 };
 
+export type BigqueryData = {
+  kind: "bigquery";
+  name: string;
+  location: string;
+  access: "read" | "readwrite";
+  [k: string]: unknown;
+};
+
 export type DesignNodeData =
   | RootData
   | ClusterData
@@ -131,7 +140,8 @@ export type DesignNodeData =
   | ApplicationData
   | LoadBalancerData
   | StorageData
-  | PubsubData;
+  | PubsubData
+  | BigqueryData;
 
 export type DesignNode = Node<DesignNodeData>;
 export type DesignEdge = Edge;
@@ -248,6 +258,9 @@ function isStorage(n: DesignNode): n is Node<StorageData> {
 function isPubsub(n: DesignNode): n is Node<PubsubData> {
   return n.data.kind === "pubsub";
 }
+function isBigquery(n: DesignNode): n is Node<BigqueryData> {
+  return n.data.kind === "bigquery";
+}
 
 /** Human-facing name for a cluster node, used for edge connect references. */
 export function clusterName(node: Node<ClusterData>, index: number): string {
@@ -327,6 +340,12 @@ export function exposedVariables(
         { name: `PUBSUB_${s}_SUBSCRIPTION`, description: "Subscription resource name (if created)" },
         { name: `PUBSUB_${s}_PROJECT`, description: "GCP project id" },
       ];
+    case "bigquery":
+      return [
+        { name: `BIGQUERY_${s}_DATASET`, description: "Dataset id" },
+        { name: `BIGQUERY_${s}_PROJECT`, description: "GCP project id" },
+        { name: `BIGQUERY_${s}_LOCATION`, description: "Dataset location" },
+      ];
     case "application":
     case "vms":
       return [{ name: `${s}_HOST`, description: "Component hostname" }];
@@ -351,6 +370,7 @@ export function diagramToCreateInput(
   const lbs = nodes.filter(isLoadBalancer);
   const storageNodes = nodes.filter(isStorage);
   const pubsubNodes = nodes.filter(isPubsub);
+  const bigqueryNodes = nodes.filter(isBigquery);
 
   const clusterNameById = new Map<string, string>();
   clusters.forEach((c, i) => clusterNameById.set(c.id, clusterName(c, i)));
@@ -363,6 +383,8 @@ export function diagramToCreateInput(
   storageNodes.forEach((s) => storageNameById.set(s.id, s.data.name.trim() || "bucket"));
   const pubsubNameById = new Map<string, string>();
   pubsubNodes.forEach((p) => pubsubNameById.set(p.id, p.data.name.trim() || "topic"));
+  const bigqueryNameById = new Map<string, string>();
+  bigqueryNodes.forEach((b) => bigqueryNameById.set(b.id, b.data.name.trim() || "dataset"));
   const hostNameById = new Map<string, string>();
   apps.forEach((a) => hostNameById.set(a.id, a.data.name.trim() || "app"));
   vmsNodes.forEach((v) => hostNameById.set(v.id, "app"));
@@ -435,6 +457,9 @@ export function diagramToCreateInput(
     const connectPubsub = uniq(
       outgoing.filter((e) => pubsubNameById.has(e.target)).map((e) => pubsubNameById.get(e.target) as string),
     );
+    const connectBigquery = uniq(
+      outgoing.filter((e) => bigqueryNameById.has(e.target)).map((e) => bigqueryNameById.get(e.target) as string),
+    );
     const common: Record<string, unknown> = {
       name: a.data.name.trim() || "app",
     };
@@ -449,6 +474,7 @@ export function diagramToCreateInput(
     if (connectApps.length) common.connectApps = connectApps;
     if (connectStorage.length) common.connectStorage = connectStorage;
     if (connectPubsub.length) common.connectPubsub = connectPubsub;
+    if (connectBigquery.length) common.connectBigquery = connectBigquery;
     if (settings.mode === "vm") {
       Object.assign(common, {
         artifact: {
@@ -508,6 +534,13 @@ export function diagramToCreateInput(
     role: p.data.role,
   }));
   if (pubsubTopics.length) base.pubsub_topics = pubsubTopics;
+
+  const bigqueryDatasets = bigqueryNodes.map((b) => ({
+    name: b.data.name.trim() || "dataset",
+    location: b.data.location.trim() || undefined,
+    access: b.data.access,
+  }));
+  if (bigqueryDatasets.length) base.bigquery_datasets = bigqueryDatasets;
 
   if (settings.mode === "vm") {
     const clusterNodes = clusters;
@@ -579,6 +612,9 @@ export function diagramToCreateInput(
       pubsub: uniq(
         vmsOutgoing.filter((e) => pubsubNameById.has(e.target)).map((e) => pubsubNameById.get(e.target) as string),
       ),
+      bigquery: uniq(
+        vmsOutgoing.filter((e) => bigqueryNameById.has(e.target)).map((e) => bigqueryNameById.get(e.target) as string),
+      ),
     };
 
     Object.assign(base, {
@@ -629,7 +665,8 @@ export function diagramToCreateInput(
       vmsConnect.load_balancers.length ||
       vmsConnect.apps.length ||
       vmsConnect.storage.length ||
-      vmsConnect.pubsub.length
+      vmsConnect.pubsub.length ||
+      vmsConnect.bigquery.length
     ) {
       base.vms_connect = vmsConnect;
     }
@@ -682,6 +719,7 @@ export const NODE_SIZE: Record<string, { width: number; height: number }> = {
   application: { width: 232, height: 120 },
   storage: { width: 232, height: 120 },
   pubsub: { width: 232, height: 120 },
+  bigquery: { width: 232, height: 120 },
 };
 
 /** Initial style for a freshly dropped node, if the kind has a preset size. */
@@ -843,6 +881,7 @@ type StoredAppCfg = {
   connectApps?: unknown[];
   connectStorage?: unknown[];
   connectPubsub?: unknown[];
+  connectBigquery?: unknown[];
   requirements?: unknown[];
   artifact?: { kind?: string; ref?: string; type?: string; branch?: string; runInDocker?: boolean };
   vm_count?: number;
@@ -1017,6 +1056,31 @@ export function createInputToDiagram(
     if (name) pubsubNameToId.set(name, id);
   });
 
+  // BigQuery datasets (both modes).
+  const bigqueryCfgs = Array.isArray(cfg.bigquery_datasets)
+    ? (cfg.bigquery_datasets as Record<string, unknown>[])
+    : [];
+  const bigqueryNameToId = new Map<string, string>();
+  bigqueryCfgs.forEach((b, i) => {
+    const id = nextId("bigquery");
+    const name = dstr(b.name);
+    nodes.push({
+      id,
+      type: "bigquery",
+      parentId: ROOT_ID,
+      extent: "parent",
+      position: { x: 760 + i * 220, y: 300 },
+      style: { width: NODE_SIZE.bigquery.width, height: NODE_SIZE.bigquery.height },
+      data: {
+        kind: "bigquery",
+        name,
+        location: dstr(b.location),
+        access: b.access === "read" ? "read" : "readwrite",
+      },
+    });
+    if (name) bigqueryNameToId.set(name, id);
+  });
+
   // Custom application workloads.
   const apps = Array.isArray(cfg.applications) ? (cfg.applications as StoredAppCfg[]) : [];
   const arr = (x: unknown): string[] => (Array.isArray(x) ? x.map(String) : []);
@@ -1030,6 +1094,7 @@ export function createInputToDiagram(
       apps: string[];
       storage: string[];
       pubsub: string[];
+      bigquery: string[];
     };
   }[] = [];
   apps.forEach((a, k) => {
@@ -1077,6 +1142,7 @@ export function createInputToDiagram(
         apps: arr(a.connectApps),
         storage: arr(a.connectStorage),
         pubsub: arr(a.connectPubsub),
+        bigquery: arr(a.connectBigquery),
       },
     });
   });
@@ -1147,6 +1213,7 @@ export function createInputToDiagram(
       apps: string[];
       storage: string[];
       pubsub: string[];
+      bigquery: string[];
     },
   ) => {
     const push = (targetId: string | undefined, isLb = false) => {
@@ -1166,6 +1233,7 @@ export function createInputToDiagram(
     sel.apps.forEach((n) => push(hostNameToId.get(n)));
     sel.storage.forEach((n) => push(storageNameToId.get(n)));
     sel.pubsub.forEach((n) => push(pubsubNameToId.get(n)));
+    sel.bigquery.forEach((n) => push(bigqueryNameToId.get(n)));
   };
   for (const { sourceId, sel } of appConnects) addConsumerEdges(sourceId, sel);
   const vc = cfg.vms_connect as
@@ -1176,6 +1244,7 @@ export function createInputToDiagram(
         apps?: unknown;
         storage?: unknown;
         pubsub?: unknown;
+        bigquery?: unknown;
       }
     | undefined;
   if (vmsId && vc) {
@@ -1186,6 +1255,7 @@ export function createInputToDiagram(
       apps: arr(vc.apps),
       storage: arr(vc.storage),
       pubsub: arr(vc.pubsub),
+      bigquery: arr(vc.bigquery),
     });
   }
 

@@ -11,7 +11,8 @@ export type IconName =
   | "network"
   | "gke"
   | "storage"
-  | "pubsub";
+  | "pubsub"
+  | "bigquery";
 
 export function BrandIcon({ name, size = 18 }: { name: IconName; size?: number }) {
   return (

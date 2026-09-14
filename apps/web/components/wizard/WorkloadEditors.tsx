@@ -47,6 +47,7 @@ export type ApplicationDraft = {
   connectApps: string[];
   connectStorage: string[];
   connectPubsub: string[];
+  connectBigquery: string[];
   requirements: string[];
   // VM mode
   artifact: ArtifactSource;
@@ -85,6 +86,26 @@ export function blankStorage(): StorageDraft {
     versioning: false,
     force_destroy: true,
     access: "readwrite",
+  };
+}
+
+/** A BigQuery dataset draft. */
+export type BigqueryDraft = {
+  name: string;
+  location: string;
+  access: "read" | "readwrite";
+};
+
+export function blankBigquery(): BigqueryDraft {
+  return { name: "", location: "", access: "readwrite" };
+}
+
+export function bigqueryDraftFromConfig(d: Record<string, unknown>): BigqueryDraft {
+  const s = (v: unknown) => (typeof v === "string" ? v : "");
+  return {
+    name: s(d.name),
+    location: s(d.location),
+    access: d.access === "read" ? "read" : "readwrite",
   };
 }
 
@@ -154,6 +175,7 @@ export function blankApplication(machineType = ""): ApplicationDraft {
     connectApps: [],
     connectStorage: [],
     connectPubsub: [],
+    connectBigquery: [],
     requirements: [],
     artifact: { kind: "upload", ref: "", type: "jar" },
     vm_count: 1,
@@ -242,6 +264,7 @@ export function VmsConnectEditor({
   appHostNames,
   storageNames,
   pubsubNames,
+  bigqueryNames,
 }: {
   value: {
     clusters: string[];
@@ -250,6 +273,7 @@ export function VmsConnectEditor({
     apps: string[];
     storage: string[];
     pubsub: string[];
+    bigquery: string[];
   };
   onChange: (v: {
     clusters: string[];
@@ -258,6 +282,7 @@ export function VmsConnectEditor({
     apps: string[];
     storage: string[];
     pubsub: string[];
+    bigquery: string[];
   }) => void;
   clusterNames: string[];
   databaseNames: string[];
@@ -265,6 +290,7 @@ export function VmsConnectEditor({
   appHostNames: string[];
   storageNames: string[];
   pubsubNames: string[];
+  bigqueryNames: string[];
 }) {
   const toggle = (field: keyof typeof value, name: string, on: boolean) =>
     onChange({ ...value, [field]: on ? [...value[field], name] : value[field].filter((x) => x !== name) });
@@ -274,7 +300,8 @@ export function VmsConnectEditor({
     !loadBalancerNames.length &&
     !appHostNames.length &&
     !storageNames.length &&
-    !pubsubNames.length
+    !pubsubNames.length &&
+    !bigqueryNames.length
   ) {
     return null;
   }
@@ -325,6 +352,13 @@ export function VmsConnectEditor({
         options={pubsubNames}
         selected={value.pubsub}
         onToggle={(n, on) => toggle("pubsub", n, on)}
+      />
+      <ConnectPicker
+        label="Connect to BigQuery"
+        hint="Injects BIGQUERY_<DATASET>_DATASET and grants dataset + jobUser access."
+        options={bigqueryNames}
+        selected={value.bigquery}
+        onToggle={(n, on) => toggle("bigquery", n, on)}
       />
     </div>
   );
@@ -552,6 +586,7 @@ export function ApplicationsEditor({
   appHostNames = [],
   storageNames = [],
   pubsubNames = [],
+  bigqueryNames = [],
 }: {
   applications: ApplicationDraft[];
   onChange: (apps: ApplicationDraft[]) => void;
@@ -566,6 +601,7 @@ export function ApplicationsEditor({
   appHostNames?: string[];
   storageNames?: string[];
   pubsubNames?: string[];
+  bigqueryNames?: string[];
 }) {
   const [uploading, setUploading] = useState<Record<number, boolean>>({});
   const [uploadErrors, setUploadErrors] = useState<Record<number, string>>({});
@@ -970,6 +1006,19 @@ export function ApplicationsEditor({
                 })
               }
             />
+            <ConnectPicker
+              label="Connect to BigQuery"
+              hint="Injects BIGQUERY_<DATASET>_DATASET and grants dataset + jobUser access."
+              options={bigqueryNames}
+              selected={app.connectBigquery}
+              onToggle={(cn, on) =>
+                patch(i, {
+                  connectBigquery: on
+                    ? [...app.connectBigquery, cn]
+                    : app.connectBigquery.filter((x) => x !== cn),
+                })
+              }
+            />
 
             <div className="wiz-field-wide">
               <span className="machine-picker-label">Environment variables</span>
@@ -1270,6 +1319,67 @@ export function PubsubEditor({
       <div style={{ marginTop: 12 }}>
         <button type="button" className="btn" onClick={() => onChange([...topics, blankPubsub()])}>
           Add topic
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/** BigQuery datasets editor (VM and GKE). */
+export function BigqueryEditor({
+  datasets,
+  onChange,
+  region,
+}: {
+  datasets: BigqueryDraft[];
+  onChange: (datasets: BigqueryDraft[]) => void;
+  region: string;
+}) {
+  const patch = (i: number, p: Partial<BigqueryDraft>) =>
+    onChange(datasets.map((d, idx) => (idx === i ? { ...d, ...p } : d)));
+
+  return (
+    <div className="companion-block">
+      <h3 className="companion-title">BigQuery (optional)</h3>
+      <p className="hint" style={{ marginTop: 0 }}>
+        Datasets for analytics. Connect an application or the Set-of-VMs group to inject the dataset id and
+        grant dataset + jobUser access.
+      </p>
+      {datasets.map((d, i) => (
+        <div className="wiz-workload-card" key={`dataset-${i}`}>
+          <div className="wiz-workload-head">
+            <h4>{d.name.trim() || `Dataset ${i + 1}`}</h4>
+            <button type="button" className="btn" onClick={() => onChange(datasets.filter((_, idx) => idx !== i))}>
+              Remove
+            </button>
+          </div>
+          <div className="grid grid-2">
+            <label>
+              Dataset name
+              <input value={d.name} onChange={(e) => patch(i, { name: e.target.value.slice(0, 40) })} placeholder="analytics" />
+              <span className="hint">Dataset id is prefixed with the deployment name (underscores).</span>
+            </label>
+            <label>
+              Location
+              <select value={d.location} onChange={(e) => patch(i, { location: e.target.value })}>
+                <option value="">Deployment region{region ? ` (${region})` : ""}</option>
+                <option value="US">US (multi-region)</option>
+                <option value="EU">EU (multi-region)</option>
+              </select>
+            </label>
+            <label>
+              Access for connected components
+              <select value={d.access} onChange={(e) => patch(i, { access: e.target.value as BigqueryDraft["access"] })}>
+                <option value="readwrite">Read &amp; write (dataEditor)</option>
+                <option value="read">Read-only (dataViewer)</option>
+              </select>
+            </label>
+          </div>
+        </div>
+      ))}
+      <div style={{ marginTop: 12 }}>
+        <button type="button" className="btn" onClick={() => onChange([...datasets, blankBigquery()])}>
+          Add dataset
         </button>
       </div>
     </div>

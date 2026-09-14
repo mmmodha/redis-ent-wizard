@@ -6,19 +6,23 @@ import { CheckList } from "@/components/CheckList";
 import { MachineTypePicker } from "@/components/MachineTypePicker";
 import {
   ApplicationsEditor,
+  BigqueryEditor,
   DatabaseEditor,
   LoadBalancerEditor,
   PubsubEditor,
   StorageEditor,
   VmsConnectEditor,
   blankApplication,
+  blankBigquery,
   blankLb,
   blankPubsub,
   blankStorage,
+  bigqueryDraftFromConfig,
   databaseDraftFromConfig,
   pubsubDraftFromConfig,
   storageDraftFromConfig,
   type ApplicationDraft,
+  type BigqueryDraft,
   type DatabaseDraft,
   type LbDraft,
   type PubsubDraft,
@@ -182,6 +186,7 @@ type WizardForm = {
   load_balancers: LbDraft[];
   storage_buckets: StorageDraft[];
   pubsub_topics: PubsubDraft[];
+  bigquery_datasets: BigqueryDraft[];
   vms_connect: {
     clusters: string[];
     databases: string[];
@@ -189,6 +194,7 @@ type WizardForm = {
     apps: string[];
     storage: string[];
     pubsub: string[];
+    bigquery: string[];
   };
   RS_admin: string;
   app: number;
@@ -226,6 +232,7 @@ function applicationDraftFromConfig(a: Record<string, unknown>): ApplicationDraf
     connectApps: strArray(a.connectApps),
     connectStorage: strArray(a.connectStorage),
     connectPubsub: strArray(a.connectPubsub),
+    connectBigquery: strArray(a.connectBigquery),
     requirements: strArray(a.requirements),
     artifact: {
       kind:
@@ -308,6 +315,9 @@ function formFromConfig(
     pubsub_topics: Array.isArray(cfg.pubsub_topics)
       ? (cfg.pubsub_topics as Record<string, unknown>[]).map(pubsubDraftFromConfig)
       : [],
+    bigquery_datasets: Array.isArray(cfg.bigquery_datasets)
+      ? (cfg.bigquery_datasets as Record<string, unknown>[]).map(bigqueryDraftFromConfig)
+      : [],
     vms_connect: (() => {
       const vc = (cfg.vms_connect as Record<string, unknown> | undefined) || {};
       return {
@@ -317,6 +327,7 @@ function formFromConfig(
         apps: strArray(vc.apps),
         storage: strArray(vc.storage),
         pubsub: strArray(vc.pubsub),
+        bigquery: strArray(vc.bigquery),
       };
     })(),
     RS_admin: str(cfg.RS_admin) || prev.RS_admin,
@@ -379,13 +390,23 @@ function WizardInner() {
     load_balancers: [] as LbDraft[],
     storage_buckets: [] as StorageDraft[],
     pubsub_topics: [] as PubsubDraft[],
-    vms_connect: { clusters: [], databases: [], load_balancers: [], apps: [], storage: [], pubsub: [] } as {
+    bigquery_datasets: [] as BigqueryDraft[],
+    vms_connect: {
+      clusters: [],
+      databases: [],
+      load_balancers: [],
+      apps: [],
+      storage: [],
+      pubsub: [],
+      bigquery: [],
+    } as {
       clusters: string[];
       databases: string[];
       load_balancers: string[];
       apps: string[];
       storage: string[];
       pubsub: string[];
+      bigquery: string[];
     },
     RS_admin: "admin@redis.io",
     app: 0,
@@ -463,6 +484,10 @@ function WizardInner() {
   const pubsubConnectNames = useMemo(
     () => form.pubsub_topics.map((t) => t.name.trim()).filter(Boolean),
     [form.pubsub_topics],
+  );
+  const bigqueryConnectNames = useMemo(
+    () => form.bigquery_datasets.map((d) => d.name.trim()).filter(Boolean),
+    [form.bigquery_datasets],
   );
 
   useEffect(() => {
@@ -661,6 +686,7 @@ function WizardInner() {
       if (a.connectApps.length) app.connectApps = a.connectApps;
       if (a.connectStorage.length) app.connectStorage = a.connectStorage;
       if (a.connectPubsub.length) app.connectPubsub = a.connectPubsub;
+      if (a.connectBigquery.length) app.connectBigquery = a.connectBigquery;
       if (a.requirements.length) app.requirements = a.requirements;
       if (form.mode === "vm") {
         Object.assign(app, {
@@ -698,6 +724,11 @@ function WizardInner() {
       .map((t) => ({ name: t.name.trim(), create_subscription: t.create_subscription, role: t.role }))
       .filter((t) => t.name);
     if (pubsubTopics.length) base.pubsub_topics = pubsubTopics;
+
+    const bigqueryDatasets = form.bigquery_datasets
+      .map((d) => ({ name: d.name.trim(), location: d.location.trim() || undefined, access: d.access }))
+      .filter((d) => d.name);
+    if (bigqueryDatasets.length) base.bigquery_datasets = bigqueryDatasets;
 
     if (form.mode === "vm") {
       if (form.clusters.length === 0) {
@@ -775,6 +806,7 @@ function WizardInner() {
           apps: form.vms_connect.apps,
           storage: form.vms_connect.storage,
           pubsub: form.vms_connect.pubsub,
+          bigquery: form.vms_connect.bigquery,
         };
         if (
           vc.clusters.length ||
@@ -782,7 +814,8 @@ function WizardInner() {
           vc.load_balancers.length ||
           vc.apps.length ||
           vc.storage.length ||
-          vc.pubsub.length
+          vc.pubsub.length ||
+          vc.bigquery.length
         )
           base.vms_connect = vc;
       }
@@ -1679,6 +1712,7 @@ function WizardInner() {
               appHostNames={appHostConnectNames}
               storageNames={storageConnectNames}
               pubsubNames={pubsubConnectNames}
+              bigqueryNames={bigqueryConnectNames}
               onChange={(applications) => {
                 setForm((prev) => ({ ...prev, applications }));
                 setPreflightResult(null);
@@ -1711,6 +1745,15 @@ function WizardInner() {
               }}
             />
 
+            <BigqueryEditor
+              datasets={form.bigquery_datasets}
+              region={form.region_name}
+              onChange={(bigquery_datasets) => {
+                setForm((prev) => ({ ...prev, bigquery_datasets }));
+                setPreflightResult(null);
+              }}
+            />
+
             {form.app > 0 ? (
               <VmsConnectEditor
                 value={form.vms_connect}
@@ -1720,6 +1763,7 @@ function WizardInner() {
                 appHostNames={appHostConnectNames}
                 storageNames={storageConnectNames}
                 pubsubNames={pubsubConnectNames}
+                bigqueryNames={bigqueryConnectNames}
                 onChange={(vms_connect) => {
                   setForm((prev) => ({ ...prev, vms_connect }));
                   setPreflightResult(null);
@@ -1913,6 +1957,7 @@ function WizardInner() {
               appHostNames={appHostConnectNames}
               storageNames={storageConnectNames}
               pubsubNames={pubsubConnectNames}
+              bigqueryNames={bigqueryConnectNames}
               onChange={(applications) => {
                 setForm((prev) => ({ ...prev, applications }));
                 setPreflightResult(null);
@@ -1932,6 +1977,15 @@ function WizardInner() {
               topics={form.pubsub_topics}
               onChange={(pubsub_topics) => {
                 setForm((prev) => ({ ...prev, pubsub_topics }));
+                setPreflightResult(null);
+              }}
+            />
+
+            <BigqueryEditor
+              datasets={form.bigquery_datasets}
+              region={form.region_name}
+              onChange={(bigquery_datasets) => {
+                setForm((prev) => ({ ...prev, bigquery_datasets }));
                 setPreflightResult(null);
               }}
             />

@@ -95,6 +95,7 @@ const applicationSchema = z.object({
   connectApps: z.array(z.string().max(40)).max(8).optional(),
   connectStorage: z.array(z.string().max(40)).max(8).optional(),
   connectPubsub: z.array(z.string().max(40)).max(8).optional(),
+  connectBigquery: z.array(z.string().max(40)).max(8).optional(),
   artifact: z
     .object({
       kind: z.enum(["upload", "url", "gcs", "git"]),
@@ -118,6 +119,16 @@ const loadBalancerSchema = z.object({
   target: z.string().min(1).max(40),
   target_kind: z.enum(["application", "vms"]),
   ports: z.array(z.number().int().min(1).max(65535)).min(1).max(16),
+});
+
+const bigquerySchema = z.object({
+  name: z
+    .string()
+    .min(1)
+    .max(40)
+    .regex(/^[a-z][a-z0-9_]*$/, "dataset name must be lowercase alphanumeric/underscore"),
+  location: z.string().max(40).optional(),
+  access: z.enum(["read", "readwrite"]).optional(),
 });
 
 const pubsubSchema = z.object({
@@ -202,6 +213,7 @@ const createSchema = z.object({
   load_balancers: z.array(loadBalancerSchema).max(8).optional(),
   storage_buckets: z.array(storageBucketSchema).max(8).optional(),
   pubsub_topics: z.array(pubsubSchema).max(8).optional(),
+  bigquery_datasets: z.array(bigquerySchema).max(8).optional(),
   vms_connect: z
     .object({
       clusters: z.array(z.string().max(40)).max(3).optional(),
@@ -210,6 +222,7 @@ const createSchema = z.object({
       apps: z.array(z.string().max(40)).max(8).optional(),
       storage: z.array(z.string().max(40)).max(8).optional(),
       pubsub: z.array(z.string().max(40)).max(8).optional(),
+      bigquery: z.array(z.string().max(40)).max(8).optional(),
     })
     .optional(),
   dns_managed_zone: z.string().optional(),

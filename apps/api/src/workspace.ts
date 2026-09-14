@@ -5,6 +5,7 @@ import { normalizeApplications } from "./applications.js";
 import { clusterNamePrefix, normalizeClusters } from "./clusters.js";
 import { bucketFullName, bucketGrantRole, normalizeStorageBuckets } from "./storage.js";
 import { grantsPublisher, grantsSubscriber, normalizePubsub, topicFullName } from "./pubsub.js";
+import { datasetFullId, datasetGrantRole, normalizeBigquery } from "./bigquery.js";
 import { resolveGkeOperatorChart } from "./rs-releases.js";
 import type { CreateInstanceInput, DeploymentMode } from "./types.js";
 
@@ -128,6 +129,7 @@ interface ConnectSelections {
   connectApps?: string[];
   connectStorage?: string[];
   connectPubsub?: string[];
+  connectBigquery?: string[];
 }
 
 /** Static Pub/Sub env values (global, identical for VM and GKE). */
@@ -146,6 +148,22 @@ function pubsubEnvMap(input: CreateInstanceInput, prefix: string): Map<string, P
       subscription: t.create_subscription ? `projects/${project}/subscriptions/${full}-sub` : "",
       project,
     });
+  }
+  return m;
+}
+
+/** Static BigQuery env values (identical for VM and GKE). */
+interface BigqueryRef {
+  dataset: string;
+  project: string;
+  location: string;
+}
+function bigqueryEnvMap(input: CreateInstanceInput, prefix: string): Map<string, BigqueryRef> {
+  const project = input.project || "";
+  const region = input.region_name || "europe-west1";
+  const m = new Map<string, BigqueryRef>();
+  for (const d of normalizeBigquery(input)) {
+    m.set(d.name, { dataset: datasetFullId(prefix, d.name), project, location: d.location || region });
   }
   return m;
 }
@@ -169,6 +187,8 @@ interface VmRegistry {
   storageBuckets: Map<string, string>;
   /** Topic slug -> static Pub/Sub env values. */
   pubsub: Map<string, PubsubRef>;
+  /** Dataset slug -> static BigQuery env values. */
+  bigquery: Map<string, BigqueryRef>;
   adminUser: string;
   vmPrefix: string;
   dnsSuffix: string;
@@ -218,6 +238,7 @@ export function buildVmRegistry(
     lbNames,
     storageBuckets,
     pubsub: pubsubEnvMap(input, vmPrefix),
+    bigquery: bigqueryEnvMap(input, vmPrefix),
     adminUser: input.RS_admin || "admin@redis.io",
     vmPrefix,
     dnsSuffix,
@@ -268,6 +289,7 @@ export function resolveVmConnections(sel: ConnectSelections, reg: VmRegistry): R
   }
 
   injectPubsubEnv(env, sel.connectPubsub, reg.pubsub);
+  injectBigqueryEnv(env, sel.connectBigquery, reg.bigquery);
 
   return { env, connectClusterAdmin, connectLb };
 }
@@ -285,6 +307,22 @@ function injectPubsubEnv(
     env[`PUBSUB_${slug}_TOPIC`] = ref.topic;
     if (ref.subscription) env[`PUBSUB_${slug}_SUBSCRIPTION`] = ref.subscription;
     env[`PUBSUB_${slug}_PROJECT`] = ref.project;
+  }
+}
+
+/** Shared BigQuery env injection (VM and GKE produce identical values). */
+function injectBigqueryEnv(
+  env: Record<string, string>,
+  connectBigquery: string[] | undefined,
+  bigquery: Map<string, BigqueryRef>,
+): void {
+  for (const d of (connectBigquery || []).filter(Boolean)) {
+    const ref = bigquery.get(d);
+    if (!ref) continue;
+    const slug = envSlug(d);
+    env[`BIGQUERY_${slug}_DATASET`] = ref.dataset;
+    env[`BIGQUERY_${slug}_PROJECT`] = ref.project;
+    env[`BIGQUERY_${slug}_LOCATION`] = ref.location;
   }
 }
 
@@ -325,6 +363,7 @@ function buildVmSetConnections(input: CreateInstanceInput, reg: VmRegistry): Res
       connectApps: vc.apps,
       connectStorage: vc.storage,
       connectPubsub: vc.pubsub,
+      connectBigquery: vc.bigquery,
     },
     reg,
   );
@@ -346,6 +385,26 @@ function buildPubsub(input: CreateInstanceInput, prefix: string): Record<string,
     create_subscription: t.create_subscription,
     grant_publisher: connected.has(t.name) && grantsPublisher(t.role),
     grant_subscriber: connected.has(t.name) && grantsSubscriber(t.role),
+  }));
+}
+
+/** Dataset short-names that at least one consumer connects to. */
+function connectedBigqueryNames(input: CreateInstanceInput): Set<string> {
+  const set = new Set<string>();
+  for (const a of input.applications || []) for (const d of a.connectBigquery || []) set.add(String(d));
+  for (const d of input.vms_connect?.bigquery || []) set.add(String(d));
+  return set;
+}
+
+/** tfvars for the shared bigquery module; grants set only for connected datasets. */
+function buildBigquery(input: CreateInstanceInput, prefix: string): Record<string, unknown>[] {
+  const connected = connectedBigqueryNames(input);
+  const region = input.region_name || "europe-west1";
+  return normalizeBigquery(input).map((d) => ({
+    name: datasetFullId(prefix, d.name),
+    location: d.location || region,
+    grant_role: connected.has(d.name) ? datasetGrantRole(d.access) : "",
+    grant_jobuser: connected.has(d.name),
   }));
 }
 
@@ -395,6 +454,7 @@ export function resolveGkeConnections(
   apps: string[],
   storageBuckets: Map<string, string> = new Map(),
   pubsub: Map<string, PubsubRef> = new Map(),
+  bigquery: Map<string, BigqueryRef> = new Map(),
 ): { env: Record<string, string>; secretRefs: GkeSecretRef[] } {
   const env: Record<string, string> = {};
   const secretRefs: GkeSecretRef[] = [];
@@ -453,6 +513,7 @@ export function resolveGkeConnections(
   }
 
   injectPubsubEnv(env, sel.connectPubsub, pubsub);
+  injectBigqueryEnv(env, sel.connectBigquery, bigquery);
 
   return { env, secretRefs };
 }
@@ -465,8 +526,9 @@ function buildGkeApplications(input: CreateInstanceInput): Record<string, unknow
   const storageBuckets = new Map<string, string>();
   for (const b of normalizeStorageBuckets(input)) storageBuckets.set(b.name, bucketFullName(prefix, b.name));
   const pubsub = pubsubEnvMap(input, prefix);
+  const bigquery = bigqueryEnvMap(input, prefix);
   return apps.map((app) => {
-    const conn = resolveGkeConnections(app, clusters, prefix, appNames, storageBuckets, pubsub);
+    const conn = resolveGkeConnections(app, clusters, prefix, appNames, storageBuckets, pubsub, bigquery);
     return {
       name: app.name,
       image: app.image || "",
@@ -508,6 +570,7 @@ export function vmStackModuleArguments(): string {
   load_balancers   = var.load_balancers
   storage_buckets  = var.storage_buckets
   pubsub_topics    = var.pubsub_topics
+  bigquery_datasets = var.bigquery_datasets
   app_injected_env = var.app_injected_env
   app_connect_cluster_admin = var.app_connect_cluster_admin
   app_connect_lb   = var.app_connect_lb
@@ -579,6 +642,7 @@ ${
   applications             = var.applications
   storage_buckets          = var.storage_buckets
   pubsub_topics            = var.pubsub_topics
+  bigquery_datasets        = var.bigquery_datasets
 `
 }
 }
@@ -614,6 +678,7 @@ output "app_workloads" { value = module.stack.app_workloads }
 output "load_balancers" { value = module.stack.load_balancers }
 output "storage_buckets" { value = module.stack.storage_buckets }
 output "pubsub_topics" { value = module.stack.pubsub_topics }
+output "bigquery_datasets" { value = module.stack.bigquery_datasets }
 output "deployment_mode" { value = module.stack.deployment_mode }
 `
     : `
@@ -627,6 +692,7 @@ output "k8s_outputs_file" { value = module.stack.k8s_outputs_file }
 output "app_outputs_file" { value = module.stack.app_outputs_file }
 output "storage_buckets" { value = module.stack.storage_buckets }
 output "pubsub_topics" { value = module.stack.pubsub_topics }
+output "bigquery_datasets" { value = module.stack.bigquery_datasets }
 output "deployment_mode" { value = module.stack.deployment_mode }
 `
 }
@@ -735,6 +801,15 @@ variable "pubsub_topics" {
   }))
   default = []
 }
+variable "bigquery_datasets" {
+  type = list(object({
+    name          = string
+    location      = string
+    grant_role    = string
+    grant_jobuser = bool
+  }))
+  default = []
+}
 `
       : `
 variable "yourname" { type = string }
@@ -793,6 +868,15 @@ variable "pubsub_topics" {
     create_subscription = bool
     grant_publisher     = bool
     grant_subscriber    = bool
+  }))
+  default = []
+}
+variable "bigquery_datasets" {
+  type = list(object({
+    name          = string
+    location      = string
+    grant_role    = string
+    grant_jobuser = bool
   }))
   default = []
 }
@@ -862,6 +946,7 @@ variable "pubsub_topics" {
     tfvars.app_connect_lb = vmsConn.connectLb;
     tfvars.storage_buckets = buildStorageBuckets(input, vmPrefix);
     tfvars.pubsub_topics = buildPubsub(input, vmPrefix);
+    tfvars.bigquery_datasets = buildBigquery(input, vmPrefix);
   } else {
     const clusters = normalizeClusters({ ...input, mode: "gke" });
     const prefix = `${input.name}-${input.env || "default"}`;
@@ -879,6 +964,7 @@ variable "pubsub_topics" {
     tfvars.applications = buildGkeApplications(input);
     tfvars.storage_buckets = buildStorageBuckets(input, prefix);
     tfvars.pubsub_topics = buildPubsub(input, prefix);
+    tfvars.bigquery_datasets = buildBigquery(input, prefix);
   }
 
   const tfvarsBody = Object.entries(tfvars)

@@ -106,6 +106,13 @@ export function defaultNodeData(
         create_subscription: true,
         role: "both",
       };
+    case "bigquery":
+      return {
+        kind: "bigquery",
+        name: "",
+        location: "",
+        access: "readwrite",
+      };
     default:
       return { kind: "network", label: "VPC network" };
   }

@@ -14,6 +14,7 @@ import {
   type ClusterData,
   type DatabaseData,
   type DesignNodeData,
+  type BigqueryData,
   type LoadBalancerData,
   type PubsubData,
   type StorageData,
@@ -89,6 +90,7 @@ export function NodeDialog({
     loadbalancer: "Load balancer",
     storage: "Cloud Storage bucket",
     pubsub: "Pub/Sub topic",
+    bigquery: "BigQuery dataset",
   };
 
   return (
@@ -180,7 +182,13 @@ export function NodeDialog({
 
           {target.type === "pubsub" ? <PubsubForm data={draft as PubsubData} set={set} /> : null}
 
-          {["cluster", "database", "vms", "application", "loadbalancer", "storage", "pubsub"].includes(target.type) ? (
+          {target.type === "bigquery" ? (
+            <BigqueryForm data={draft as BigqueryData} set={set} probeZone={probeZone} />
+          ) : null}
+
+          {["cluster", "database", "vms", "application", "loadbalancer", "storage", "pubsub", "bigquery"].includes(
+            target.type,
+          ) ? (
             <ExposesNote
               kind={target.type as NodeKind}
               name={target.type === "vms" ? "app" : String((draft as { name?: string }).name || "").trim()}
@@ -1166,6 +1174,47 @@ function PubsubForm({
           onChange={(e) => set<PubsubData>({ create_subscription: e.target.checked })}
         />
         Create a pull subscription
+      </label>
+    </div>
+  );
+}
+
+function BigqueryForm({
+  data,
+  set,
+  probeZone,
+}: {
+  data: BigqueryData;
+  set: <T extends DesignNodeData>(p: Partial<T>) => void;
+  probeZone: string;
+}) {
+  const region = probeZone.replace(/-[a-z]$/, "");
+  return (
+    <div className="grid">
+      <label>
+        Dataset name
+        <input
+          value={data.name}
+          onChange={(e) => set<BigqueryData>({ name: e.target.value.slice(0, 40) })}
+          placeholder="analytics"
+        />
+        <span className="hint">The dataset id is prefixed with the deployment name (underscores).</span>
+      </label>
+      <label>
+        Location
+        <select value={data.location} onChange={(e) => set<BigqueryData>({ location: e.target.value })}>
+          <option value="">Deployment region{region ? ` (${region})` : ""}</option>
+          <option value="US">US (multi-region)</option>
+          <option value="EU">EU (multi-region)</option>
+        </select>
+      </label>
+      <label>
+        Access for connected components
+        <select value={data.access} onChange={(e) => set<BigqueryData>({ access: e.target.value as BigqueryData["access"] })}>
+          <option value="readwrite">Read &amp; write (dataEditor)</option>
+          <option value="read">Read-only (dataViewer)</option>
+        </select>
+        <span className="hint">Connected components also get project-level bigquery.jobUser to run queries.</span>
       </label>
     </div>
   );

@@ -71,6 +71,16 @@ export interface LoadBalancerSpec {
   ports: number[];
 }
 
+/** A BigQuery dataset available to workloads. */
+export interface BigquerySpec {
+  /** Short name; the actual dataset id is `<deploymentPrefix>_<slug>` (underscores). */
+  name: string;
+  /** BigQuery location: a region (e.g. europe-west1) or a multi-region (US/EU). Defaults to the deployment region. */
+  location?: string;
+  /** Access granted to a connected consumer's SA on the dataset. */
+  access?: "read" | "readwrite";
+}
+
 /** A Pub/Sub topic (with an optional subscription) available to workloads. */
 export interface PubsubSpec {
   /** Short name; the actual topic is `<deploymentPrefix>-<slug>`. */
@@ -115,6 +125,8 @@ export interface Application {
   connectStorage?: string[];
   /** Names of Pub/Sub topics injected as PUBSUB_<NAME>_TOPIC / _SUBSCRIPTION / _PROJECT. */
   connectPubsub?: string[];
+  /** Names of BigQuery datasets injected as BIGQUERY_<NAME>_DATASET / _PROJECT / _LOCATION. */
+  connectBigquery?: string[];
   // VM
   artifact?: ApplicationArtifact;
   vm_count?: number;
@@ -235,6 +247,8 @@ export interface CreateInstanceInput {
   storage_buckets?: StorageBucketSpec[];
   /** Pub/Sub topics provisioned for this deployment (VM and GKE). */
   pubsub_topics?: PubsubSpec[];
+  /** BigQuery datasets provisioned for this deployment (VM and GKE). */
+  bigquery_datasets?: BigquerySpec[];
   /** Connection references from the Set-of-VMs group (app VMs) to providers in this deployment. */
   vms_connect?: {
     clusters?: string[];
@@ -243,6 +257,7 @@ export interface CreateInstanceInput {
     apps?: string[];
     storage?: string[];
     pubsub?: string[];
+    bigquery?: string[];
   };
   // GKE
   gke_clustersize?: number;

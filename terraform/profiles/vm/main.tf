@@ -62,6 +62,14 @@ module "pubsub" {
   youremail        = var.youremail
 }
 
+module "bigquery" {
+  source = "../../modules/bigquery"
+
+  datasets         = var.bigquery_datasets
+  compute_sa_email = local.compute_sa
+  youremail        = var.youremail
+}
+
 module "network" {
   source = "../../modules/network"
 
@@ -423,6 +431,10 @@ output "storage_buckets" {
 
 output "pubsub_topics" {
   value = module.pubsub.topics
+}
+
+output "bigquery_datasets" {
+  value = module.bigquery.datasets
 }
 
 output "deployment_mode" {

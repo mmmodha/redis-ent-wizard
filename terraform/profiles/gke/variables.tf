@@ -130,3 +130,14 @@ variable "pubsub_topics" {
   description = "Pub/Sub topics provisioned for this deployment."
   default     = []
 }
+
+variable "bigquery_datasets" {
+  type = list(object({
+    name          = string
+    location      = string
+    grant_role    = string
+    grant_jobuser = bool
+  }))
+  description = "BigQuery datasets provisioned for this deployment."
+  default     = []
+}
