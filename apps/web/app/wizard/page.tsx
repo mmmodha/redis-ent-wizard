@@ -11,6 +11,7 @@ import {
   DatabaseEditor,
   LoadBalancerEditor,
   PubsubEditor,
+  RdiEditor,
   StorageEditor,
   VmsConnectEditor,
   blankApplication,
@@ -23,6 +24,7 @@ import {
   cloudsqlDraftFromConfig,
   databaseDraftFromConfig,
   pubsubDraftFromConfig,
+  rdiDraftFromConfig,
   storageDraftFromConfig,
   type ApplicationDraft,
   type BigqueryDraft,
@@ -30,6 +32,7 @@ import {
   type DatabaseDraft,
   type LbDraft,
   type PubsubDraft,
+  type RdiDraft,
   type StorageDraft,
 } from "@/components/wizard/WorkloadEditors";
 import { parsePorts } from "@/lib/diagram";
@@ -192,6 +195,7 @@ type WizardForm = {
   pubsub_topics: PubsubDraft[];
   bigquery_datasets: BigqueryDraft[];
   cloud_sql_instances: CloudSqlDraft[];
+  rdi: RdiDraft | null;
   vms_connect: {
     clusters: string[];
     databases: string[];
@@ -328,6 +332,10 @@ function formFromConfig(
     cloud_sql_instances: Array.isArray(cfg.cloud_sql_instances)
       ? (cfg.cloud_sql_instances as Record<string, unknown>[]).map(cloudsqlDraftFromConfig)
       : [],
+    rdi:
+      cfg.rdi && typeof cfg.rdi === "object"
+        ? rdiDraftFromConfig(cfg.rdi as Record<string, unknown>)
+        : null,
     vms_connect: (() => {
       const vc = (cfg.vms_connect as Record<string, unknown> | undefined) || {};
       return {
@@ -403,6 +411,7 @@ function WizardInner() {
     pubsub_topics: [] as PubsubDraft[],
     bigquery_datasets: [] as BigqueryDraft[],
     cloud_sql_instances: [] as CloudSqlDraft[],
+    rdi: null as RdiDraft | null,
     vms_connect: {
       clusters: [],
       databases: [],
@@ -760,6 +769,25 @@ function WizardInner() {
       }))
       .filter((d) => d.name);
     if (cloudSqlInstances.length) base.cloud_sql_instances = cloudSqlInstances;
+
+    if (form.rdi && form.rdi.name.trim()) {
+      const r = form.rdi;
+      const rdi: Record<string, unknown> = {
+        name: r.name.trim(),
+        machine_type: r.machine_type.trim() || "n2-standard-4",
+      };
+      if (r.target.trim()) rdi.target = r.target.trim();
+      const pipelines = r.pipelines
+        .filter((p) => p.source.trim())
+        .map((p) => {
+          const tables = p.tables
+            .filter((t) => t.table.trim())
+            .map((t) => ({ table: t.table.trim(), ...(t.key_prefix.trim() ? { key_prefix: t.key_prefix.trim() } : {}) }));
+          return tables.length ? { source: p.source, tables } : { source: p.source };
+        });
+      if (pipelines.length) rdi.pipelines = pipelines;
+      base.rdi = rdi;
+    }
 
     if (form.mode === "vm") {
       if (form.clusters.length === 0) {
@@ -1797,6 +1825,16 @@ function WizardInner() {
               }}
             />
 
+            <RdiEditor
+              rdi={form.rdi}
+              databaseNames={databaseConnectNames}
+              cloudsqlNames={cloudsqlConnectNames}
+              onChange={(rdi) => {
+                setForm((prev) => ({ ...prev, rdi }));
+                setPreflightResult(null);
+              }}
+            />
+
             {form.app > 0 ? (
               <VmsConnectEditor
                 value={form.vms_connect}
@@ -2040,6 +2078,16 @@ function WizardInner() {
               region={form.region_name}
               onChange={(cloud_sql_instances) => {
                 setForm((prev) => ({ ...prev, cloud_sql_instances }));
+                setPreflightResult(null);
+              }}
+            />
+
+            <RdiEditor
+              rdi={form.rdi}
+              databaseNames={databaseConnectNames}
+              cloudsqlNames={cloudsqlConnectNames}
+              onChange={(rdi) => {
+                setForm((prev) => ({ ...prev, rdi }));
                 setPreflightResult(null);
               }}
             />

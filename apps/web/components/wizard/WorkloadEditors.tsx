@@ -144,6 +144,43 @@ export function cloudsqlDraftFromConfig(d: Record<string, unknown>): CloudSqlDra
   };
 }
 
+/** RDI pipeline table mapping draft. */
+export type RdiTableDraft = { table: string; key_prefix: string };
+/** One RDI pipeline draft (a Cloud SQL source + its table mappings). */
+export type RdiPipelineDraft = { source: string; tables: RdiTableDraft[] };
+/** Redis Data Integration draft (one per deployment). */
+export type RdiDraft = {
+  name: string;
+  machine_type: string;
+  target: string;
+  pipelines: RdiPipelineDraft[];
+};
+
+export function blankRdi(): RdiDraft {
+  return { name: "", machine_type: "n2-standard-4", target: "", pipelines: [] };
+}
+
+export function rdiDraftFromConfig(r: Record<string, unknown>): RdiDraft {
+  const s = (v: unknown) => (typeof v === "string" ? v : "");
+  const pipelines = Array.isArray(r.pipelines)
+    ? (r.pipelines as Record<string, unknown>[]).map((p) => ({
+        source: s(p.source),
+        tables: Array.isArray(p.tables)
+          ? (p.tables as Record<string, unknown>[]).map((t) => ({
+              table: s(t.table),
+              key_prefix: s(t.key_prefix),
+            }))
+          : [],
+      }))
+    : [];
+  return {
+    name: s(r.name),
+    machine_type: s(r.machine_type) || "n2-standard-4",
+    target: s(r.target),
+    pipelines,
+  };
+}
+
 /** A Pub/Sub topic draft. */
 export type PubsubDraft = {
   name: string;
@@ -1525,6 +1562,145 @@ export function CloudSqlEditor({
       <div style={{ marginTop: 12 }}>
         <button type="button" className="btn" onClick={() => onChange([...instances, blankCloudSql()])}>
           Add instance
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/** Redis Data Integration editor (VM and GKE): runtime + full pipeline editor. */
+export function RdiEditor({
+  rdi,
+  onChange,
+  databaseNames,
+  cloudsqlNames,
+}: {
+  rdi: RdiDraft | null;
+  onChange: (rdi: RdiDraft | null) => void;
+  databaseNames: string[];
+  cloudsqlNames: string[];
+}) {
+  if (!rdi) {
+    return (
+      <div className="companion-block">
+        <h3 className="companion-title">Redis Data Integration (optional)</h3>
+        <p className="hint" style={{ marginTop: 0 }}>
+          Ingest change data from Cloud SQL source(s) into a target Redis database.
+        </p>
+        <button type="button" className="btn" onClick={() => onChange(blankRdi())}>
+          Add RDI
+        </button>
+      </div>
+    );
+  }
+
+  const patch = (p: Partial<RdiDraft>) => onChange({ ...rdi, ...p });
+  const toggleSource = (name: string, on: boolean) =>
+    patch({
+      pipelines: on
+        ? [...rdi.pipelines, { source: name, tables: [] }]
+        : rdi.pipelines.filter((p) => p.source !== name),
+    });
+  const patchPipeline = (i: number, tables: RdiTableDraft[]) =>
+    patch({ pipelines: rdi.pipelines.map((p, idx) => (idx === i ? { ...p, tables } : p)) });
+
+  return (
+    <div className="companion-block">
+      <div className="wiz-workload-head">
+        <h3 className="companion-title" style={{ margin: 0 }}>
+          Redis Data Integration
+        </h3>
+        <button type="button" className="btn" onClick={() => onChange(null)}>
+          Remove RDI
+        </button>
+      </div>
+      <p className="hint" style={{ marginTop: 0 }}>
+        Ingest change data from Cloud SQL source(s) into a target Redis database. CDC is enabled on the
+        selected sources; the pipeline-state database is created automatically in the target&apos;s cluster.
+      </p>
+      <div className="grid grid-2">
+        <label>
+          Name
+          <input value={rdi.name} onChange={(e) => patch({ name: e.target.value.slice(0, 40) })} placeholder="ingest" />
+        </label>
+        <label>
+          RDI VM machine type
+          <input
+            value={rdi.machine_type}
+            onChange={(e) => patch({ machine_type: e.target.value })}
+            placeholder="n2-standard-4"
+          />
+          <span className="hint">Used in VM mode.</span>
+        </label>
+        <label>
+          Target Redis database
+          <select value={rdi.target} onChange={(e) => patch({ target: e.target.value })} disabled={!databaseNames.length}>
+            <option value="">{databaseNames.length ? "Select a target database" : "Add a database first"}</option>
+            {databaseNames.map((n) => (
+              <option key={n} value={n}>
+                {n}
+              </option>
+            ))}
+          </select>
+          <span className="hint">Where the pipeline writes. No target ⇒ RDI deploys but starts no pipeline.</span>
+        </label>
+      </div>
+      <ConnectPicker
+        label="Cloud SQL sources"
+        hint="Each selected instance becomes a pipeline; CDC is enabled on it."
+        options={cloudsqlNames}
+        selected={rdi.pipelines.map((p) => p.source)}
+        onToggle={toggleSource}
+      />
+      {rdi.pipelines.map((p, i) => (
+        <RdiPipelineEditor key={p.source} pipeline={p} onChange={(tables) => patchPipeline(i, tables)} />
+      ))}
+    </div>
+  );
+}
+
+/** Per-source table + target-key mapping editor, shown inside the RDI card. */
+function RdiPipelineEditor({
+  pipeline,
+  onChange,
+}: {
+  pipeline: RdiPipelineDraft;
+  onChange: (tables: RdiTableDraft[]) => void;
+}) {
+  const patch = (i: number, p: Partial<RdiTableDraft>) =>
+    onChange(pipeline.tables.map((t, idx) => (idx === i ? { ...t, ...p } : t)));
+  return (
+    <div className="wiz-workload-card">
+      <div className="wiz-workload-head">
+        <h4>Pipeline · {pipeline.source}</h4>
+      </div>
+      <p className="hint" style={{ marginTop: 0 }}>
+        Tables to ingest. Leave empty to ingest all tables with default key mapping.
+      </p>
+      {pipeline.tables.map((t, i) => (
+        <div className="wiz-env-row" key={i}>
+          <input
+            placeholder="schema.table"
+            value={t.table}
+            onChange={(e) => patch(i, { table: e.target.value })}
+          />
+          <input
+            placeholder="target key prefix (optional)"
+            value={t.key_prefix}
+            onChange={(e) => patch(i, { key_prefix: e.target.value })}
+          />
+          <button
+            type="button"
+            className="btn"
+            onClick={() => onChange(pipeline.tables.filter((_, idx) => idx !== i))}
+          >
+            Remove
+          </button>
+        </div>
+      ))}
+      <div>
+        <button type="button" className="btn" onClick={() => onChange([...pipeline.tables, { table: "", key_prefix: "" }])}>
+          Add table
         </button>
       </div>
     </div>
