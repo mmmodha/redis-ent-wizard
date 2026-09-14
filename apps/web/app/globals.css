@@ -148,7 +148,7 @@ code,
 }
 
 .shell {
-  max-width: 1180px;
+  max-width: clamp(900px, 92vw, 1600px);
   margin: 0 auto;
   padding: calc(var(--space) * 3);
 }
