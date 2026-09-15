@@ -44,3 +44,29 @@ export function assertAdmin(user: AuthUser): void {
     throw Object.assign(new Error("Admin role required"), { statusCode: 403 });
   }
 }
+
+/**
+ * Fail-closed route guard for scoped API tokens. A `define`-scoped principal
+ * (an AI tool via MCP) may only:
+ *   - issue read requests (GET/HEAD), and
+ *   - use the define surface (`/designs*`: validate, render, save drafts, read).
+ * Every other route — chiefly the cloud-mutating ones (`POST /instances`,
+ * `DELETE /instances/:id`, `/bulk-destroy`, `/retry`, `/recreate`, credential
+ * and artifact writes) — is refused with 403. Full/OIDC users are unrestricted.
+ *
+ * This is an allowlist, not a blocklist: any new mutating route is denied to
+ * define tokens by default, so the "define, don't provision" guarantee can't be
+ * eroded by adding routes.
+ */
+export function assertScopeAllows(user: AuthUser, method: string, path: string): void {
+  if (user.scope !== "define") return;
+  const m = method.toUpperCase();
+  if (m === "GET" || m === "HEAD" || m === "OPTIONS") return;
+  if (path === "/designs" || path.startsWith("/designs/")) return;
+  throw Object.assign(
+    new Error(
+      "This token is scoped to define infrastructure only; provisioning and mutating routes are not permitted",
+    ),
+    { statusCode: 403 },
+  );
+}
