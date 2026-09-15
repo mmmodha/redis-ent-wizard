@@ -18,10 +18,19 @@ export const CAPABILITIES_GUIDE = {
   required: {
     name: "Short deployment name (becomes the resource prefix).",
     mode: "'vm' or 'gke'.",
-    youremail: "Owner id (username or email); attributes the deployment.",
-    project: "GCP project id.",
-    credentialsFile: "Name of the GCP credentials file/id to apply with (not needed to define/validate).",
+    youremail: "Owner id, firstName_lastName (e.g. jane_doe); attributes the deployment.",
   },
+  optional_but_recommended: {
+    credentialsFile:
+      "A GCP credential id/file from list_credentials. Optional on a draft — the human can pick it in the wizard — but set it (with a matching project/region) to make the draft apply-ready. Never invent a placeholder.",
+    project: "GCP project id, from the chosen credential or list_projects.",
+    region_name: "GCP region, from list_regions.",
+    region_zones: "Zone suffixes (e.g. ['b','c','d']) from list_regions for the chosen region.",
+  },
+  picking_a_target:
+    "To produce an apply-ready draft: (1) list_credentials and choose one (prefer a projectId matching the intent); (2) set credentialsFile to its id/file and project to its projectId (or via list_projects); (3) list_regions and set region_name + region_zones. If nothing suitable exists, omit these and tell the human to choose them in the wizard.",
+  artifacts:
+    "Application artifacts (jars/binaries) cannot be uploaded through this tool. Use artifact kind 'url' (https), 'gcs' (gs://), or 'git' (repo URL) — a reference the wizard fetches at apply time. Leave kind 'upload' for the human to attach a local file in the wizard.",
   components: {
     clusters:
       "Redis Enterprise clusters. Each has a name, node count, machine type, and a list of databases. Start empty and add clusters explicitly.",

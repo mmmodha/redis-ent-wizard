@@ -76,6 +76,19 @@ export class RewClient {
     return this.request("GET", "/designs/schema");
   }
 
+  listCredentials(): Promise<unknown> {
+    return this.request("GET", "/credentials");
+  }
+
+  listProjects(credentialsFile: string): Promise<unknown> {
+    return this.request("GET", `/gcp/projects?credentialsFile=${encodeURIComponent(credentialsFile)}`);
+  }
+
+  listRegions(credentialsFile: string, project: string): Promise<unknown> {
+    const qs = new URLSearchParams({ credentialsFile, project });
+    return this.request("GET", `/gcp/regions?${qs}`);
+  }
+
   validate(config: unknown): Promise<{ ok: boolean; errors?: unknown }> {
     return this.request("POST", "/designs/validate", config);
   }

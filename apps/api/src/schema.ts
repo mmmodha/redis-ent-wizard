@@ -220,3 +220,15 @@ export const createSchema = z.object({
 export const preflightSchema = createSchema.partial({ project: true }).extend({
   project: z.string().optional(),
 });
+
+/**
+ * The create-config as an AI tool *defines* it (the MCP "design" surface).
+ * `credentialsFile` and `project` are picked by the human at apply time — or by
+ * the model via the discovery tools when it can — so they are optional here.
+ * This avoids the model inventing placeholder credentials/projects that the
+ * wizard can't resolve on review.
+ */
+export const designSchema = createSchema.partial({
+  credentialsFile: true,
+  project: true,
+});

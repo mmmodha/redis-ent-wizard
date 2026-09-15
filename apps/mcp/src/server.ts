@@ -42,6 +42,13 @@ export function createServer(client: RewClient): McpServer {
       instructions:
         "Define Redis Enterprise infrastructure on GCP for a human to review and apply. " +
         "Call list_capabilities first to learn the create-config shape and wiring rules. " +
+        "To make a draft that is ready to apply, call list_credentials and pick one (prefer a " +
+        "credential whose projectId matches the intent), then list_projects / list_regions to set " +
+        "project, region_name, and region_zones. If no suitable credential exists, omit " +
+        "credentialsFile/project/region — leave them for the human to choose in the wizard; do NOT " +
+        "invent placeholder values. For application artifacts use kind 'url', 'gcs', or 'git' (a " +
+        "reference the wizard fetches at apply time) — this tool cannot upload local jars/binaries, " +
+        "so leave 'upload' artifacts for the human to attach. " +
         "Use validate_design / render_design to check a design, then save_design to persist a " +
         "draft and get a reviewUrl. This tool cannot provision or destroy anything.",
     },
@@ -55,6 +62,41 @@ export function createServer(client: RewClient): McpServer {
         "Return the create-config JSON Schema and an authored guide to component kinds (clusters, databases, applications, Cloud SQL, Pub/Sub, BigQuery, storage, RDI), modes (vm/gke), and wiring rules. Call this before defining a design.",
     },
     async () => guard(() => client.getCapabilities()),
+  );
+
+  server.registerTool(
+    "list_credentials",
+    {
+      title: "List available GCP credentials",
+      description:
+        "List the GCP service-account credentials this tool can see (id, project, client email). Use the returned `file`/`id` as a design's credentialsFile, and its projectId as the project. Read-only.",
+    },
+    async () => guard(() => client.listCredentials()),
+  );
+
+  server.registerTool(
+    "list_projects",
+    {
+      title: "List GCP projects for a credential",
+      description:
+        "List the GCP projects a credential can access. Read-only. Use to set a design's `project`.",
+      inputSchema: { credentialsFile: z.string().describe("A credential id/file from list_credentials.") },
+    },
+    async ({ credentialsFile }) => guard(() => client.listProjects(credentialsFile)),
+  );
+
+  server.registerTool(
+    "list_regions",
+    {
+      title: "List GCP regions for a project",
+      description:
+        "List regions (and their zone suffixes) available to a credential+project. Read-only. Use to set a design's `region_name` and `region_zones`.",
+      inputSchema: {
+        credentialsFile: z.string().describe("A credential id/file from list_credentials."),
+        project: z.string().describe("A GCP project id."),
+      },
+    },
+    async ({ credentialsFile, project }) => guard(() => client.listRegions(credentialsFile, project)),
   );
 
   server.registerTool(

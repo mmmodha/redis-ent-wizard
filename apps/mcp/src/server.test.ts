@@ -24,6 +24,9 @@ function fakeApi(): Promise<{ server: Server; url: string; calls: Array<{ method
         res.writeHead(status, { "content-type": "application/json" });
         res.end(JSON.stringify(obj));
       };
+      if (req.url === "/credentials") return reply(200, [{ id: "demo.json", file: "demo.json", projectId: "demo-proj", clientEmail: "sa@demo", valid: true }]);
+      if (req.url?.startsWith("/gcp/projects")) return reply(200, [{ projectId: "demo-proj", name: "Demo" }]);
+      if (req.url?.startsWith("/gcp/regions")) return reply(200, [{ name: "europe-west1", status: "UP", zones: [], zoneSuffixes: ["b", "c", "d"] }]);
       if (req.url === "/designs/schema") return reply(200, { jsonSchema: { type: "object" }, capabilities: { summary: "guide" } });
       if (req.url === "/designs/validate") return reply(200, { ok: true });
       if (req.url === "/designs/render") return reply(200, { mainTf: "module x", variablesTf: "variable y", tfvars: "z = 1" });
@@ -63,12 +66,15 @@ describe("MCP server tools", () => {
     assert.deepEqual(names, [
       "get_design",
       "list_capabilities",
+      "list_credentials",
       "list_designs",
+      "list_projects",
+      "list_regions",
       "render_design",
       "save_design",
       "validate_design",
     ]);
-    for (const forbidden of ["apply", "create", "destroy", "retry", "recreate", "delete"]) {
+    for (const forbidden of ["apply", "create", "destroy", "retry", "recreate", "delete", "upload"]) {
       assert.ok(
         !names.some((n) => n.includes(forbidden)),
         `tool surface must not contain a "${forbidden}" tool`,
@@ -89,6 +95,20 @@ describe("MCP server tools", () => {
     const saved = api.calls.find((c) => c.path === "/designs" && c.method === "POST");
     assert.ok(saved, "expected a POST /designs");
     assert.equal((saved!.body as { name: string }).name, "demo");
+    await client.close();
+  });
+
+  it("discovery tools reach the credential/project/region endpoints", async () => {
+    const client = await connectedClient(api.url);
+    const creds = await client.callTool({ name: "list_credentials", arguments: {} });
+    assert.match((creds.content as Array<{ text: string }>)[0].text, /demo-proj/);
+    const projects = await client.callTool({ name: "list_projects", arguments: { credentialsFile: "demo.json" } });
+    assert.match((projects.content as Array<{ text: string }>)[0].text, /demo-proj/);
+    const regions = await client.callTool({
+      name: "list_regions",
+      arguments: { credentialsFile: "demo.json", project: "demo-proj" },
+    });
+    assert.match((regions.content as Array<{ text: string }>)[0].text, /europe-west1/);
     await client.close();
   });
 

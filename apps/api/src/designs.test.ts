@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { zodToJsonSchema } from "zod-to-json-schema";
-import { createSchema } from "./schema.js";
+import { createSchema, designSchema } from "./schema.js";
 import { renderTerraform } from "./workspace.js";
 import type { CreateInstanceInput } from "./types.js";
 
@@ -20,6 +20,17 @@ describe("createSchema (define validation)", () => {
       credentialsFile: "key.json",
     });
     assert.equal(r.success, true);
+  });
+});
+
+describe("designSchema (define surface)", () => {
+  it("accepts a config without project/credentialsFile (human/model fills later)", () => {
+    const r = designSchema.safeParse({ name: "demo", mode: "vm", youremail: "jane_doe" });
+    assert.equal(r.success, true);
+  });
+
+  it("still requires name/mode/youremail", () => {
+    assert.equal(designSchema.safeParse({ name: "demo", mode: "vm" }).success, false);
   });
 });
 

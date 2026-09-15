@@ -1,6 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { zodToJsonSchema } from "zod-to-json-schema";
-import { createSchema } from "./schema.js";
+import { designSchema } from "./schema.js";
 import { CAPABILITIES_GUIDE } from "./capabilities.js";
 import { renderTerraform } from "./workspace.js";
 import { getInstance, readRegistry, upsertInstance } from "./registry.js";
@@ -25,8 +25,10 @@ function reviewUrl(id: string): string {
  * or touch cloud state. The MCP server is the primary caller.
  */
 // Derived once: the create-config as JSON Schema, for MCP tool input schemas
-// and client-side validation. createSchema is the single source of truth.
-const createJsonSchema = zodToJsonSchema(createSchema, {
+// and client-side validation. Projected from designSchema so credentialsFile
+// and project read as optional — the human (or the discovery tools) supplies
+// them — rather than forcing the model to invent placeholders.
+const createJsonSchema = zodToJsonSchema(designSchema, {
   name: "CreateInstanceInput",
   $refStrategy: "none",
 });
@@ -42,7 +44,7 @@ export function registerDesignRoutes(app: FastifyInstance) {
   // Offline schema validation (no credentials, no GCP).
   app.post("/designs/validate", async (req, reply) => {
     requireUser(req);
-    const parsed = createSchema.safeParse(req.body);
+    const parsed = designSchema.safeParse(req.body);
     if (!parsed.success) {
       return reply.send({ ok: false, errors: parsed.error.flatten() });
     }
@@ -52,11 +54,17 @@ export function registerDesignRoutes(app: FastifyInstance) {
   // Render the Terraform a config would produce, without applying.
   app.post("/designs/render", async (req, reply) => {
     requireUser(req);
-    const parsed = createSchema.safeParse(req.body);
+    const parsed = designSchema.safeParse(req.body);
     if (!parsed.success) {
       return reply.code(400).send({ error: parsed.error.flatten() });
     }
-    const input = parsed.data as CreateInstanceInput;
+    // Render is a preview; fill placeholders only for a missing credential/
+    // project so the Terraform text is complete without affecting a saved draft.
+    const input = {
+      ...parsed.data,
+      project: parsed.data.project || "YOUR_PROJECT_ID",
+      credentialsFile: parsed.data.credentialsFile || "credentials.json",
+    } as CreateInstanceInput;
     try {
       const { mainTf, variablesTf, tfvars } = renderTerraform(input.mode, input);
       return reply.send({ mainTf, variablesTf, tfvars });
@@ -68,7 +76,7 @@ export function registerDesignRoutes(app: FastifyInstance) {
   // Persist a config as a draft for human review. No provisioning.
   app.post("/designs", async (req, reply) => {
     const user = requireUser(req);
-    const parsed = createSchema.safeParse(req.body);
+    const parsed = designSchema.safeParse(req.body);
     if (!parsed.success) {
       return reply.code(400).send({ error: parsed.error.flatten() });
     }
@@ -92,17 +100,19 @@ export function registerDesignRoutes(app: FastifyInstance) {
       status: "draft",
       createdAt: existing?.createdAt || now,
       updatedAt: now,
-      project: input.project,
-      region: input.region_name || "europe-west1",
+      // May be blank on a draft — the human (or the model via the discovery
+      // tools) picks a credential/project; the wizard prompts when empty.
+      project: input.project || "",
+      region: input.region_name || "",
       ownerEmail: input.youremail,
       ownerSub: user.sub,
-      credentialsFile: input.credentialsFile,
+      credentialsFile: input.credentialsFile || "",
       config: input as unknown as Record<string, unknown>,
       endpoints: {},
       folder: input.folder?.trim() || undefined,
     };
     await upsertInstance(record);
-    await audit(user, "design.save", "instance", id, `draft ${input.mode} ${input.project}`);
+    await audit(user, "design.save", "instance", id, `draft ${input.mode} ${input.project || "(no project)"}`);
     return reply.code(201).send({ ...record, reviewUrl: reviewUrl(id) });
   });
 
