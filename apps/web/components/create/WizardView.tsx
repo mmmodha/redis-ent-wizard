@@ -1,8 +1,7 @@
 "use client";
 
-import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { CheckList } from "@/components/CheckList";
 import { MachineTypePicker } from "@/components/MachineTypePicker";
 import {
   ApplicationsEditor,
@@ -15,12 +14,6 @@ import {
   RdiEditor,
   StorageEditor,
   VmsConnectEditor,
-  blankApplication,
-  blankBigquery,
-  blankCloudSql,
-  blankLb,
-  blankPubsub,
-  blankStorage,
   bigqueryDraftFromConfig,
   cloudsqlDraftFromConfig,
   databaseDraftFromConfig,
@@ -40,31 +33,10 @@ import { parsePorts, type DesignSettings } from "@/lib/diagram";
 import type { UseGcpLookups } from "@/lib/useGcpLookups";
 import { canEnableDbReplication, effectiveDbReplication } from "@/lib/db-replication";
 import { clusterTrialShardGate, omitCreateInputDatabases } from "@/lib/trial-shards";
-import Link from "next/link";
-import {
-  createInstance,
-  getInstance,
-  listCredentials,
-  listDnsZones,
-  listFolders,
-  listMachineTypes,
-  listProjects,
-  listRegions,
-  runPreflight,
-  listReleases,
-  type Credential,
-  type DnsZoneInfo,
-  type GkeOperatorInfo,
-  type MachineTypeInfo,
-  type PreflightResult,
-  type ProjectInfo,
-  type RegionInfo,
-  type RsReleaseInfo,
-} from "@/lib/api";
+import { type PreflightResult } from "@/lib/api";
 
 type Mode = "vm" | "gke";
 
-const steps = ["Credentials", "Target", "Sizing", "Validate"];
 const LOCAL_SSD_GIB = 375;
 const APP_DISK_GIB_OPTIONS = [0, 50, 100, 200, 500, 1000];
 const DEFAULT_RS_VERSION = "8.2.0-46";
