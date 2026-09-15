@@ -6,6 +6,7 @@ import { resolveOwnedCredentialsPath } from "./credentials-store.js";
 import { GcpApiError, getMachineType, readKey } from "./gcp.js";
 import { enumerateResources, type LiveResource } from "./gcp-inventory.js";
 import { fetchComputeSkus, priceResources } from "./gcp-pricing.js";
+import { billingTable, fetchBillingByResource } from "./gcp-billing.js";
 import {
   attributeResources,
   summarize,
@@ -97,6 +98,25 @@ export function registerResourceRoutes(app: FastifyInstance) {
           warnings.push(`pricing: ${err instanceof Error ? err.message : String(err)}`);
         }
 
+        // Optional: replace estimated cost-so-far with actual billed cost when a
+        // billing export is configured. Best-effort; on failure keep the estimate.
+        let billingSource: "estimate" | "billing-export" = "estimate";
+        if (billingTable()) {
+          try {
+            const billing = await fetchBillingByResource(absPath, project);
+            if (billing.byName.size) {
+              billingSource = "billing-export";
+              if (billing.currency) currency = billing.currency;
+              priced = priced.map((r) => {
+                const actual = billing.byName.get(r.name);
+                return actual === undefined ? r : { ...r, costSoFar: actual, currency: billing.currency || r.currency };
+              });
+            }
+          } catch (err) {
+            warnings.push(`billing: ${err instanceof Error ? err.message : String(err)}`);
+          }
+        }
+
         // Instance metadata for labeling groups (only the caller's viewable ones
         // reveal name/status; the scan itself is over the caller's own project).
         const metaById = new Map<string, InstanceMeta>();
@@ -117,7 +137,7 @@ export function registerResourceRoutes(app: FastifyInstance) {
           scannedAt: new Date().toISOString(),
           project,
           currency,
-          billingSource: "estimate",
+          billingSource,
           cached: false,
           groups,
           totals,

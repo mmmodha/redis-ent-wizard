@@ -144,6 +144,10 @@ export async function gcpGet<T>(credentialsFile: string, url: string): Promise<T
   return gcpRequest<T>(credentialsFile, url, { method: "GET" });
 }
 
+export async function gcpPost<T>(credentialsFile: string, url: string, body: unknown): Promise<T> {
+  return gcpRequest<T>(credentialsFile, url, { method: "POST", body });
+}
+
 async function gcpRequest<T>(
   credentialsFile: string,
   url: string,
