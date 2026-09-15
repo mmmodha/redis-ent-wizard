@@ -264,10 +264,16 @@ export function EditWorkspace({ lockedView }: { lockedView?: View }) {
       <div className="page-head">
         <div>
           <p className="page-eyebrow">Wizard</p>
-          <h2 className="page-title">Create infrastructure</h2>
+          <h2 className="page-title">{fromId ? "Edit infrastructure" : "Create infrastructure"}</h2>
           <p className="page-sub">
-            Fill in the guided wizard or draw it on the canvas — switch views anytime; both build the same
-            deployment.
+            {fromId ? (
+              <>
+                Editing <span className="mono">{fromId}</span> — adjust in the guided wizard or on the
+                canvas, then validate and apply.
+              </>
+            ) : (
+              "Fill in the guided wizard or draw it on the canvas — switch views anytime; both build the same deployment."
+            )}
           </p>
         </div>
       </div>

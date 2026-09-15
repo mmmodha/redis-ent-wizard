@@ -44,6 +44,7 @@ import {
   assertAdmin,
   assertCanMutate,
   assertCanView,
+  canMutateInstance,
   filterInstances,
   isAdmin,
 } from "./authz.js";
@@ -325,7 +326,15 @@ app.post("/preflight", async (req, reply) => {
     input.youremail = createdBy;
     const { absPath } = await resolveOwnedCredentialsPath(user, input.credentialsFile);
     input.credentialsFile = absPath;
-    return await preflight(input);
+    // When re-validating an instance the caller is editing (a draft or a
+    // destroyed record they may overwrite), don't flag its own id as a clash.
+    const id = toId(input.name, input.env);
+    const existing = await getInstance(id);
+    const overwriteable =
+      existing &&
+      (existing.status === "destroyed" || existing.status === "draft") &&
+      canMutateInstance(user, existing);
+    return await preflight(input, overwriteable ? { allowExistingId: id } : undefined);
   } catch (err) {
     const { status, body } = gcpErrorReply(err);
     return reply.code(status).send(body);
