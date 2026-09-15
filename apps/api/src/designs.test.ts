@@ -1,0 +1,45 @@
+import assert from "node:assert/strict";
+import { describe, it } from "node:test";
+import { createSchema } from "./schema.js";
+import { renderTerraform } from "./workspace.js";
+import type { CreateInstanceInput } from "./types.js";
+
+describe("createSchema (define validation)", () => {
+  it("rejects a malformed config", () => {
+    const r = createSchema.safeParse({ name: "X", mode: "vm" });
+    assert.equal(r.success, false);
+  });
+
+  it("accepts a minimal valid VM config", () => {
+    const r = createSchema.safeParse({
+      name: "demo",
+      mode: "vm",
+      youremail: "jane_doe",
+      project: "proj",
+      credentialsFile: "key.json",
+    });
+    assert.equal(r.success, true);
+  });
+});
+
+describe("renderTerraform (define render, no apply)", () => {
+  const input = {
+    name: "demo",
+    mode: "vm",
+    youremail: "jane_doe",
+    project: "proj",
+    credentialsFile: "key.json",
+    region_name: "europe-west1",
+    clusters: [{ name: "cache", nodes: 3, databases: [{ name: "sessions", memory_gb: 1, port: 12000 }] }],
+  } as unknown as CreateInstanceInput;
+
+  it("returns Terraform text for a VM config without applying", () => {
+    const { tfvars, mainTf, variablesTf } = renderTerraform("vm", input);
+    assert.match(tfvars, /clustersize = 3/);
+    assert.match(tfvars, /machine_type/);
+    assert.match(mainTf, /module "stack"/);
+    assert.match(variablesTf, /variable "clusters"/);
+    // Placeholder credentials/ssh — never a real key path.
+    assert.doesNotMatch(tfvars, /BEGIN|PRIVATE KEY/);
+  });
+});

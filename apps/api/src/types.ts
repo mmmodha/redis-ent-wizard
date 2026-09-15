@@ -1,4 +1,6 @@
 export type InstanceStatus =
+  /** Defined (e.g. by an AI tool via MCP) but not yet applied; awaiting human review. */
+  | "draft"
   | "pending"
   | "applying"
   /** Terraform finished; Redis Enterprise is still installing/forming the cluster. */

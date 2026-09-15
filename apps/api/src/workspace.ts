@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { normalizeAppDiskGib, normalizeAppMachineTypes, parseAppExtraPorts } from "./app-web.js";
 import { normalizeApplications } from "./applications.js";
@@ -771,12 +772,13 @@ export function writeInstanceWorkspace(
   mode: DeploymentMode,
   input: CreateInstanceInput,
   credentialsAbs: string,
+  opts?: { sshPublicKey?: string },
 ): void {
   fs.mkdirSync(workDir, { recursive: true });
 
   vendorTerraform(workDir);
   const profileSource = `./tf/profiles/${mode}`;
-  const sshKey = mode === "vm" ? resolveSshPublicKey() : "";
+  const sshKey = mode === "vm" ? opts?.sshPublicKey ?? resolveSshPublicKey() : "";
 
   const rootTf = `terraform {
   required_version = ">= 1.5.0"
@@ -1264,4 +1266,29 @@ variable "rdi" {
   fs.writeFileSync(path.join(workDir, "main.tf"), rootTf, "utf8");
   fs.writeFileSync(path.join(workDir, "variables.tf"), varsTf, "utf8");
   fs.writeFileSync(path.join(workDir, "terraform.tfvars"), tfvarsBody + "\n", "utf8");
+}
+
+/**
+ * Render the Terraform for a config as text WITHOUT provisioning — used by the
+ * define-only surface (MCP) so an AI/human can inspect what would be created.
+ * Reuses writeInstanceWorkspace against a throwaway scratch dir (with placeholder
+ * credentials/SSH values) and reads the files back, so it can never apply.
+ */
+export function renderTerraform(
+  mode: DeploymentMode,
+  input: CreateInstanceInput,
+): { mainTf: string; variablesTf: string; tfvars: string } {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rew-render-"));
+  try {
+    writeInstanceWorkspace(dir, mode, input, "credentials.json", {
+      sshPublicKey: "<ssh-public-key>",
+    });
+    return {
+      mainTf: fs.readFileSync(path.join(dir, "main.tf"), "utf8"),
+      variablesTf: fs.readFileSync(path.join(dir, "variables.tf"), "utf8"),
+      tfvars: fs.readFileSync(path.join(dir, "terraform.tfvars"), "utf8"),
+    };
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 }
