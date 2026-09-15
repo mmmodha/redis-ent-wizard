@@ -423,4 +423,58 @@ export async function deleteArtifact(id: string): Promise<void> {
   );
 }
 
+// --- Live GCP resource inventory + cost ------------------------------------
+
+export type LiveResource = {
+  kind: string;
+  name: string;
+  location: string;
+  status?: string;
+  creationTimestamp?: string;
+  labels?: Record<string, string>;
+  attrs: Record<string, unknown>;
+  instanceId?: string;
+  owner?: string;
+  costPerHour?: number;
+  costSoFar?: number;
+  currency?: string;
+};
+
+export type ResourceGroup = {
+  instanceId: string | null;
+  instanceName?: string;
+  status?: string;
+  mode?: string;
+  orphaned?: boolean;
+  resourceCount: number;
+  costPerHour?: number;
+  costSoFar?: number;
+  resources: LiveResource[];
+};
+
+export type ResourceScan = {
+  scannedAt: string;
+  project: string;
+  currency: string;
+  billingSource: "estimate" | "billing-export";
+  cached: boolean;
+  groups: ResourceGroup[];
+  totals: { costPerHour: number; costSoFar: number; unpriced: number; resourceCount: number };
+  permissions: { missing: string[] };
+  warnings: string[];
+};
+
+export async function listGcpResources(
+  credentialsFile: string,
+  project?: string,
+  refresh?: boolean,
+): Promise<ResourceScan> {
+  const qs = new URLSearchParams({ credentialsFile });
+  if (project) qs.set("project", project);
+  if (refresh) qs.set("refresh", "1");
+  return jsonOrThrow(
+    await fetch(`${apiBase()}/gcp/resources?${qs}`, { cache: "no-store", headers: authHeaders() }),
+  );
+}
+
 export { apiBase };

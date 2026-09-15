@@ -1128,6 +1128,57 @@ select:disabled {
   width: 36px;
 }
 
+/* Resources & Cost view */
+.scan-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding: 12px 16px;
+  margin-bottom: var(--space);
+}
+
+.scan-totals {
+  display: flex;
+  align-items: baseline;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.scan-totals .mono {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--redis-text-primary);
+}
+
+.group-title-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+/* Unowned resources: dashed accent so they read as "attention / not tracked". */
+.group-unowned {
+  border-style: dashed;
+}
+
+.group-unowned .group-head {
+  background: var(--redis-bg-primary);
+}
+
+.col-cost {
+  text-align: right;
+  white-space: nowrap;
+}
+
+.scan-warnings {
+  margin-top: var(--space);
+  display: grid;
+  gap: 4px;
+}
+
 .row-selected td {
   background: var(--accent-soft-bg);
 }

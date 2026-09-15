@@ -16,6 +16,7 @@ const TABS = [
         { href: "/design", label: "Design (legacy)", match: (p: string) => p.startsWith("/design") },
       ]
     : []),
+  { href: "/resources", label: "Resources", match: (p: string) => p.startsWith("/resources") },
   { href: "/credentials", label: "Credentials", match: (p: string) => p.startsWith("/credentials") },
 ];
 
