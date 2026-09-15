@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { ReactFlowProvider } from "@xyflow/react";
 
@@ -8,7 +9,7 @@ import { CheckList } from "@/components/CheckList";
 import { DeploymentSettings, ownerError, type DesignMeta } from "@/components/design/DeploymentSettings";
 import { DesignView } from "@/components/create/DesignView";
 import { WizardView } from "@/components/create/WizardView";
-import { createInstance, getInstance, runPreflight, type PreflightResult } from "@/lib/api";
+import { createInstance, getInstance, runPreflight, saveDesign, type PreflightResult } from "@/lib/api";
 import { useGcpLookups } from "@/lib/useGcpLookups";
 import { canUseDesignerCanvas, designerLockReason } from "@/lib/designer-gate";
 import { clusterTrialShardGate, omitCreateInputDatabases } from "@/lib/trial-shards";
@@ -77,6 +78,8 @@ export function EditWorkspace({ lockedView }: { lockedView?: View }) {
   const [preflight, setPreflight] = useState<PreflightResult | null>(null);
   const [checking, setChecking] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [savingDraft, setSavingDraft] = useState(false);
+  const [savedDraftId, setSavedDraftId] = useState("");
   const [error, setError] = useState("");
 
   // Config the active view hydrates from. Frozen while a view is mounted (it is
@@ -257,6 +260,22 @@ export function EditWorkspace({ lockedView }: { lockedView?: View }) {
     }
   }, [currentConfig, withSettings, router]);
 
+  const saveDraft = useCallback(async () => {
+    if (!currentConfig) return;
+    setSavingDraft(true);
+    setError("");
+    setSavedDraftId("");
+    try {
+      // Drafts persist the config without provisioning; no preflight required.
+      const saved = await saveDesign(withSettings(currentConfig));
+      setSavedDraftId(saved.id);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to save draft");
+    } finally {
+      setSavingDraft(false);
+    }
+  }, [currentConfig, withSettings]);
+
   const diagramDisabled = !canvasReady;
 
   return (
@@ -401,7 +420,24 @@ export function EditWorkspace({ lockedView }: { lockedView?: View }) {
               Apply without databases
             </button>
           ) : null}
+          {/* Persist the current config as a draft without provisioning. A draft
+              is work-in-progress, so it only needs a valid name + owner. */}
+          <button
+            type="button"
+            className="btn"
+            disabled={savingDraft || submitting || !meta.name || Boolean(oe) || !currentConfig}
+            onClick={() => void saveDraft()}
+          >
+            {savingDraft ? "Saving…" : "Save draft"}
+          </button>
         </div>
+
+        {savedDraftId ? (
+          <p className="notice">
+            Saved draft <span className="mono">{savedDraftId}</span> — no resources were created. Find it
+            on the <Link href="/">Instances board</Link> to reopen or apply later.
+          </p>
+        ) : null}
       </div>
     </div>
   );

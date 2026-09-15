@@ -29,6 +29,18 @@ describe("designSchema (define surface)", () => {
     assert.equal(r.success, true);
   });
 
+  it("accepts blank project/credentialsFile (web sends '' for an unset picker)", () => {
+    const r = designSchema.safeParse({
+      name: "demo",
+      mode: "vm",
+      youremail: "jane_doe",
+      project: "",
+      credentialsFile: "",
+      region_name: "",
+    });
+    assert.equal(r.success, true);
+  });
+
   it("still requires name/mode/youremail", () => {
     assert.equal(designSchema.safeParse({ name: "demo", mode: "vm" }).success, false);
   });

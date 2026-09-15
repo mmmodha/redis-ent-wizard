@@ -203,6 +203,19 @@ export async function createInstance(body: Record<string, unknown>): Promise<Ins
   );
 }
 
+/** Persist a config as a draft (no provisioning). Returns the record + reviewUrl. */
+export async function saveDesign(
+  body: Record<string, unknown>,
+): Promise<Instance & { reviewUrl?: string }> {
+  return jsonOrThrow(
+    await fetch(`${apiBase()}/designs`, {
+      method: "POST",
+      headers: authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify(body),
+    }),
+  );
+}
+
 export async function destroyInstance(id: string): Promise<void> {
   await jsonOrThrow(
     await fetch(`${apiBase()}/instances/${encodeURIComponent(id)}`, {

@@ -228,7 +228,9 @@ export const preflightSchema = createSchema.partial({ project: true }).extend({
  * This avoids the model inventing placeholder credentials/projects that the
  * wizard can't resolve on review.
  */
-export const designSchema = createSchema.partial({
-  credentialsFile: true,
-  project: true,
+export const designSchema = createSchema.extend({
+  // Optional AND allowed to be blank — the web sends "" for an unset picker,
+  // the MCP omits them entirely; both mean "the human picks it at apply time".
+  credentialsFile: z.string().optional(),
+  project: z.string().optional(),
 });
