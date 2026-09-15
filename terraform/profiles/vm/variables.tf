@@ -155,6 +155,7 @@ variable "clusters" {
     machine_type   = string
     rof_nvme_disks = number
     RS_release     = string
+    RS_admin       = optional(string, "admin@redis.io")
   }))
   description = "Redis clusters in this deployment. Empty means no Redis VMs when redis_enabled is false."
   default     = []

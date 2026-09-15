@@ -18,7 +18,6 @@ const settings: DesignSettings = {
   youremail: "jane_doe",
   skip_deletion: true,
   mode: "vm",
-  RS_admin: "admin@redis.io",
   operator_chart_version: "latest",
   credentialsFile: "key.json",
   project: "proj",

@@ -66,6 +66,24 @@ describe("renderTerraform (define render, no apply)", () => {
     // Placeholder credentials/ssh — never a real key path.
     assert.doesNotMatch(tfvars, /BEGIN|PRIVATE KEY/);
   });
+
+  it("renders a per-cluster RS_admin in tfvars and the clusters variable type", () => {
+    const twoClusters = {
+      name: "demo",
+      mode: "vm",
+      youremail: "jane_doe",
+      project: "proj",
+      credentialsFile: "key.json",
+      clusters: [
+        { name: "primary", nodes: 3, RS_admin: "primary_admin@redis.io" },
+        { name: "cache", nodes: 3, RS_admin: "cache_admin@redis.io" },
+      ],
+    } as unknown as CreateInstanceInput;
+    const { tfvars, variablesTf } = renderTerraform("vm", twoClusters);
+    assert.match(variablesTf, /RS_admin\s*=\s*optional\(string/);
+    assert.match(tfvars, /primary_admin@redis\.io/);
+    assert.match(tfvars, /cache_admin@redis\.io/);
+  });
 });
 
 describe("create-config JSON Schema (MCP tool input)", () => {

@@ -37,6 +37,8 @@ export type ClusterData = {
   rof_nvme_disks: number;
   rs_version: string;
   rec_nodes: number;
+  /** Redis Enterprise admin username for this cluster (VM mode). */
+  RS_admin?: string;
   license?: string;
   [k: string]: unknown;
 };
@@ -183,7 +185,6 @@ export type DesignSettings = {
   youremail: string;
   skip_deletion: boolean;
   mode: "vm" | "gke";
-  RS_admin: string;
   operator_chart_version: string;
   credentialsFile: string;
   project: string;
@@ -820,10 +821,10 @@ export function diagramToCreateInput(
         machine_type: c.data.machine_type,
         rof_nvme_disks: Number(c.data.rof_nvme_disks),
         rs_version: c.data.rs_version,
+        RS_admin: (c.data.RS_admin as string)?.trim() || "admin@redis.io",
         license: c.data.license?.trim() || undefined,
         databases: databasesFor(c.id),
       })),
-      RS_admin: settings.RS_admin,
       app: appCount,
       app_machine_types: appCount > 0 ? appMachineTypes : undefined,
       app_disk_gib: appCount > 0 ? appDiskGib : undefined,
@@ -1086,6 +1087,7 @@ type StoredClusterCfg = {
   rof_nvme_disks?: number;
   rs_version?: string;
   rec_nodes?: number;
+  RS_admin?: string;
   license?: string;
   databases?: Record<string, unknown>[];
 };
@@ -1172,6 +1174,7 @@ export function createInputToDiagram(
         rof_nvme_disks: dnum(c.rof_nvme_disks, 0),
         rs_version: dstr(c.rs_version) || DIAGRAM_DEFAULT_RS_VERSION,
         rec_nodes: dnum(c.rec_nodes ?? c.nodes, 3),
+        RS_admin: dstr(c.RS_admin) || dstr(cfg.RS_admin) || "admin@redis.io",
         license: c.license || "",
       },
     });

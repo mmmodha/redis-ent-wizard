@@ -369,6 +369,14 @@ function ClusterForm({
       </label>
       {mode === "vm" ? (
         <>
+          <label>
+            Redis Enterprise admin
+            <input
+              value={data.RS_admin ?? "admin@redis.io"}
+              onChange={(e) => set<ClusterData>({ RS_admin: e.target.value })}
+              placeholder="admin@redis.io"
+            />
+          </label>
           <MachineTypePicker
             label="Redis node machine type"
             value={data.machine_type}

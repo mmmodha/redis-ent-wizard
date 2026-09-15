@@ -295,6 +295,8 @@ export interface CreateInstanceInput {
     rs_version?: string;
     RS_release?: string;
     rec_nodes?: number;
+    /** Redis Enterprise admin username for this cluster (VM mode). */
+    RS_admin?: string;
     /** Databases to create on this cluster after it forms. */
     databases?: DatabaseSpec[];
     /** Redis Enterprise license key applied to this cluster once it forms. */

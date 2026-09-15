@@ -48,6 +48,7 @@ type ClusterDraft = {
   rof_nvme_disks: number;
   rs_version: string;
   rec_nodes: number;
+  RS_admin: string;
   license: string;
   databases: DatabaseDraft[];
 };
@@ -59,6 +60,7 @@ type StoredCluster = {
   rof_nvme_disks?: number;
   rs_version?: string;
   rec_nodes?: number;
+  RS_admin?: string;
   license?: string;
   databases?: Record<string, unknown>[];
 };
@@ -71,6 +73,7 @@ function blankCluster(machine = ""): ClusterDraft {
     rof_nvme_disks: 0,
     rs_version: DEFAULT_RS_VERSION,
     rec_nodes: 3,
+    RS_admin: "admin@redis.io",
     license: "",
     databases: [],
   };
@@ -135,7 +138,7 @@ function extraPortsToString(v: unknown): string {
   return "";
 }
 
-function clusterDraftFromConfig(c: StoredCluster): ClusterDraft {
+function clusterDraftFromConfig(c: StoredCluster, fallbackAdmin = ""): ClusterDraft {
   return {
     name: c.name || "",
     nodes: Number(c.nodes ?? c.rec_nodes ?? 3) || 3,
@@ -143,6 +146,7 @@ function clusterDraftFromConfig(c: StoredCluster): ClusterDraft {
     rof_nvme_disks: Number(c.rof_nvme_disks ?? 0) || 0,
     rs_version: c.rs_version || DEFAULT_RS_VERSION,
     rec_nodes: Number(c.rec_nodes ?? c.nodes ?? 3) || 3,
+    RS_admin: c.RS_admin || fallbackAdmin || "admin@redis.io",
     license: c.license || "",
     databases: Array.isArray(c.databases) ? c.databases.map(databaseDraftFromConfig) : [],
   };
@@ -180,7 +184,6 @@ type WizardForm = {
     bigquery: string[];
     sql: string[];
   };
-  RS_admin: string;
   app: number;
   app_machine_types: string[];
   memviz_enabled: boolean;
@@ -260,16 +263,19 @@ function formFromConfig(
   const clusters: ClusterDraft[] = redisOff
     ? []
     : rawClusters.length
-      ? rawClusters.map(clusterDraftFromConfig)
+      ? rawClusters.map((c) => clusterDraftFromConfig(c, str(cfg.RS_admin)))
       : [
-          clusterDraftFromConfig({
-            name: undefined,
-            nodes: Number(cfg.clustersize) || 3,
-            machine_type: str(cfg.machine_type),
-            rof_nvme_disks: Number(cfg.rof_nvme_disks) || 0,
-            rs_version: str(cfg.rs_version) || DEFAULT_RS_VERSION,
-            rec_nodes: Number(cfg.rec_nodes) || 3,
-          }),
+          clusterDraftFromConfig(
+            {
+              name: undefined,
+              nodes: Number(cfg.clustersize) || 3,
+              machine_type: str(cfg.machine_type),
+              rof_nvme_disks: Number(cfg.rof_nvme_disks) || 0,
+              rs_version: str(cfg.rs_version) || DEFAULT_RS_VERSION,
+              rec_nodes: Number(cfg.rec_nodes) || 3,
+            },
+            str(cfg.RS_admin),
+          ),
         ];
   const zones = strArray(cfg.region_zones);
   return {
@@ -323,7 +329,6 @@ function formFromConfig(
         sql: strArray(vc.sql),
       };
     })(),
-    RS_admin: str(cfg.RS_admin) || prev.RS_admin,
     app: Number(cfg.app) || 0,
     app_machine_types: strArray(cfg.app_machine_types),
     memviz_enabled: Boolean(cfg.memviz_enabled),
@@ -374,7 +379,6 @@ function blankForm(): WizardForm {
       bigquery: [],
       sql: [],
     },
-    RS_admin: "admin@redis.io",
     app: 0,
     app_machine_types: [],
     memviz_enabled: false,
@@ -444,7 +448,6 @@ export function WizardView({
       region_name: settings.region_name,
       region_zones: settings.region_zones,
       mode: settings.mode,
-      RS_admin: settings.RS_admin,
       operator_chart_version: settings.operator_chart_version,
       dns_managed_zone: settings.dns_managed_zone,
       dns_zone_dns_name: settings.dns_zone_dns_name,
@@ -663,7 +666,6 @@ export function WizardView({
           redis_enabled: false,
           clusters: [],
           clustersize: 0,
-          RS_admin: form.RS_admin,
           app: Number(form.app),
           app_machine_types: form.app > 0 ? form.app_machine_types.slice(0, form.app) : undefined,
           memviz_enabled: form.app > 0 ? form.memviz_enabled : false,
@@ -699,10 +701,10 @@ export function WizardView({
           machine_type: c.machine_type,
           rof_nvme_disks: Number(c.rof_nvme_disks),
           rs_version: c.rs_version,
+          RS_admin: c.RS_admin.trim() || "admin@redis.io",
           license: c.license.trim() || undefined,
           ...(c.databases.length ? { databases: databasesToPayload(c.databases, Number(c.nodes)) } : {}),
         })),
-        RS_admin: form.RS_admin,
         app: Number(form.app),
         app_machine_types: form.app > 0 ? form.app_machine_types.slice(0, form.app) : undefined,
         memviz_enabled: form.app > 0 ? form.memviz_enabled : false,
@@ -838,6 +840,23 @@ export function WizardView({
                     {form.clusters.length > 1 ? " · required, unique" : " · optional"}
                   </span>
                 </label>
+                {form.mode === "vm" ? (
+                  <label>
+                    Redis Enterprise admin
+                    <input
+                      value={cluster.RS_admin}
+                      onChange={(e) => {
+                        const RS_admin = e.target.value;
+                        setForm((prev) => ({
+                          ...prev,
+                          clusters: prev.clusters.map((c, idx) => (idx === i ? { ...c, RS_admin } : c)),
+                        }));
+                        setPreflightResult(null);
+                      }}
+                      placeholder="admin@redis.io"
+                    />
+                  </label>
+                ) : null}
                 <label>
                   Cluster nodes
                   <select

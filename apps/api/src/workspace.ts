@@ -222,7 +222,8 @@ interface VmRegistry {
   bigquery: Map<string, BigqueryRef>;
   /** Instance slug -> static Cloud SQL env values. */
   sql: Map<string, SqlRef>;
-  adminUser: string;
+  /** Admin username per cluster, indexed by cluster position (clusterIndex). */
+  adminUsers: string[];
   vmPrefix: string;
   dnsSuffix: string;
   appCount: number;
@@ -273,7 +274,7 @@ export function buildVmRegistry(
     pubsub: pubsubEnvMap(input, vmPrefix),
     bigquery: bigqueryEnvMap(input, vmPrefix),
     sql: sqlEnvMap(input, vmPrefix),
-    adminUser: input.RS_admin || "admin@redis.io",
+    adminUsers: clusters.map((c) => c.RS_admin || input.RS_admin || "admin@redis.io"),
     vmPrefix,
     dnsSuffix,
     appCount: input.app ?? 0,
@@ -292,9 +293,11 @@ export function resolveVmConnections(sel: ConnectSelections, reg: VmRegistry): R
     if (host === undefined) return;
     const slug = envSlug(name);
     env[`REDIS_${slug}_HOST`] = host;
-    env[`REDIS_${slug}_ADMIN_USER`] = reg.adminUser;
     if (i === 0) env.REDIS_HOST = host;
     const idx = reg.clusterIndex.get(name);
+    // The admin username is the target cluster's own (fallback to the first).
+    env[`REDIS_${slug}_ADMIN_USER`] =
+      reg.adminUsers[idx ?? 0] ?? reg.adminUsers[0] ?? "admin@redis.io";
     if (idx !== undefined) connectClusterAdmin[`REDIS_${slug}_ADMIN_PASSWORD`] = idx;
   });
 
@@ -498,7 +501,8 @@ export function buildRdi(input: CreateInstanceInput, prefix: string, mode: Deplo
     env.RDI_TARGET_HOST = host;
     env.RDI_TARGET_PORT = String(port);
     if (target.db.password) env.RDI_TARGET_PASSWORD = target.db.password;
-    env.RDI_REDIS_ADMIN_USER = input.RS_admin || "admin@redis.io";
+    env.RDI_REDIS_ADMIN_USER =
+      clusters[target.clusterIdx]?.RS_admin || input.RS_admin || "admin@redis.io";
     // Cluster admin password is apply-time on VM; on GKE it is read from the RE secret at deploy.
     if (mode === "vm") connectClusterAdmin.RDI_REDIS_ADMIN_PASSWORD = target.clusterIdx;
   }
@@ -917,6 +921,7 @@ variable "clusters" {
     machine_type   = string
     rof_nvme_disks = number
     RS_release     = string
+    RS_admin       = optional(string, "admin@redis.io")
   }))
 }
 variable "RS_admin" { type = string }
@@ -1193,8 +1198,10 @@ variable "rdi" {
         machine_type: c.machine_type,
         rof_nvme_disks: c.rof_nvme_disks,
         RS_release: c.RS_release,
+        RS_admin: c.RS_admin,
       })),
-      RS_admin: input.RS_admin || "admin@redis.io",
+      // Deployment-wide fallback; each cluster carries its own RS_admin above.
+      RS_admin: clusters[0]?.RS_admin || input.RS_admin || "admin@redis.io",
       app: input.app ?? 0,
       app_machine_types: normalizeAppMachineTypes({
         app: input.app ?? 0,

@@ -10,7 +10,6 @@ export type DesignMeta = {
   youremail: string;
   skip_deletion: boolean;
   mode: "vm" | "gke";
-  RS_admin: string;
   operator_chart_version: string;
 };
 
@@ -219,15 +218,7 @@ export function DeploymentSettings({
           </select>
         </label>
 
-        {meta.mode === "vm" ? (
-          <label>
-            Redis Enterprise admin
-            <input
-              value={meta.RS_admin}
-              onChange={(e) => setMeta((m) => ({ ...m, RS_admin: e.target.value }))}
-            />
-          </label>
-        ) : (
+        {meta.mode === "gke" ? (
           <label>
             Operator / Redis version
             <select
@@ -244,7 +235,7 @@ export function DeploymentSettings({
               ))}
             </select>
           </label>
-        )}
+        ) : null}
       </div>
 
       {!validCredential && settings.credentialsFile ? (

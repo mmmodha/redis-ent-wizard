@@ -5,6 +5,8 @@ export const MAX_CLUSTERS = 3;
 const DEFAULT_VM_MACHINE = "e2-standard-2";
 const DEFAULT_NODES = 3;
 
+const DEFAULT_RS_ADMIN = "admin@redis.io";
+
 export type ClusterSpec = {
   name: string;
   nodes: number;
@@ -13,6 +15,8 @@ export type ClusterSpec = {
   rs_version: string;
   RS_release: string;
   rec_nodes: number;
+  /** Redis Enterprise admin username for this cluster (VM mode). */
+  RS_admin: string;
   /** Non-Terraform metadata: databases created via the REST API after bootstrap. */
   databases?: DatabaseSpec[];
   /** Non-Terraform metadata: license applied via the REST API after bootstrap. */
@@ -27,6 +31,7 @@ export type ClusterInput = {
   rs_version?: string;
   RS_release?: string;
   rec_nodes?: number;
+  RS_admin?: string;
   databases?: DatabaseSpec[];
   license?: string;
 };
@@ -73,6 +78,8 @@ export function normalizeClusters(input: {
   RS_release?: string;
   rec_nodes?: number;
   redis_enabled?: boolean;
+  /** Deployment-wide admin username; the per-cluster fallback. */
+  RS_admin?: string;
 }): ClusterSpec[] {
   const mode = input.mode || "vm";
   if (input.redis_enabled === false) return [];
@@ -121,6 +128,7 @@ export function normalizeClusters(input: {
       rs_version: release.rs_version,
       RS_release: release.RS_release,
       rec_nodes: recNodes,
+      RS_admin: (c.RS_admin || input.RS_admin || DEFAULT_RS_ADMIN).trim() || DEFAULT_RS_ADMIN,
       // Carry non-Terraform metadata through so it survives the create handler
       // overwriting input.clusters with the normalized specs.
       ...(Array.isArray(c.databases) && c.databases.length ? { databases: c.databases } : {}),

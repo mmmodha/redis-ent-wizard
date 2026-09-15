@@ -10,6 +10,26 @@ import {
   totalClusterNodes,
 } from "./clusters.js";
 
+describe("normalizeClusters RS_admin (per-cluster admin)", () => {
+  it("uses each cluster's own admin, falling back to top-level then the default", () => {
+    const clusters = normalizeClusters({
+      mode: "vm",
+      RS_admin: "deployment_admin@redis.io",
+      clusters: [
+        { name: "a", nodes: 3, RS_admin: "team_a@redis.io" },
+        { name: "b", nodes: 3 }, // inherits the top-level fallback
+      ],
+    });
+    assert.equal(clusters[0].RS_admin, "team_a@redis.io");
+    assert.equal(clusters[1].RS_admin, "deployment_admin@redis.io");
+  });
+
+  it("defaults to admin@redis.io when nothing is set", () => {
+    const clusters = normalizeClusters({ mode: "vm", clusters: [{ name: "a", nodes: 3 }] });
+    assert.equal(clusters[0].RS_admin, "admin@redis.io");
+  });
+});
+
 describe("normalizeClusters", () => {
   it("builds one cluster from legacy VM fields", () => {
     const clusters = normalizeClusters({

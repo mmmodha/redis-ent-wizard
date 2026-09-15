@@ -200,7 +200,6 @@ export function InstanceDiagram({
     youremail: String(config.youremail || ""),
     skip_deletion: Boolean(config.skip_deletion),
     mode,
-    RS_admin: String(config.RS_admin || ""),
     operator_chart_version: String(config.operator_chart_version || ""),
     credentialsFile: "",
     project: String(config.project || ""),

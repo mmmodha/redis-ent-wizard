@@ -9,6 +9,7 @@ locals {
         machine_type   = var.machine_type
         rof_nvme_disks = var.rof_nvme_disks
         RS_release     = var.RS_release
+        RS_admin       = var.RS_admin
       }] : []
     )
   ) : []
@@ -108,7 +109,7 @@ module "re_vm" {
   region_zones       = var.region_zones
   rof_nvme_disks     = local.clusters[count.index].rof_nvme_disks
   RS_release         = local.clusters[count.index].RS_release
-  RS_admin           = var.RS_admin
+  RS_admin           = local.clusters[count.index].RS_admin
   dns_managed_zone   = var.dns_managed_zone
   dns_zone_dns_name  = var.dns_zone_dns_name
   public_subnet_name = module.network.public_subnet_name
@@ -396,7 +397,8 @@ output "nodes_dns" {
 }
 
 output "admin_username" {
-  value = length(module.re_vm) > 0 ? var.RS_admin : ""
+  # Deployment-wide fallback; per-cluster usernames are in the clusters output.
+  value = length(module.re_vm) > 0 ? local.clusters[0].RS_admin : ""
 }
 
 output "admin_password" {
@@ -427,6 +429,7 @@ output "clusters" {
       node_zones     = m.node_zones
       how_to_ssh     = m.how_to_ssh
       node1_name     = m.node1_name
+      admin_username = local.clusters[i].RS_admin
       admin_password = m.admin_password
     }
   ]

@@ -30,7 +30,6 @@ const SETTINGS_KEYS = [
   "region_name",
   "region_zones",
   "mode",
-  "RS_admin",
   "operator_chart_version",
   "dns_managed_zone",
   "dns_zone_dns_name",
@@ -56,7 +55,6 @@ export function EditWorkspace({ lockedView }: { lockedView?: View }) {
     youremail: "",
     skip_deletion: false,
     mode: "vm",
-    RS_admin: "admin@redis.io",
     operator_chart_version: "latest",
   });
 
@@ -94,7 +92,6 @@ export function EditWorkspace({ lockedView }: { lockedView?: View }) {
       youremail: meta.youremail,
       skip_deletion: meta.skip_deletion,
       mode: meta.mode,
-      RS_admin: meta.RS_admin,
       operator_chart_version: meta.operator_chart_version,
       credentialsFile: gcp.settings.credentialsFile,
       project: gcp.settings.project,
@@ -157,7 +154,6 @@ export function EditWorkspace({ lockedView }: { lockedView?: View }) {
           youremail: s(cfg.youremail, m.youremail),
           skip_deletion: Boolean(cfg.skip_deletion),
           mode,
-          RS_admin: s(cfg.RS_admin, m.RS_admin),
           operator_chart_version: s(cfg.operator_chart_version, m.operator_chart_version),
         }));
         const zones = Array.isArray(cfg.region_zones) ? (cfg.region_zones as unknown[]).map(String) : [];

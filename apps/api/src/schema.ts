@@ -183,6 +183,7 @@ export const createSchema = z.object({
         rs_version: z.string().optional(),
         RS_release: z.string().optional(),
         rec_nodes: z.number().int().min(1).max(9).optional(),
+        RS_admin: z.string().max(128).optional(),
         databases: z.array(databaseSchema).max(16).optional(),
         license: z.string().max(20000).optional(),
       }),
