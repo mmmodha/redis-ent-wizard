@@ -3,8 +3,9 @@ import { requireUser } from "./auth.js";
 import { canViewInstance } from "./authz.js";
 import { readRegistry } from "./registry.js";
 import { resolveOwnedCredentialsPath } from "./credentials-store.js";
-import { GcpApiError, readKey } from "./gcp.js";
-import { enumerateResources } from "./gcp-inventory.js";
+import { GcpApiError, getMachineType, readKey } from "./gcp.js";
+import { enumerateResources, type LiveResource } from "./gcp-inventory.js";
+import { fetchComputeSkus, priceResources } from "./gcp-pricing.js";
 import {
   attributeResources,
   summarize,
@@ -67,6 +68,34 @@ export function registerResourceRoutes(app: FastifyInstance) {
         }
 
         const inventory = await enumerateResources(absPath, project);
+        const warnings = [...inventory.warnings];
+
+        // Estimate cost/hour from the Catalog API (best-effort; failures leave
+        // resources unpriced rather than failing the scan).
+        let priced: LiveResource[] = inventory.resources;
+        let currency = "USD";
+        try {
+          const skus = await fetchComputeSkus(absPath);
+          const mtCache = new Map<string, Promise<{ guestCpus: number; memoryMb: number } | undefined>>();
+          priced = await priceResources(inventory.resources, {
+            skus,
+            now: Date.now(),
+            machineType: (zone, type) => {
+              const key = `${zone}/${type}`;
+              let p = mtCache.get(key);
+              if (!p) {
+                p = getMachineType(absPath, project, zone, type)
+                  .then((m) => ({ guestCpus: m.guestCpus, memoryMb: m.memoryMb }))
+                  .catch(() => undefined);
+                mtCache.set(key, p);
+              }
+              return p;
+            },
+          });
+          currency = priced.find((r) => r.currency)?.currency || "USD";
+        } catch (err) {
+          warnings.push(`pricing: ${err instanceof Error ? err.message : String(err)}`);
+        }
 
         // Instance metadata for labeling groups (only the caller's viewable ones
         // reveal name/status; the scan itself is over the caller's own project).
@@ -81,19 +110,19 @@ export function registerResourceRoutes(app: FastifyInstance) {
           });
         }
 
-        const attribution = attributeResources(inventory.resources, [...metaById.keys()]);
+        const attribution = attributeResources(priced, [...metaById.keys()]);
         const { groups, totals } = summarize(attribution, metaById);
 
         const payload: ScanResponse = {
           scannedAt: new Date().toISOString(),
           project,
-          currency: "USD",
+          currency,
           billingSource: "estimate",
           cached: false,
           groups,
           totals,
           permissions: { missing: inventory.missingPermissions },
-          warnings: inventory.warnings,
+          warnings,
         };
         cache.set(cacheKey, { at: Date.now(), payload });
         return reply.send(payload);
