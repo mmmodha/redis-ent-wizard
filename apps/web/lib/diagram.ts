@@ -906,7 +906,7 @@ export const LAYOUT = {
 /** Deterministic sizes for each node kind. Containers may grow past these. */
 export const NODE_SIZE: Record<string, { width: number; height: number }> = {
   database: { width: 248, height: 192 },
-  loadbalancer: { width: 200, height: 72 },
+  loadbalancer: { width: 224, height: 120 },
   cluster: { width: 312, height: 128 },
   vms: { width: 232, height: 120 },
   application: { width: 232, height: 120 },
