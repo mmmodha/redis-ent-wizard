@@ -37,6 +37,10 @@ services:
       QUOTA_MAX_LIVE_CLUSTERS: "${QUOTA_MAX_LIVE_CLUSTERS:-5}"
       QUOTA_MAX_NODES: "${QUOTA_MAX_NODES:-7}"
       QUOTA_MAX_NVME: "${QUOTA_MAX_NVME:-8}"
+      REW_API_TOKENS: "${REW_API_TOKENS:-}"
+      # Base URL for design review links (/edit?from=<id>) returned to MCP callers.
+      # Defaults to the Caddy edge origin, where the web UI is served.
+      REW_WEB_URL: "${REW_WEB_URL:-http://localhost:8080}"
     volumes:
       - ./data:/data
       - ./terraform:/app/terraform:ro
