@@ -140,7 +140,7 @@ export class GcpApiError extends Error {
   }
 }
 
-async function gcpGet<T>(credentialsFile: string, url: string): Promise<T> {
+export async function gcpGet<T>(credentialsFile: string, url: string): Promise<T> {
   return gcpRequest<T>(credentialsFile, url, { method: "GET" });
 }
 
@@ -187,7 +187,7 @@ export async function testIamPermissions(
   return body.permissions || [];
 }
 
-async function gcpGetAll<T>(
+export async function gcpGetAll<T>(
   credentialsFile: string,
   url: string,
   itemsKey = "items",
@@ -201,6 +201,34 @@ async function gcpGetAll<T>(
     const items = (body[itemsKey] as T[] | undefined) || [];
     out.push(...items);
     pageToken = body.nextPageToken as string | undefined;
+  } while (pageToken);
+  return out;
+}
+
+/**
+ * Compute `aggregatedList` returns `items` as a map of scope
+ * (e.g. "zones/europe-west1-b") → `{ <itemsKey>: [...] }` (or a `warning` when
+ * that scope is empty/inaccessible). Paginate and flatten to a single array.
+ */
+export async function gcpGetAggregated<T>(
+  credentialsFile: string,
+  url: string,
+  itemsKey: string,
+): Promise<T[]> {
+  const out: T[] = [];
+  let pageToken: string | undefined;
+  do {
+    const sep = url.includes("?") ? "&" : "?";
+    const paged = pageToken ? `${url}${sep}pageToken=${encodeURIComponent(pageToken)}` : url;
+    const body = await gcpGet<{
+      items?: Record<string, Record<string, T[] | undefined>>;
+      nextPageToken?: string;
+    }>(credentialsFile, paged);
+    for (const scope of Object.values(body.items || {})) {
+      const items = scope?.[itemsKey];
+      if (Array.isArray(items)) out.push(...items);
+    }
+    pageToken = body.nextPageToken;
   } while (pageToken);
   return out;
 }

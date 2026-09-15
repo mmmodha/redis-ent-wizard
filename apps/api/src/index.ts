@@ -65,6 +65,7 @@ import { initDb, migrateFileRegistryIfNeeded } from "./db.js";
 import { CREATED_BY_ERROR, isValidCreatedBy, resolveCreatedBy } from "./created-by.js";
 import { createSchema, databaseSchema, preflightSchema } from "./schema.js";
 import { registerDesignRoutes } from "./designs.js";
+import { registerResourceRoutes } from "./resources.js";
 import type { CreateInstanceInput, InstanceRecord } from "./types.js";
 
 function toId(name: string, env?: string): string {
@@ -127,6 +128,7 @@ app.addHook("preHandler", async (req, reply) => {
 });
 
 registerDesignRoutes(app);
+registerResourceRoutes(app);
 
 app.get("/health", async () => ({
   ok: true,
