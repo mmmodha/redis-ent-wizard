@@ -775,7 +775,8 @@ app.post<{ Params: { id: string } }>("/instances/:id/forget", async (req, reply)
     return httpError(reply, err);
   }
   if (isBusy(inst.id)) return reply.code(409).send({ error: "instance is busy" });
-  if (inst.status !== "destroyed" && inst.status !== "failed") {
+  // Drafts never provisioned anything, so they are safe to drop without a destroy.
+  if (inst.status !== "destroyed" && inst.status !== "failed" && inst.status !== "draft") {
     return reply.code(409).send({
       error: `Refusing to forget an instance in status "${inst.status}" — destroy it first`,
     });

@@ -36,6 +36,7 @@ export function InstanceBoard() {
   const [groupBy, setGroupBy] = useState<GroupBy>("folder");
   const [ownerFilter, setOwnerFilter] = useState("");
   const [folderFilter, setFolderFilter] = useState("");
+  const [kindFilter, setKindFilter] = useState<"all" | "draft" | "live">("all");
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
@@ -71,6 +72,8 @@ export function InstanceBoard() {
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     return instances.filter((i) => {
+      if (kindFilter === "draft" && i.status !== "draft") return false;
+      if (kindFilter === "live" && i.status === "draft") return false;
       if (ownerFilter && i.ownerEmail !== ownerFilter) return false;
       if (folderFilter === "__ungrouped__" && i.folder) return false;
       if (folderFilter && folderFilter !== "__ungrouped__" && i.folder !== folderFilter) return false;
@@ -82,7 +85,9 @@ export function InstanceBoard() {
         i.project.toLowerCase().includes(q)
       );
     });
-  }, [instances, ownerFilter, folderFilter, query]);
+  }, [instances, ownerFilter, folderFilter, kindFilter, query]);
+
+  const draftCount = useMemo(() => instances.filter((i) => i.status === "draft").length, [instances]);
 
   const groups = useMemo(() => {
     const map = new Map<string, Instance[]>();
@@ -123,7 +128,8 @@ export function InstanceBoard() {
   async function onBulkDestroy() {
     const ids = [...selected].filter((id) => {
       const i = instances.find((x) => x.id === id);
-      return i && i.status !== "destroyed" && i.status !== "destroying";
+      // Drafts have no cloud resources — they are removed via "Forget", not destroyed.
+      return i && i.status !== "destroyed" && i.status !== "destroying" && i.status !== "draft";
     });
     if (!ids.length) return;
     if (!confirm(`Destroy ${ids.length} instance(s) and all their GCP resources?`)) return;
@@ -142,7 +148,7 @@ export function InstanceBoard() {
   async function onBulkForget() {
     const ids = [...selected].filter((id) => {
       const i = instances.find((x) => x.id === id);
-      return i && (i.status === "destroyed" || i.status === "failed");
+      return i && (i.status === "destroyed" || i.status === "failed" || i.status === "draft");
     });
     if (!ids.length) return;
     if (!confirm(`Remove ${ids.length} record(s) from the registry? Cloud resources are not touched.`))
@@ -218,6 +224,17 @@ export function InstanceBoard() {
                   {o}
                 </option>
               ))}
+            </select>
+          </label>
+          <label className="inline-label">
+            Show
+            <select
+              value={kindFilter}
+              onChange={(e) => setKindFilter(e.target.value as "all" | "draft" | "live")}
+            >
+              <option value="all">All</option>
+              <option value="draft">Drafts{draftCount ? ` (${draftCount})` : ""}</option>
+              <option value="live">Live only</option>
             </select>
           </label>
         </div>
@@ -321,6 +338,13 @@ export function InstanceBoard() {
                             {inst.status === "destroyed" ? (
                               <div className="hint">
                                 <Link href={`/edit?from=${encodeURIComponent(inst.id)}`}>Edit</Link>
+                              </div>
+                            ) : null}
+                            {inst.status === "draft" ? (
+                              <div className="hint">
+                                <Link href={`/edit?from=${encodeURIComponent(inst.id)}`}>
+                                  Review &amp; apply →
+                                </Link>
                               </div>
                             ) : null}
                           </td>
