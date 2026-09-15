@@ -232,6 +232,7 @@ apps/api          Fastify Terraform orchestrator + SSE logs
   src/gcp.ts        GCP REST client (service account JWT auth)
   src/preflight.ts  validation checks
   src/progress.ts   Terraform log -> phase/percent
+apps/mcp          MCP server: let AI tools DEFINE infra (not provision) — see apps/mcp/README.md
 terraform/        modules + vm/gke profiles (refactored from basis repo)
 scripts/          list / destroy helpers for offline cleanup
 data/             credentials, instances.json, per-instance state (gitignored)
@@ -258,6 +259,20 @@ data/             credentials, instances.json, per-instance state (gitignored)
 | POST | `/instances/:id/health` | Probe the cluster now instead of waiting for the next poll |
 | GET | `/instances/:id/logs` | SSE stream of log output and progress |
 | DELETE | `/instances/:id` | Destroy (keeps the record until you Forget) |
+| GET | `/designs/schema` | Create-config JSON Schema + capabilities guide (for AI tools) |
+| POST | `/designs/validate` · `/designs/render` | Validate a config, or render its Terraform — offline, no apply |
+| GET/POST | `/designs` | List draft designs, or save a config as a `draft` for review |
+| GET | `/designs/:id` | Fetch one draft design |
+
+## Define infrastructure with AI tools (MCP)
+
+Claude and other AI tools can **define** a deployment for you to review and
+apply, without any ability to provision or destroy. This runs through the
+`apps/mcp` MCP server, which talks to the API with a `define`-scoped token:
+saving a design creates a `draft` instance on the board with a review link
+(`/edit?from=<id>`), and every provisioning route is refused (`403`) for that
+scope. Set up (stdio for Claude Desktop/Code, or a hosted HTTP endpoint) is in
+[apps/mcp/README.md](apps/mcp/README.md).
 
 ## When is an instance really ready?
 
