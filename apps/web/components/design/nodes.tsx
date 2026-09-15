@@ -204,16 +204,19 @@ export function ApplicationNode({ data }: NodeProps) {
 
 export function LoadBalancerNode({ data }: NodeProps) {
   const d = data as LoadBalancerData;
+  // Ports the LB actually serves, annotated with the protocol for the well-known ones.
   const ports = [
-    d.expose_http ? "80" : null,
-    d.expose_https ? "443" : null,
+    d.expose_http ? "80 (HTTP)" : null,
+    d.expose_https ? "443 (HTTPS)" : null,
     d.extra_ports.trim() ? d.extra_ports.trim() : null,
   ].filter(Boolean);
   return (
     <div className="design-lb">
       <Handle type="target" position={Position.Left} className="design-hit" />
       <NodeHeader icon="load-balancer" title={d.name.trim() || "Load balancer"} />
-      <div className="design-node-meta mono">{ports.length ? ports.join(" · ") : "closed"}</div>
+      <div className="design-node-meta mono">
+        {ports.length ? `serves ${ports.join(" · ")}` : "no ports exposed"}
+      </div>
       <ExposesLine kind="loadbalancer" name={d.name.trim()} />
       <Handle type="source" position={Position.Right} className="design-handle" />
     </div>
