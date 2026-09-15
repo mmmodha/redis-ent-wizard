@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { zodToJsonSchema } from "zod-to-json-schema";
 import { createSchema } from "./schema.js";
 import { renderTerraform } from "./workspace.js";
 import type { CreateInstanceInput } from "./types.js";
@@ -41,5 +42,18 @@ describe("renderTerraform (define render, no apply)", () => {
     assert.match(variablesTf, /variable "clusters"/);
     // Placeholder credentials/ssh — never a real key path.
     assert.doesNotMatch(tfvars, /BEGIN|PRIVATE KEY/);
+  });
+});
+
+describe("create-config JSON Schema (MCP tool input)", () => {
+  it("derives an object schema exposing the core fields", () => {
+    const js = zodToJsonSchema(createSchema, { name: "CreateInstanceInput", $refStrategy: "none" }) as {
+      definitions: { CreateInstanceInput: { type: string; properties: Record<string, unknown> } };
+    };
+    const def = js.definitions.CreateInstanceInput;
+    assert.equal(def.type, "object");
+    for (const field of ["name", "mode", "youremail", "project", "clusters", "rdi"]) {
+      assert.ok(field in def.properties, `expected JSON schema to expose ${field}`);
+    }
   });
 });

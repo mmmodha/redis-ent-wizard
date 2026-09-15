@@ -1,5 +1,7 @@
 import type { FastifyInstance } from "fastify";
+import { zodToJsonSchema } from "zod-to-json-schema";
 import { createSchema } from "./schema.js";
+import { CAPABILITIES_GUIDE } from "./capabilities.js";
 import { renderTerraform } from "./workspace.js";
 import { getInstance, readRegistry, upsertInstance } from "./registry.js";
 import { requireUser } from "./auth.js";
@@ -22,7 +24,21 @@ function reviewUrl(id: string): string {
  * `draft` instance for a human to review and apply — they NEVER call startApply
  * or touch cloud state. The MCP server is the primary caller.
  */
+// Derived once: the create-config as JSON Schema, for MCP tool input schemas
+// and client-side validation. createSchema is the single source of truth.
+const createJsonSchema = zodToJsonSchema(createSchema, {
+  name: "CreateInstanceInput",
+  $refStrategy: "none",
+});
+
 export function registerDesignRoutes(app: FastifyInstance) {
+  // The create-config JSON Schema + an authored guide to the component kinds
+  // and wiring rules. The MCP server fetches this to teach the model the shape
+  // of what it can define. Offline, no credentials.
+  app.get("/designs/schema", async (_req, reply) => {
+    return reply.send({ jsonSchema: createJsonSchema, capabilities: CAPABILITIES_GUIDE });
+  });
+
   // Offline schema validation (no credentials, no GCP).
   app.post("/designs/validate", async (req, reply) => {
     requireUser(req);
