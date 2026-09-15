@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { createServer as createHttpServer, type Server } from "node:http";
 import { AddressInfo } from "node:net";
+import { writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -18,7 +21,12 @@ function fakeApi(): Promise<{ server: Server; url: string; calls: Array<{ method
     let raw = "";
     req.on("data", (c) => (raw += c));
     req.on("end", () => {
-      const body = raw ? JSON.parse(raw) : undefined;
+      let body: unknown;
+      try {
+        body = raw ? JSON.parse(raw) : undefined;
+      } catch {
+        body = raw; // non-JSON (e.g. multipart upload)
+      }
       calls.push({ method: req.method || "", path: req.url || "", body });
       const reply = (status: number, obj: unknown) => {
         res.writeHead(status, { "content-type": "application/json" });
@@ -32,6 +40,7 @@ function fakeApi(): Promise<{ server: Server; url: string; calls: Array<{ method
       if (req.url === "/designs/render") return reply(200, { mainTf: "module x", variablesTf: "variable y", tfvars: "z = 1" });
       if (req.url === "/designs" && req.method === "POST") return reply(201, { id: "demo-default", name: "demo", mode: "vm", status: "draft", reviewUrl: "http://web/edit?from=demo-default" });
       if (req.url === "/designs" && req.method === "GET") return reply(200, [{ id: "demo-default", status: "draft", reviewUrl: "http://web/edit?from=demo-default" }]);
+      if (req.url?.startsWith("/artifacts") && req.method === "POST") return reply(201, { id: "art_123", filename: "app.jar", type: "jar" });
       if (req.url?.startsWith("/designs/")) return reply(200, { id: "demo-default", status: "draft" });
       return reply(404, { error: "not found" });
     });
@@ -44,9 +53,9 @@ function fakeApi(): Promise<{ server: Server; url: string; calls: Array<{ method
   });
 }
 
-async function connectedClient(apiUrl: string, token = "tok") {
+async function connectedClient(apiUrl: string, opts?: { allowLocalUpload?: boolean }, token = "tok") {
   const client = new Client({ name: "test", version: "1.0.0" });
-  const mcp = createServer(new RewClient(apiUrl, token));
+  const mcp = createServer(new RewClient(apiUrl, token), opts);
   const [a, b] = InMemoryTransport.createLinkedPair();
   await Promise.all([mcp.connect(b), client.connect(a)]);
   return client;
@@ -95,6 +104,28 @@ describe("MCP server tools", () => {
     const saved = api.calls.find((c) => c.path === "/designs" && c.method === "POST");
     assert.ok(saved, "expected a POST /designs");
     assert.equal((saved!.body as { name: string }).name, "demo");
+    await client.close();
+  });
+
+  it("omits upload_artifact by default and registers it with allowLocalUpload", async () => {
+    const off = await connectedClient(api.url);
+    assert.ok(!(await off.listTools()).tools.some((t) => t.name === "upload_artifact"));
+    await off.close();
+
+    const on = await connectedClient(api.url, { allowLocalUpload: true });
+    assert.ok((await on.listTools()).tools.some((t) => t.name === "upload_artifact"));
+    await on.close();
+  });
+
+  it("upload_artifact reads a local file and returns the artifact id", async () => {
+    const file = join(tmpdir(), `rew-mcp-test-${Date.now()}.jar`);
+    writeFileSync(file, "PK fake jar bytes");
+    const client = await connectedClient(api.url, { allowLocalUpload: true });
+    const res = await client.callTool({ name: "upload_artifact", arguments: { path: file, type: "jar" } });
+    const text = (res.content as Array<{ text: string }>)[0].text;
+    assert.match(text, /art_123/);
+    const upload = api.calls.find((c) => c.path.startsWith("/artifacts") && c.method === "POST");
+    assert.ok(upload, "expected a POST /artifacts");
     await client.close();
   });
 

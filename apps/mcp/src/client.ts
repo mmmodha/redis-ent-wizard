@@ -108,6 +108,52 @@ export class RewClient {
   getDesign(id: string): Promise<DesignRecord> {
     return this.request("GET", `/designs/${encodeURIComponent(id)}`);
   }
+
+  /**
+   * Upload a LOCAL file as an application artifact (multipart). The bytes go
+   * from this host straight to the API — never through the model. Returns the
+   * created artifact record (its `id` is used as an `upload` artifact ref).
+   */
+  async uploadArtifact(filePath: string, type: "jar" | "binary"): Promise<unknown> {
+    const { readFile } = await import("node:fs/promises");
+    const { basename } = await import("node:path");
+    let bytes: Buffer;
+    try {
+      bytes = await readFile(filePath);
+    } catch (err) {
+      throw new ApiError(
+        `Cannot read local file ${filePath} (${err instanceof Error ? err.message : String(err)})`,
+        0,
+        undefined,
+      );
+    }
+    const form = new FormData();
+    form.append("file", new Blob([new Uint8Array(bytes)]), basename(filePath));
+
+    const headers: Record<string, string> = { accept: "application/json" };
+    if (this.token) headers.authorization = `Bearer ${this.token}`;
+    const url = `${this.baseUrl}/artifacts?type=${encodeURIComponent(type)}`;
+    let res: Response;
+    try {
+      res = await fetch(url, { method: "POST", headers, body: form });
+    } catch (err) {
+      throw new ApiError(
+        `Cannot reach the wizard API at ${this.baseUrl} (${err instanceof Error ? err.message : String(err)})`,
+        0,
+        undefined,
+      );
+    }
+    const text = await res.text();
+    const parsed = text ? safeJson(text) : undefined;
+    if (!res.ok) {
+      const detail =
+        (parsed && typeof parsed === "object" && "error" in parsed
+          ? JSON.stringify((parsed as { error: unknown }).error)
+          : text) || res.statusText;
+      throw new ApiError(`API POST /artifacts failed (${res.status}): ${detail}`, res.status, parsed);
+    }
+    return parsed;
+  }
 }
 
 function safeJson(text: string): unknown {

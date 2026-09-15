@@ -30,7 +30,7 @@ export const CAPABILITIES_GUIDE = {
   picking_a_target:
     "To produce an apply-ready draft: (1) list_credentials and choose one (prefer a projectId matching the intent); (2) set credentialsFile to its id/file and project to its projectId (or via list_projects); (3) list_regions and set region_name + region_zones. If nothing suitable exists, omit these and tell the human to choose them in the wizard.",
   artifacts:
-    "Application artifacts (jars/binaries) cannot be uploaded through this tool. Use artifact kind 'url' (https), 'gcs' (gs://), or 'git' (repo URL) — a reference the wizard fetches at apply time. Leave kind 'upload' for the human to attach a local file in the wizard.",
+    "Application artifacts (jars/binaries): for a file already hosted, use artifact kind 'url' (https), 'gcs' (gs://), or 'git' (repo URL) — a reference the wizard fetches at apply time. For a LOCAL file (only when the upload_artifact tool is available, i.e. the local stdio server), call upload_artifact(path, type) and set the app's artifact to { kind: 'upload', ref: <returned id>, type }. Otherwise leave the artifact for the human to attach in the wizard.",
   components: {
     clusters:
       "Redis Enterprise clusters. Each has a name, node count, machine type, and a list of databases. Start empty and add clusters explicitly.",

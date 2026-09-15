@@ -89,7 +89,7 @@ describe("assertScopeAllows", () => {
       ["POST", "/preflight"],
       ["POST", "/credentials"],
       ["DELETE", "/credentials/x"],
-      ["POST", "/artifacts"],
+      ["DELETE", "/artifacts/x"],
     ];
     for (const [method, path] of blocked) {
       assert.throws(
@@ -98,6 +98,14 @@ describe("assertScopeAllows", () => {
         `expected 403 for ${method} ${path}`,
       );
     }
+  });
+
+  it("permits a define token to POST an artifact (staging), but not delete one", () => {
+    assert.doesNotThrow(() => assertScopeAllows(defineUser, "POST", "/artifacts"));
+    assert.throws(
+      () => assertScopeAllows(defineUser, "DELETE", "/artifacts/x"),
+      (err: unknown) => (err as { statusCode?: number }).statusCode === 403,
+    );
   });
 
   it("never restricts full or OIDC principals", () => {

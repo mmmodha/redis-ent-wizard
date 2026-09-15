@@ -18,7 +18,9 @@ async function main() {
     );
   }
   const client = new RewClient(cfg.apiUrl, cfg.apiToken);
-  const server = createServer(client);
+  // Local transport shares the filesystem with the caller, so local file
+  // uploads are meaningful here (they are not on the hosted HTTP server).
+  const server = createServer(client, { allowLocalUpload: true });
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error(`[rew-mcp] stdio server ready (api=${cfg.apiUrl})`);

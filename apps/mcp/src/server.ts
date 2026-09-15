@@ -35,7 +35,18 @@ async function guard(fn: () => Promise<unknown>) {
  * define infrastructure for human review, never provision it. The `client`'s
  * token is also define-scoped, so the API refuses provisioning regardless.
  */
-export function createServer(client: RewClient): McpServer {
+export interface ServerOptions {
+  /**
+   * Register upload_artifact, which reads a LOCAL file path and uploads it.
+   * Only meaningful when the server shares a filesystem with the caller — i.e.
+   * the local stdio transport. The hosted HTTP server leaves it off (a path
+   * would resolve on the server, not the caller), so those callers use
+   * url/gcs/git artifacts instead.
+   */
+  allowLocalUpload?: boolean;
+}
+
+export function createServer(client: RewClient, opts: ServerOptions = {}): McpServer {
   const server = new McpServer(
     { name: SERVER_NAME, version: SERVER_VERSION },
     {
@@ -46,9 +57,9 @@ export function createServer(client: RewClient): McpServer {
         "credential whose projectId matches the intent), then list_projects / list_regions to set " +
         "project, region_name, and region_zones. If no suitable credential exists, omit " +
         "credentialsFile/project/region — leave them for the human to choose in the wizard; do NOT " +
-        "invent placeholder values. For application artifacts use kind 'url', 'gcs', or 'git' (a " +
-        "reference the wizard fetches at apply time) — this tool cannot upload local jars/binaries, " +
-        "so leave 'upload' artifacts for the human to attach. " +
+        "invent placeholder values. For application artifacts: use kind 'url', 'gcs', or 'git' for a " +
+        "hosted file; for a LOCAL file call upload_artifact(path, type) when available and reference " +
+        "the returned id as { kind: 'upload', ref: <id>, type }; otherwise leave it for the human. " +
         "Use validate_design / render_design to check a design, then save_design to persist a " +
         "draft and get a reviewUrl. This tool cannot provision or destroy anything.",
     },
@@ -131,6 +142,22 @@ export function createServer(client: RewClient): McpServer {
     },
     async ({ config }) => guard(() => client.saveDesign(config)),
   );
+
+  if (opts.allowLocalUpload) {
+    server.registerTool(
+      "upload_artifact",
+      {
+        title: "Upload a local application artifact",
+        description:
+          "Upload a LOCAL jar/binary file (by absolute path on this machine) to stage it for a design. Returns an artifact record whose `id` you set as an application's artifact: { kind: 'upload', ref: <id>, type }. The file is read by the local MCP server and sent to the API directly. For files not on this machine, use kind 'url'/'gcs'/'git' instead.",
+        inputSchema: {
+          path: z.string().describe("Absolute path to a local jar or binary file."),
+          type: z.enum(["jar", "binary"]).describe("Artifact type."),
+        },
+      },
+      async ({ path, type }) => guard(() => client.uploadArtifact(path, type)),
+    );
+  }
 
   server.registerTool(
     "list_designs",
