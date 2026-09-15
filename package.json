@@ -8,8 +8,11 @@
   "scripts": {
     "dev:api": "npm run dev -w @redis-ent-wizard/api",
     "dev:web": "npm run dev -w @redis-ent-wizard/web",
-    "build": "npm run build -w @redis-ent-wizard/api && npm run build -w @redis-ent-wizard/web",
+    "dev:mcp": "npm run dev -w @redis-ent-wizard/mcp",
+    "build": "npm run build -w @redis-ent-wizard/api && npm run build -w @redis-ent-wizard/web && npm run build -w @redis-ent-wizard/mcp",
     "start:api": "npm run start -w @redis-ent-wizard/api",
-    "start:web": "npm run start -w @redis-ent-wizard/web"
+    "start:web": "npm run start -w @redis-ent-wizard/web",
+    "start:mcp": "npm run start -w @redis-ent-wizard/mcp",
+    "start:mcp:http": "npm run start:http -w @redis-ent-wizard/mcp"
   }
 }
