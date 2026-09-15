@@ -1159,6 +1159,17 @@ select:disabled {
   flex-wrap: wrap;
 }
 
+/* Collapsible group headers on the Resources view. */
+.group-toggle {
+  border: none;
+  font: inherit;
+  cursor: pointer;
+  color: inherit;
+}
+.group-toggle[aria-expanded="true"] {
+  border-bottom: 1px solid var(--border-soft);
+}
+
 /* Unowned resources: dashed accent so they read as "attention / not tracked". */
 .group-unowned {
   border-style: dashed;

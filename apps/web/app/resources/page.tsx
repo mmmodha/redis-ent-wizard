@@ -32,6 +32,16 @@ export default function ResourcesPage() {
   const [scan, setScan] = useState<ResourceScan | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  // Groups collapsed by the user (keyed by instance id or "__unowned__").
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+
+  const toggleGroup = (key: string) =>
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
 
   useEffect(() => {
     if (!ready || !authed) return;
@@ -146,10 +156,19 @@ export default function ResourcesPage() {
               {scan.groups.map((g) => {
                 const key = g.instanceId ?? "__unowned__";
                 const unowned = g.instanceId === null;
+                const isOpen = !collapsed.has(key);
                 return (
                   <section className={`group-panel${unowned ? " group-unowned" : ""}`} key={key}>
-                    <header className="group-head">
+                    <button
+                      type="button"
+                      className="group-head group-toggle"
+                      aria-expanded={isOpen}
+                      onClick={() => toggleGroup(key)}
+                    >
                       <div className="group-title-row">
+                        <span className={`companion-caret${isOpen ? " open" : ""}`} aria-hidden>
+                          ▸
+                        </span>
                         <span className="group-title">
                           {unowned ? "Unowned" : g.instanceName || g.instanceId}
                         </span>
@@ -163,7 +182,8 @@ export default function ResourcesPage() {
                         {g.resourceCount} · ≈ {formatMoney(g.costPerHour, scan.currency)}/hr · ≈{" "}
                         {formatMoney(g.costSoFar, scan.currency)}
                       </span>
-                    </header>
+                    </button>
+                    {isOpen ? (
                     <table className="table">
                       <thead>
                         <tr>
@@ -193,6 +213,7 @@ export default function ResourcesPage() {
                         ))}
                       </tbody>
                     </table>
+                    ) : null}
                   </section>
                 );
               })}
