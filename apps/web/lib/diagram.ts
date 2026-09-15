@@ -1426,7 +1426,54 @@ export function createInputToDiagram(
         ? (cfg.app_extra_ports as unknown[]).join(", ")
         : "";
   const lbNameToId = new Map<string, string>();
-  if (vmsId && (exposeHttp || exposeHttps || extraPortsStr.trim())) {
+
+  // Rebuild explicit load balancers from config.load_balancers[]. Each fronts an
+  // application VM group or the Set-of-VMs group; the ports map back to the
+  // expose_http/https/extra_ports the LB node carries (inverse of lbNodePorts).
+  const lbCfgs = Array.isArray(cfg.load_balancers)
+    ? (cfg.load_balancers as Record<string, unknown>[])
+    : [];
+  lbCfgs.forEach((lb, i) => {
+    const name = dstr(lb.name);
+    const targetKind = dstr(lb.target_kind);
+    // diagramToCreateInput names the Set-of-VMs target "app"; app LBs use the app name.
+    const targetName = targetKind === "vms" ? "app" : dstr(lb.target);
+    const targetId = hostNameToId.get(targetName);
+    const ports = Array.isArray(lb.ports) ? (lb.ports as unknown[]).map((p) => Number(p)) : [];
+    const lbId = nextId("loadbalancer");
+    nodes.push({
+      id: lbId,
+      type: "loadbalancer",
+      parentId: ROOT_ID,
+      extent: "parent",
+      position: { x: 24 + i * 200, y: 460 },
+      style: { width: NODE_SIZE.loadbalancer.width, height: NODE_SIZE.loadbalancer.height },
+      data: {
+        kind: "loadbalancer",
+        name,
+        expose_http: ports.includes(80),
+        expose_https: ports.includes(443),
+        extra_ports: ports.filter((p) => p !== 80 && p !== 443).join(", "),
+      },
+    });
+    if (name) lbNameToId.set(name, lbId);
+    // A Set-of-VMs LB is referenced as "app-lb" by consumers; keep that alias.
+    if (targetKind === "vms") lbNameToId.set("app-lb", lbId);
+    if (targetId) {
+      edgeCounter += 1;
+      edges.push({
+        id: `edge-${edgeCounter}`,
+        source: lbId,
+        target: targetId,
+        animated: true,
+        className: "design-edge-lb",
+      });
+    }
+  });
+
+  // Legacy fallback: derive a Set-of-VMs LB from exposure flags only when no
+  // explicit load_balancers[] were listed (older configs).
+  if (!lbCfgs.length && vmsId && (exposeHttp || exposeHttps || extraPortsStr.trim())) {
     const lbId = nextId("loadbalancer");
     // The load balancer is a root peer, linked to its target by a fronting edge.
     nodes.push({
