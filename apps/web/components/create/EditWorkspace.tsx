@@ -10,9 +10,10 @@ import { DeploymentSettings, ownerError, type DesignMeta } from "@/components/de
 import { DesignView } from "@/components/create/DesignView";
 import { WizardView } from "@/components/create/WizardView";
 import { createInstance, getInstance, runPreflight, saveDesign, type PreflightResult } from "@/lib/api";
-import { useGcpLookups } from "@/lib/useGcpLookups";
+import { useGcpLookups, type GcpSettings } from "@/lib/useGcpLookups";
 import { canUseDesignerCanvas, designerLockReason } from "@/lib/designer-gate";
 import { clusterTrialShardGate, omitCreateInputDatabases } from "@/lib/trial-shards";
+import { loadEditPrefs, saveEditPrefs } from "@/lib/edit-prefs";
 import type { DesignSettings } from "@/lib/diagram";
 
 type View = "wizard" | "diagram";
@@ -46,17 +47,34 @@ export function EditWorkspace({ lockedView }: { lockedView?: View }) {
   const fromId = searchParams.get("from");
   const viewParam = searchParams.get("view");
   const hydratedRef = useRef(false);
-  const gcp = useGcpLookups();
 
-  const [meta, setMeta] = useState<DesignMeta>({
+  // Remembered deployment defaults (credential/project/region/owner/…), applied
+  // only to a fresh "New instance" — never when editing an existing record.
+  const [seed] = useState(() => (fromId ? null : loadEditPrefs()));
+  // Seed the GCP chain's project/region/DNS up front (inert until a credential is
+  // set); the credential itself is applied after it's validated (effect below).
+  const gcpInitial = useMemo<Partial<GcpSettings> | undefined>(() => {
+    if (!seed) return undefined;
+    const o: Partial<GcpSettings> = {};
+    if (seed.project) o.project = seed.project;
+    if (seed.region_name) o.region_name = seed.region_name;
+    if (seed.region_zones?.length) o.region_zones = seed.region_zones;
+    if (seed.dns_managed_zone) o.dns_managed_zone = seed.dns_managed_zone;
+    if (seed.dns_zone_dns_name) o.dns_zone_dns_name = seed.dns_zone_dns_name;
+    return Object.keys(o).length ? o : undefined;
+    // seed is set once; no deps needed.
+  }, [seed]);
+  const gcp = useGcpLookups(gcpInitial);
+
+  const [meta, setMeta] = useState<DesignMeta>(() => ({
     name: "",
     env: "default",
     folder: "",
-    youremail: "",
-    skip_deletion: false,
-    mode: "vm",
+    youremail: seed?.youremail ?? "",
+    skip_deletion: seed?.skip_deletion ?? false,
+    mode: seed?.mode ?? "vm",
     operator_chart_version: "latest",
-  });
+  }));
 
   const [view, setView] = useState<View>(() => {
     if (lockedView) return lockedView;
@@ -174,6 +192,28 @@ export function EditWorkspace({ lockedView }: { lockedView?: View }) {
       .catch((err) => setError(err instanceof Error ? err.message : "Failed to load instance for editing"));
   }, [fromId, gcpSetSettings]);
 
+  // Apply the remembered credential once the credentials list has loaded and
+  // only if it still exists (it may have been deleted, or belong to another
+  // user on this browser). Setting it lets the GCP chain preserve the seeded
+  // project/region/DNS; if it's gone, drop those now-orphaned seeds.
+  const seededCredRef = useRef(false);
+  useEffect(() => {
+    if (fromId || seededCredRef.current || !gcp.credentialsLoaded) return;
+    seededCredRef.current = true;
+    if (!seed?.credentialsFile) return;
+    if (gcp.credentials.some((c) => c.file === seed.credentialsFile)) {
+      gcpSetSettings((st) => ({ ...st, credentialsFile: seed.credentialsFile! }));
+    } else {
+      gcpSetSettings((st) => ({
+        ...st,
+        project: "",
+        region_name: "",
+        dns_managed_zone: "",
+        dns_zone_dns_name: "",
+      }));
+    }
+  }, [fromId, gcp.credentialsLoaded, gcp.credentials, seed, gcpSetSettings]);
+
   const withSettings = useCallback(
     (cfg: Record<string, unknown>): Record<string, unknown> => {
       const overlay: Record<string, unknown> = { ...cfg };
@@ -207,6 +247,22 @@ export function EditWorkspace({ lockedView }: { lockedView?: View }) {
     meta.name && !oe && validCredential && gcp.settings.project && gcp.settings.region_name && topologyOk && currentConfig,
   );
 
+  // Remember the sticky deployment defaults for the next fresh session. Called
+  // on an explicit save/apply, not on every keystroke.
+  const persistPrefs = useCallback(() => {
+    saveEditPrefs({
+      credentialsFile: gcp.settings.credentialsFile,
+      project: gcp.settings.project,
+      region_name: gcp.settings.region_name,
+      region_zones: gcp.settings.region_zones,
+      dns_managed_zone: gcp.settings.dns_managed_zone,
+      dns_zone_dns_name: gcp.settings.dns_zone_dns_name,
+      youremail: meta.youremail,
+      skip_deletion: meta.skip_deletion,
+      mode: meta.mode,
+    });
+  }, [gcp.settings, meta.youremail, meta.skip_deletion, meta.mode]);
+
   const validate = useCallback(async () => {
     if (!currentConfig) return;
     setChecking(true);
@@ -224,6 +280,7 @@ export function EditWorkspace({ lockedView }: { lockedView?: View }) {
     if (!currentConfig) return;
     setSubmitting(true);
     setError("");
+    persistPrefs();
     try {
       const created = await createInstance(withSettings(currentConfig));
       router.push(`/instances/${encodeURIComponent(created.id)}`);
@@ -231,7 +288,7 @@ export function EditWorkspace({ lockedView }: { lockedView?: View }) {
       setError(err instanceof Error ? err.message : "Failed to create");
       setSubmitting(false);
     }
-  }, [currentConfig, withSettings, router]);
+  }, [currentConfig, withSettings, router, persistPrefs]);
 
   const createWithoutDatabases = useCallback(async () => {
     if (!currentConfig) return;
@@ -240,6 +297,7 @@ export function EditWorkspace({ lockedView }: { lockedView?: View }) {
     }
     setSubmitting(true);
     setError("");
+    persistPrefs();
     try {
       const input = omitCreateInputDatabases(withSettings(currentConfig));
       const pf = await runPreflight(input);
@@ -254,13 +312,14 @@ export function EditWorkspace({ lockedView }: { lockedView?: View }) {
       setError(err instanceof Error ? err.message : "Failed to create");
       setSubmitting(false);
     }
-  }, [currentConfig, withSettings, router]);
+  }, [currentConfig, withSettings, router, persistPrefs]);
 
   const saveDraft = useCallback(async () => {
     if (!currentConfig) return;
     setSavingDraft(true);
     setError("");
     setSavedDraftId("");
+    persistPrefs();
     try {
       // Drafts persist the config without provisioning; no preflight required.
       const saved = await saveDesign(withSettings(currentConfig));
@@ -270,7 +329,7 @@ export function EditWorkspace({ lockedView }: { lockedView?: View }) {
     } finally {
       setSavingDraft(false);
     }
-  }, [currentConfig, withSettings]);
+  }, [currentConfig, withSettings, persistPrefs]);
 
   const diagramDisabled = !canvasReady;
 
