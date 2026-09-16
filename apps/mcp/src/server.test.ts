@@ -39,6 +39,7 @@ function fakeApi(): Promise<{ server: Server; url: string; calls: Array<{ method
       if (req.url === "/designs/validate") return reply(200, { ok: true });
       if (req.url === "/designs/render") return reply(200, { mainTf: "module x", variablesTf: "variable y", tfvars: "z = 1" });
       if (req.url === "/designs" && req.method === "POST") return reply(201, { id: "demo-default", name: "demo", mode: "vm", status: "draft", reviewUrl: "http://web/edit?from=demo-default" });
+      if (req.url?.startsWith("/designs/") && req.method === "PATCH") return reply(200, { id: "demo-default", status: "draft", reviewUrl: "http://web/edit?from=demo-default" });
       if (req.url === "/designs" && req.method === "GET") return reply(200, [{ id: "demo-default", status: "draft", reviewUrl: "http://web/edit?from=demo-default" }]);
       if (req.url?.startsWith("/artifacts") && req.method === "POST") return reply(201, { id: "art_123", filename: "app.jar", type: "jar" });
       if (req.url?.startsWith("/designs/")) return reply(200, { id: "demo-default", status: "draft" });
@@ -81,6 +82,7 @@ describe("MCP server tools", () => {
       "list_regions",
       "render_design",
       "save_design",
+      "update_design",
       "validate_design",
     ]);
     for (const forbidden of ["apply", "create", "destroy", "retry", "recreate", "delete", "upload"]) {
@@ -140,6 +142,19 @@ describe("MCP server tools", () => {
       arguments: { credentialsFile: "demo.json", project: "demo-proj" },
     });
     assert.match((regions.content as Array<{ text: string }>)[0].text, /europe-west1/);
+    await client.close();
+  });
+
+  it("update_design patches a draft by id", async () => {
+    const client = await connectedClient(api.url);
+    const res = await client.callTool({
+      name: "update_design",
+      arguments: { id: "demo-default", patch: { clusters: [{ name: "cache", nodes: 5 }] } },
+    });
+    const text = (res.content as Array<{ text: string }>)[0].text;
+    assert.match(text, /demo-default/);
+    const patched = api.calls.find((c) => c.path.startsWith("/designs/") && c.method === "PATCH");
+    assert.ok(patched, "expected a PATCH /designs/:id");
     await client.close();
   });
 

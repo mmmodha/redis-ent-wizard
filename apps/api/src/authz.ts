@@ -63,6 +63,8 @@ export function assertScopeAllows(user: AuthUser, method: string, path: string):
   if (user.scope !== "define") return;
   const m = method.toUpperCase();
   if (m === "GET" || m === "HEAD" || m === "OPTIONS") return;
+  // The whole /designs* surface is define-only (validate/render/save/update a
+  // draft) — no method there provisions, so any verb is permitted.
   if (path === "/designs" || path.startsWith("/designs/")) return;
   // Uploading an application artifact stages a file for a later human apply — it
   // provisions nothing — so a define token may POST it (but not delete it).

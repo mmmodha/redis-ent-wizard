@@ -3,9 +3,10 @@ import { zodToJsonSchema } from "zod-to-json-schema";
 import { designSchema } from "./schema.js";
 import { CAPABILITIES_GUIDE } from "./capabilities.js";
 import { renderTerraform } from "./workspace.js";
+import { mergeDraftConfig } from "./draft-merge.js";
 import { getInstance, readRegistry, upsertInstance } from "./registry.js";
 import { requireUser } from "./auth.js";
-import { canViewInstance } from "./authz.js";
+import { canMutateInstance, canViewInstance } from "./authz.js";
 import { resolveCreatedBy, CREATED_BY_ERROR } from "./created-by.js";
 import { audit } from "./audit.js";
 import type { CreateInstanceInput, InstanceRecord } from "./types.js";
@@ -114,6 +115,54 @@ export function registerDesignRoutes(app: FastifyInstance) {
     await upsertInstance(record);
     await audit(user, "design.save", "instance", id, `draft ${input.mode} ${input.project || "(no project)"}`);
     return reply.code(201).send({ ...record, reviewUrl: reviewUrl(id) });
+  });
+
+  // Deep-patch an existing draft: merge a partial config onto it (human-owned
+  // fields like a license are preserved). Lets a human and an AI tool edit the
+  // same draft in tandem. No provisioning.
+  app.patch<{ Params: { id: string } }>("/designs/:id", async (req, reply) => {
+    const user = requireUser(req);
+    const existing = await getInstance(req.params.id);
+    if (!existing || existing.status !== "draft" || !canViewInstance(user, existing)) {
+      return reply.code(404).send({ error: "Draft not found" });
+    }
+    if (!canMutateInstance(user, existing)) {
+      return reply.code(403).send({ error: "Forbidden" });
+    }
+    if (!req.body || typeof req.body !== "object" || Array.isArray(req.body)) {
+      return reply.code(400).send({ error: "patch must be a JSON object" });
+    }
+
+    const merged = mergeDraftConfig(
+      existing.config as Record<string, unknown>,
+      req.body as Record<string, unknown>,
+    );
+    // The merged result must be a valid create-config.
+    const parsed = designSchema.safeParse(merged);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: parsed.error.flatten() });
+    }
+    const input = parsed.data as CreateInstanceInput;
+    const createdBy = resolveCreatedBy(input.youremail, user);
+    if (!createdBy) return reply.code(400).send({ error: CREATED_BY_ERROR });
+    input.youremail = createdBy;
+
+    const now = new Date().toISOString();
+    const record: InstanceRecord = {
+      ...existing,
+      mode: input.mode,
+      status: "draft",
+      updatedAt: now,
+      project: input.project || "",
+      region: input.region_name || "",
+      ownerEmail: input.youremail,
+      credentialsFile: input.credentialsFile || "",
+      config: input as unknown as Record<string, unknown>,
+      folder: input.folder?.trim() || undefined,
+    };
+    await upsertInstance(record);
+    await audit(user, "design.update", "instance", existing.id, `patch ${input.mode}`);
+    return reply.send({ ...record, reviewUrl: reviewUrl(existing.id) });
   });
 
   // List the caller's drafts.

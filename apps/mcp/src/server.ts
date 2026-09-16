@@ -160,6 +160,23 @@ export function createServer(client: RewClient, opts: ServerOptions = {}): McpSe
   }
 
   server.registerTool(
+    "update_design",
+    {
+      title: "Update a draft design",
+      description:
+        "Deep-patch an existing draft (by id) so a human and you can edit it in tandem. Send only the fields to change: objects merge recursively, and named arrays (clusters, databases, applications, …) merge by name — items and fields you omit are kept. Human-owned fields a person already set (per-cluster license, database passwords, per-cluster admin username) are always preserved and cannot be overwritten. Returns the updated record and its reviewUrl. Does NOT provision.",
+      inputSchema: {
+        id: z.string().describe("The draft design id (e.g. from save_design / list_designs)."),
+        patch: z
+          .object({})
+          .passthrough()
+          .describe("Partial create-config with just the fields to change; see list_capabilities."),
+      },
+    },
+    async ({ id, patch }) => guard(() => client.updateDesign(id, patch)),
+  );
+
+  server.registerTool(
     "list_designs",
     {
       title: "List draft designs",

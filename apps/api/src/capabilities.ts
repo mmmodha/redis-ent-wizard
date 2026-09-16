@@ -52,6 +52,8 @@ export const CAPABILITIES_GUIDE = {
       "connectClusters / connectDatabases / connectLoadBalancers / connectApps / connectStorage / connectPubsub / connectBigquery / connectSql — each injects the named component's endpoint (and, for data services, access) into the app's environment.",
     rdi: "rdi.target must name a database in this deployment (the RDI target). Each rdi.pipelines[].source must name a cloud_sql_instances entry — that Cloud SQL instance is the CDC source and gets cdc_enabled set automatically.",
   },
+  collaboration:
+    "A human and you can edit the same draft in tandem. save_design creates/replaces a draft; update_design(id, patch) deep-merges a partial config onto an existing draft — send only what you want to change (named arrays like clusters/databases merge by name; omitted items and fields are kept). Human-owned fields a person set (per-cluster license, database passwords incl. the RDI target, per-cluster admin username) are always preserved and cannot be overwritten by a patch. Call get_design first to see the current state.",
   safety:
     "Saving a design creates a DRAFT instance and returns a reviewUrl. A human opens it in the wizard to validate and apply. This surface never provisions or destroys.",
 } as const;

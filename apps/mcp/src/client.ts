@@ -101,6 +101,10 @@ export class RewClient {
     return this.request("POST", "/designs", config);
   }
 
+  updateDesign(id: string, patch: unknown): Promise<DesignRecord> {
+    return this.request("PATCH", `/designs/${encodeURIComponent(id)}`, patch);
+  }
+
   listDesigns(): Promise<DesignRecord[]> {
     return this.request("GET", "/designs");
   }
