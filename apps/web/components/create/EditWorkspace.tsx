@@ -177,7 +177,9 @@ export function EditWorkspace({ lockedView }: { lockedView?: View }) {
         const zones = Array.isArray(cfg.region_zones) ? (cfg.region_zones as unknown[]).map(String) : [];
         gcpSetSettings((st) => ({
           ...st,
-          credentialsFile: inst.credentialsId || "",
+          // Applied instances carry a resolved credentialsId; drafts don't, so
+          // fall back to the credential id stored in the config.
+          credentialsFile: inst.credentialsId || s(cfg.credentialsFile, ""),
           project: s(cfg.project, st.project),
           region_name: s(cfg.region_name, st.region_name),
           region_zones: zones.length ? zones : st.region_zones,
