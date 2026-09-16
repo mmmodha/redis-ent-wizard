@@ -56,7 +56,7 @@ import {
 } from "./credentials-store.js";
 import { verifyCredentialFile, verifyCredentialJson } from "./credential-verify.js";
 import { normalizeAppDiskGib, normalizeAppMachineTypes, parseAppExtraPorts } from "./app-web.js";
-import { hasAppCompute, normalizeClusters } from "./clusters.js";
+import { hasAppCompute, normalizeClusters, normalizeOperators } from "./clusters.js";
 import { buildAccessView } from "./access.js";
 import { GKE_OPERATOR_RELEASES, VM_RS_RELEASES, resolveGkeOperatorChart } from "./rs-releases.js";
 import { audit, listAudit } from "./audit.js";
@@ -661,6 +661,9 @@ app.post("/instances", async (req, reply) => {
       if (input.mode === "gke") {
         input.rec_nodes = clusters[0].rec_nodes;
         input.operator_chart_version = resolveGkeOperatorChart(input.operator_chart_version);
+        // Validate operator structure (count/uniqueness) and each version id;
+        // both throw → 400 below. Operator version ids are kept as authored.
+        for (const op of normalizeOperators(input)) resolveGkeOperatorChart(op.operator_chart_version);
       }
     } else if (input.mode === "gke") {
       return reply.code(400).send({

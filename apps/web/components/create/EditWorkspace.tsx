@@ -31,7 +31,6 @@ const SETTINGS_KEYS = [
   "region_name",
   "region_zones",
   "mode",
-  "operator_chart_version",
   "dns_managed_zone",
   "dns_zone_dns_name",
 ] as const;
@@ -73,7 +72,6 @@ export function EditWorkspace({ lockedView }: { lockedView?: View }) {
     youremail: seed?.youremail ?? "",
     skip_deletion: seed?.skip_deletion ?? false,
     mode: seed?.mode ?? "vm",
-    operator_chart_version: "latest",
   }));
 
   const [view, setView] = useState<View>(() => {
@@ -110,7 +108,6 @@ export function EditWorkspace({ lockedView }: { lockedView?: View }) {
       youremail: meta.youremail,
       skip_deletion: meta.skip_deletion,
       mode: meta.mode,
-      operator_chart_version: meta.operator_chart_version,
       credentialsFile: gcp.settings.credentialsFile,
       project: gcp.settings.project,
       region_name: gcp.settings.region_name,
@@ -172,7 +169,6 @@ export function EditWorkspace({ lockedView }: { lockedView?: View }) {
           youremail: s(cfg.youremail, m.youremail),
           skip_deletion: Boolean(cfg.skip_deletion),
           mode,
-          operator_chart_version: s(cfg.operator_chart_version, m.operator_chart_version),
         }));
         const zones = Array.isArray(cfg.region_zones) ? (cfg.region_zones as unknown[]).map(String) : [];
         gcpSetSettings((st) => ({

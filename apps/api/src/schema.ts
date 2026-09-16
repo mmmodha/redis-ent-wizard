@@ -171,7 +171,22 @@ export const createSchema = z.object({
   gke_clustersize: z.number().int().min(1).max(10).optional(),
   gke_machine_type: z.string().optional(),
   rec_nodes: z.number().int().min(1).max(9).optional(),
+  // Deployment-wide operator chart version. Kept as a back-compat fallback for
+  // configs that predate per-operator `operators[]`; new GKE configs carry the
+  // version on each operator instead.
   operator_chart_version: z.string().optional(),
+  // GKE Redis Operators. Each installs one operator Helm release into its own
+  // namespace and owns the clusters (RECs) that reference it by name.
+  operators: z
+    .array(
+      z.object({
+        name: z.string().max(40).optional(),
+        operator_chart_version: z.string().optional(),
+      }),
+    )
+    .min(0)
+    .max(3)
+    .optional(),
   rs_version: z.string().optional(),
   clusters: z
     .array(
@@ -184,6 +199,8 @@ export const createSchema = z.object({
         RS_release: z.string().optional(),
         rec_nodes: z.number().int().min(1).max(9).optional(),
         RS_admin: z.string().max(128).optional(),
+        // GKE only: the name of the operator that owns this cluster (REC).
+        operator: z.string().max(40).optional(),
         databases: z.array(databaseSchema).max(16).optional(),
         license: z.string().max(20000).optional(),
       }),

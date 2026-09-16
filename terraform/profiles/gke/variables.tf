@@ -46,11 +46,6 @@ variable "gke_machine_type" {
   default = "e2-standard-8"
 }
 
-variable "rec_nodes" {
-  type    = number
-  default = 3
-}
-
 variable "dns_managed_zone" {
   type    = string
   default = "demo-clusters"
@@ -75,15 +70,15 @@ variable "outputs_dir" {
   type = string
 }
 
-variable "operator_chart_version" {
-  type    = string
-  default = ""
-}
-
-variable "rec_specs" {
+variable "operators" {
   type = list(object({
-    name  = string
-    nodes = number
+    name          = string
+    namespace     = string
+    chart_version = string
+    recs = list(object({
+      name  = string
+      nodes = number
+    }))
   }))
   default = []
 }

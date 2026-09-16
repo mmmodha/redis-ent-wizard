@@ -15,6 +15,7 @@ import type {
   DatabaseData,
   LoadBalancerData,
   NodeKind,
+  OperatorData,
   PubsubData,
   RdiData,
   RootData,
@@ -64,11 +65,30 @@ export function RootNode({ data }: NodeProps) {
   );
 }
 
+export function OperatorNode({ data }: NodeProps) {
+  const d = data as OperatorData;
+  const version = d.operator_chart_version?.trim();
+  return (
+    <div className="design-operator">
+      <div className="design-operator-head">
+        <BrandIcon name="operator" size={16} />
+        <span className="design-node-title">{d.name.trim() || "Redis Operator"}</span>
+        <span className="design-node-tag mono">{version && version !== "latest" ? version : "latest"}</span>
+      </div>
+      <div className="design-operator-hint">Drag Redis clusters here to run them on this operator.</div>
+    </div>
+  );
+}
+
 export function ClusterNode({ id, data }: NodeProps) {
   const d = data as ClusterData;
   const { machineTypes, nodes, capacityIfUnavailable = "pending" } = useDesignContext();
   const parentId = nodes.find((x) => x.id === id)?.parentId;
-  const gke = nodes.some((n) => n.id === parentId && n.data.kind === "gke");
+  // On GKE a cluster nests inside an operator (whose parent is the gke root);
+  // on VM it sits directly under the network root.
+  const gke = nodes.some(
+    (n) => n.id === parentId && (n.data.kind === "gke" || n.data.kind === "operator"),
+  );
   const count = gke ? d.rec_nodes : d.nodes;
   const cap = clusterCapacityMB(id, count, d.machine_type, machineTypes, nodes);
   const catalogReady = Boolean(machineTypes.find((m) => m.name === d.machine_type)?.memoryMb);
@@ -296,6 +316,7 @@ export function RdiNode({ data }: NodeProps) {
 export const nodeTypes: NodeTypes = {
   network: RootNode,
   gke: RootNode,
+  operator: OperatorNode,
   cluster: ClusterNode,
   database: DatabaseNode,
   vms: VmsNode,

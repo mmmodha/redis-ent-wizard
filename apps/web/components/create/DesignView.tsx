@@ -68,6 +68,28 @@ function nodeSize(node: Node): { w: number; h: number } {
   return { w, h };
 }
 
+/**
+ * React Flow requires a child node to appear after its parent in the array.
+ * After a reparent we re-order by parent-chain depth (root → operator → cluster
+ * → database); a stable sort preserves sibling order within each depth.
+ */
+function orderByDepth(nodes: DesignNode[]): DesignNode[] {
+  const byId = new Map(nodes.map((n) => [n.id, n]));
+  const depthOf = (n: DesignNode): number => {
+    let d = 0;
+    let p = n.parentId ? byId.get(n.parentId) : undefined;
+    while (p) {
+      d += 1;
+      p = p.parentId ? byId.get(p.parentId) : undefined;
+    }
+    return d;
+  };
+  return nodes
+    .map((n, i) => ({ n, i, d: depthOf(n) }))
+    .sort((a, b) => a.d - b.d || a.i - b.i)
+    .map((x) => x.n);
+}
+
 /** Connection line that turns green when the hovered target is valid, red when not. */
 function DesignConnectionLine({ fromX, fromY, toX, toY, connectionStatus }: ConnectionLineComponentProps) {
   const [path] = getBezierPath({ sourceX: fromX, sourceY: fromY, targetX: toX, targetY: toY });
@@ -188,22 +210,37 @@ export function DesignView({
 
   const nodeById = useCallback((id: string) => nodes.find((n) => n.id === id), [nodes]);
 
+  // A node's absolute canvas position (React Flow child positions are relative
+  // to the parent), by summing the parent chain. Root sits at (0,0).
+  const absolutePos = useCallback(
+    (node: DesignNode): { x: number; y: number } => {
+      let x = node.position.x;
+      let y = node.position.y;
+      let p = node.parentId ? nodeById(node.parentId) : undefined;
+      while (p) {
+        x += p.position.x;
+        y += p.position.y;
+        p = p.parentId ? nodeById(p.parentId) : undefined;
+      }
+      return { x, y };
+    },
+    [nodeById],
+  );
+
   const nodeAt = useCallback(
     (point: { x: number; y: number }, kinds: NodeKind[], skipId?: string): DesignNode | undefined => {
       const candidates = nodes
-        .filter((n) => n.id !== skipId && n.parentId === ROOT_ID && kinds.includes(n.data.kind as NodeKind))
+        .filter((n) => n.id !== skipId && n.id !== ROOT_ID && kinds.includes(n.data.kind as NodeKind))
         .filter((n) => {
           const { w, h } = nodeSize(n);
+          const pos = absolutePos(n);
           return (
-            point.x >= n.position.x &&
-            point.x <= n.position.x + w &&
-            point.y >= n.position.y &&
-            point.y <= n.position.y + h
+            point.x >= pos.x && point.x <= pos.x + w && point.y >= pos.y && point.y <= pos.y + h
           );
         });
       return candidates[candidates.length - 1];
     },
-    [nodes],
+    [nodes, absolutePos],
   );
 
   const onDrop = useCallback(
@@ -230,7 +267,19 @@ export function DesignView({
           return;
         }
         parentId = clusterHost.id;
-        relative = { x: point.x - clusterHost.position.x, y: point.y - clusterHost.position.y };
+        const cp = absolutePos(clusterHost);
+        relative = { x: point.x - cp.x, y: point.y - cp.y };
+      } else if (kind === "operator") {
+        if (mode !== "gke") {
+          showToast("Redis Operators are only available in GKE mode.");
+          return;
+        }
+        if (nodes.filter((n) => n.data.kind === "operator").length >= 3) {
+          showToast("A deployment can have at most 3 Redis operators.");
+          return;
+        }
+        parentId = ROOT_ID;
+        relative = point;
       } else if (kind === "loadbalancer") {
         parentId = ROOT_ID;
         relative = point;
@@ -245,8 +294,25 @@ export function DesignView({
           showToast("Sets of VMs are only available in VM mode.");
           return;
         }
-        parentId = ROOT_ID;
-        relative = point;
+        if (kind === "cluster" && mode === "gke") {
+          // GKE clusters (RECs) belong to an operator; drop onto one.
+          const opHost = nodeAt(point, ["operator"]);
+          if (!opHost) {
+            const hasOperator = nodes.some((n) => n.data.kind === "operator");
+            showToast(
+              hasOperator
+                ? "Drop the Redis cluster onto a Redis Operator."
+                : "Add a Redis Operator first, then drop clusters onto it.",
+            );
+            return;
+          }
+          parentId = opHost.id;
+          const op = absolutePos(opHost);
+          relative = { x: point.x - op.x, y: point.y - op.y };
+        } else {
+          parentId = ROOT_ID;
+          relative = point;
+        }
       } else if (kind === "rdi") {
         if (nodes.some((n) => n.data.kind === "rdi")) {
           showToast("Only one RDI component is supported per deployment.");
@@ -264,12 +330,15 @@ export function DesignView({
           clusterRedisNodeCount(clusterHost?.data as ClusterData | undefined, mode),
         );
       }
+      // GKE clusters live inside an operator but must stay draggable onto a
+      // different operator, so they are NOT confined to their parent's extent.
+      const confined = !(kind === "cluster" && mode === "gke");
       const newNode: DesignNode = {
         id,
         type: kind,
         position: relative,
         parentId,
-        extent: "parent",
+        ...(confined ? { extent: "parent" as const } : {}),
         data,
         ...(style ? { style } : {}),
       };
@@ -283,7 +352,7 @@ export function DesignView({
       setNodes((prev) => layoutDiagram(prev.concat(newNode), nextEdges, pane));
       setDialog({ id, type: kind, data: newNode.data });
     },
-    [canvasReady, screenToFlowPosition, nodeAt, mode, gcp.machineTypes, gcp.vmReleases, setNodes, setEdges, showToast, nodes, edges, pane],
+    [canvasReady, screenToFlowPosition, nodeAt, absolutePos, mode, gcp.machineTypes, gcp.vmReleases, setNodes, setEdges, showToast, nodes, edges, pane],
   );
 
   const onDragOver = useCallback(
@@ -379,6 +448,27 @@ export function DesignView({
     [canvasReady],
   );
 
+  // GKE: dragging a Redis cluster onto a (different) operator re-homes it there.
+  // Dropped anywhere else, it snaps back under its current operator via layout.
+  const onNodeDragStop = useCallback(
+    (_: MouseEvent | TouchEvent, node: Node) => {
+      if (!canvasReady || mode !== "gke" || node.data.kind !== "cluster") return;
+      const abs = absolutePos(node as DesignNode);
+      const { w, h } = nodeSize(node);
+      const center = { x: abs.x + w / 2, y: abs.y + h / 2 };
+      const op = nodeAt(center, ["operator"], node.id);
+      const targetParent = op?.id ?? node.parentId;
+      setNodes((prev) => {
+        let next = prev;
+        if (targetParent && targetParent !== node.parentId) {
+          next = orderByDepth(prev.map((n) => (n.id === node.id ? { ...n, parentId: targetParent } : n)));
+        }
+        return layoutDiagram(next, edges, pane);
+      });
+    },
+    [canvasReady, mode, absolutePos, nodeAt, setNodes, edges, pane],
+  );
+
   const removeNode = useCallback(
     (id: string) => {
       if (id === ROOT_ID) return;
@@ -433,13 +523,12 @@ export function DesignView({
       .filter((n) => n.data.kind === "cluster")
       .map((n, i) => {
         const d = n.data as { name: string; nodes: number; rec_nodes: number; machine_type: string };
-        const parentIsGke = nodes.some((p) => p.id === n.parentId && p.data.kind === "gke");
-        const count = parentIsGke ? d.rec_nodes : d.nodes;
+        const count = mode === "gke" ? d.rec_nodes : d.nodes;
         const cap = clusterCapacityMB(n.id, count, d.machine_type, gcp.machineTypes, nodes);
         return { name: d.name.trim() || `cluster${i + 1}`, negative: cap.remainingMB < 0 };
       })
       .filter((c) => c.negative);
-  }, [nodes, gcp.machineTypes]);
+  }, [nodes, gcp.machineTypes, mode]);
 
   return (
     <div className="design-layout-wrap">
@@ -471,6 +560,7 @@ export function DesignView({
               onDrop={onDrop}
               onDragOver={onDragOver}
               onNodeClick={onNodeClick}
+              onNodeDragStop={onNodeDragStop}
               nodesDraggable={canvasReady}
               nodesConnectable={canvasReady}
               elementsSelectable={canvasReady}
@@ -512,6 +602,7 @@ export function DesignView({
           machineTypes={gcp.machineTypes}
           loadingMachines={gcp.loading.machines}
           vmReleases={gcp.vmReleases}
+          gkeReleases={gcp.gkeReleases}
           probeZone={gcp.probeZone}
           onUploadingChange={onUploadingChange}
           clusterHasNvme={(() => {

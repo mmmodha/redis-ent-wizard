@@ -46,6 +46,24 @@ describe("mergeDraftConfig — deep patch", () => {
     assert.equal(db.memory_gb, 4);
   });
 
+  it("merges operators by name and keeps operators the patch omits", () => {
+    const out = mergeDraftConfig(
+      {
+        name: "demo",
+        mode: "gke",
+        operators: [
+          { name: "operator", operator_chart_version: "latest" },
+          { name: "search-ops", operator_chart_version: "7.8.6-2" },
+        ],
+      },
+      { operators: [{ name: "operator", operator_chart_version: "7.22.2-16" }] },
+    );
+    const ops = out.operators as Array<Record<string, unknown>>;
+    assert.equal(ops.length, 2);
+    assert.equal(ops.find((o) => o.name === "operator")?.operator_chart_version, "7.22.2-16"); // patched
+    assert.equal(ops.find((o) => o.name === "search-ops")?.operator_chart_version, "7.8.6-2"); // kept
+  });
+
   it("replaces plain value arrays (not name-keyed)", () => {
     const out = mergeDraftConfig(
       { name: "demo", region_zones: ["b", "c", "d"] },

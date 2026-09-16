@@ -17,6 +17,8 @@ export type ClusterSpec = {
   rec_nodes: number;
   /** Redis Enterprise admin username for this cluster (VM mode). */
   RS_admin: string;
+  /** GKE only: name of the operator that owns this cluster (REC). */
+  operator?: string;
   /** Non-Terraform metadata: databases created via the REST API after bootstrap. */
   databases?: DatabaseSpec[];
   /** Non-Terraform metadata: license applied via the REST API after bootstrap. */
@@ -32,6 +34,7 @@ export type ClusterInput = {
   RS_release?: string;
   rec_nodes?: number;
   RS_admin?: string;
+  operator?: string;
   databases?: DatabaseSpec[];
   license?: string;
 };
@@ -131,10 +134,92 @@ export function normalizeClusters(input: {
       RS_admin: (c.RS_admin || input.RS_admin || DEFAULT_RS_ADMIN).trim() || DEFAULT_RS_ADMIN,
       // Carry non-Terraform metadata through so it survives the create handler
       // overwriting input.clusters with the normalized specs.
+      ...(typeof c.operator === "string" && c.operator.trim() ? { operator: c.operator.trim() } : {}),
       ...(Array.isArray(c.databases) && c.databases.length ? { databases: c.databases } : {}),
       ...(typeof c.license === "string" && c.license.trim() ? { license: c.license } : {}),
     };
   });
+}
+
+/** The synthesized default operator's name, used for back-compat single-operator configs. */
+export const DEFAULT_OPERATOR_NAME = "operator";
+/** Namespace the default operator installs into (the legacy single-operator namespace). */
+export const GKE_REC_NAMESPACE = "rec-ns";
+export const MAX_OPERATORS = 3;
+
+export type OperatorInput = { name?: string; operator_chart_version?: string };
+
+export type OperatorSpec = {
+  /** Slugged operator name (e.g. "operator", "search-ops"). */
+  name: string;
+  /** Kubernetes namespace this operator installs into. */
+  namespace: string;
+  /** Raw chart version id ("latest"/"" or a known release id); resolved at render time. */
+  operator_chart_version: string;
+};
+
+/** Slug an operator name, defaulting to a stable per-index name when blank. */
+export function normalizeOperatorName(raw: unknown, index: number): string {
+  const slug = String(raw ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, MAX_CLUSTER_NAME_LEN)
+    .replace(/-+$/g, "");
+  if (slug) {
+    if (!/^[a-z]/.test(slug)) throw new Error("Operator names must start with a letter");
+    return slug;
+  }
+  return index <= 0 ? DEFAULT_OPERATOR_NAME : `${DEFAULT_OPERATOR_NAME}-${index + 1}`;
+}
+
+/** The namespace for an operator: the legacy `rec-ns` for the default, else `rec-ns-<slug>`. */
+export function operatorNamespace(slug: string): string {
+  return slug === DEFAULT_OPERATOR_NAME ? GKE_REC_NAMESPACE : `${GKE_REC_NAMESPACE}-${slug}`;
+}
+
+/**
+ * Resolve the GKE operators for a deployment. If `operators` is listed, use it
+ * (slugged, unique); otherwise synthesize a single default operator from the
+ * deployment-wide `operator_chart_version` so pre-operator configs still render.
+ */
+export function normalizeOperators(input: {
+  operators?: OperatorInput[];
+  operator_chart_version?: string;
+}): OperatorSpec[] {
+  const listed = input.operators;
+  const sources: OperatorInput[] =
+    listed && listed.length
+      ? listed
+      : [{ name: DEFAULT_OPERATOR_NAME, operator_chart_version: input.operator_chart_version }];
+  if (sources.length > MAX_OPERATORS) {
+    throw new Error(`A deployment can have at most ${MAX_OPERATORS} Redis operators`);
+  }
+  const seen = new Set<string>();
+  return sources.map((op, i) => {
+    const name = normalizeOperatorName(op.name, i);
+    if (seen.has(name)) throw new Error(`Operator names must be unique (${name})`);
+    seen.add(name);
+    return {
+      name,
+      namespace: operatorNamespace(name),
+      operator_chart_version: (op.operator_chart_version || "").trim(),
+    };
+  });
+}
+
+/** The operator that owns a cluster: matched by (slugged) `cluster.operator`, else the first. */
+export function operatorForCluster(
+  cluster: { operator?: string },
+  operators: OperatorSpec[],
+): OperatorSpec {
+  const want = String(cluster.operator ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return operators.find((o) => o.name === want) || operators[0];
 }
 
 export function clusterNamePrefix(deploymentPrefix: string, index: number, name = ""): string {

@@ -13,7 +13,7 @@ export const CAPABILITIES_GUIDE = {
     "Define a Redis Enterprise deployment on GCP: one or more Redis clusters (each with databases), optional application workloads, and optional GCP data services (Cloud SQL, Pub/Sub, BigQuery, Cloud Storage) and Redis Data Integration (RDI). You DEFINE a config; a human reviews and applies it. You cannot provision or destroy.",
   modes: {
     vm: "Redis Enterprise on Compute Engine VMs. Applications run on their own VM groups; load balancers and RDI-on-a-dedicated-VM are available.",
-    gke: "Redis Enterprise on GKE via the operator. Applications run as Deployments; RDI runs via Helm.",
+    gke: "Redis Enterprise on GKE via one or more operators. Each operator installs the redis-enterprise-operator Helm chart into its own namespace and owns the clusters (RECs) that reference it. Applications run as Deployments; RDI runs via Helm.",
   },
   required: {
     name: "Short deployment name (becomes the resource prefix).",
@@ -32,8 +32,10 @@ export const CAPABILITIES_GUIDE = {
   artifacts:
     "Application artifacts (jars/binaries): for a file already hosted, use artifact kind 'url' (https), 'gcs' (gs://), or 'git' (repo URL) — a reference the wizard fetches at apply time. For a LOCAL file (only when the upload_artifact tool is available, i.e. the local stdio server), call upload_artifact(path, type) and set the app's artifact to { kind: 'upload', ref: <returned id>, type }. Otherwise leave the artifact for the human to attach in the wizard.",
   components: {
+    operators:
+      "GKE only. Redis Operators, each with a name and its own operator_chart_version (empty/'latest' = latest chart). Each operator installs into its own namespace and owns the clusters that name it via the cluster's `operator` field. A GKE deployment needs at least one operator; omit `operators` entirely and a single default operator is assumed (back-compat).",
     clusters:
-      "Redis Enterprise clusters. Each has a name, node count, machine type, and a list of databases. Start empty and add clusters explicitly.",
+      "Redis Enterprise clusters (RECs). Each has a name, node count, machine type, and a list of databases. On GKE, set each cluster's `operator` to the name of the operator that should own it (defaults to the first operator). Start empty and add clusters explicitly.",
     databases:
       "Per-cluster Redis databases: name, memory_gb, optional replication/sharding, modules (search, ReJSON, timeseries, bf), eviction, port, password.",
     applications:

@@ -10,6 +10,7 @@ export type IconName =
   | "load-balancer"
   | "network"
   | "gke"
+  | "operator"
   | "storage"
   | "pubsub"
   | "bigquery"

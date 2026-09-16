@@ -297,6 +297,8 @@ export interface CreateInstanceInput {
     rec_nodes?: number;
     /** Redis Enterprise admin username for this cluster (VM mode). */
     RS_admin?: string;
+    /** GKE only: name of the operator that owns this cluster (REC). */
+    operator?: string;
     /** Databases to create on this cluster after it forms. */
     databases?: DatabaseSpec[];
     /** Redis Enterprise license key applied to this cluster once it forms. */
@@ -331,8 +333,17 @@ export interface CreateInstanceInput {
   gke_clustersize?: number;
   gke_machine_type?: string;
   rec_nodes?: number;
-  /** Helm chart version for redis-enterprise-operator. Empty = latest. */
+  /**
+   * Deployment-wide Helm chart version for redis-enterprise-operator. Empty =
+   * latest. Back-compat fallback for configs without per-operator `operators[]`.
+   */
   operator_chart_version?: string;
+  /** GKE Redis Operators; each owns the clusters (RECs) that reference it. */
+  operators?: Array<{
+    name?: string;
+    /** Helm chart version for this operator. Empty/"latest" = latest chart. */
+    operator_chart_version?: string;
+  }>;
   // shared
   dns_managed_zone?: string;
   dns_zone_dns_name?: string;

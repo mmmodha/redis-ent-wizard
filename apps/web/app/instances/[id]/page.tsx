@@ -68,11 +68,20 @@ function deploymentSummary(inst: Instance): { label: string; value: string }[] {
       });
     }
   });
-  if (inst.mode === "gke" && cfg.operator_chart_version) {
-    rows.push({
-      label: "Operator",
-      value: String(cfg.operator_chart_version || "latest"),
-    });
+  if (inst.mode === "gke") {
+    const ops = Array.isArray(cfg.operators)
+      ? (cfg.operators as Array<{ name?: string; operator_chart_version?: string }>)
+      : [];
+    if (ops.length) {
+      ops.forEach((op, i) => {
+        rows.push({
+          label: `Operator ${op.name || (i === 0 ? "operator" : `operator-${i + 1}`)}`,
+          value: String(op.operator_chart_version || "latest"),
+        });
+      });
+    } else if (cfg.operator_chart_version) {
+      rows.push({ label: "Operator", value: String(cfg.operator_chart_version || "latest") });
+    }
   }
   const app = Number(cfg.app || 0);
   if (app > 0) {

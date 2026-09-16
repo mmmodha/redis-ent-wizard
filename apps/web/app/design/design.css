@@ -41,6 +41,10 @@
   -webkit-mask-image: url(/brand/icons/gke.svg);
   mask-image: url(/brand/icons/gke.svg);
 }
+.design-icon-operator {
+  -webkit-mask-image: url(/brand/icons/operator.svg);
+  mask-image: url(/brand/icons/operator.svg);
+}
 .design-icon-storage {
   -webkit-mask-image: url(/brand/icons/storage.svg);
   mask-image: url(/brand/icons/storage.svg);
@@ -292,6 +296,33 @@
 
 .design-root-gke {
   border-color: var(--redis-text-link);
+}
+
+/* Redis Operator: a container (GKE) that holds the clusters it manages. */
+.design-operator {
+  width: 100%;
+  height: 100%;
+  border: 1px dashed var(--redis-text-link);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--redis-text-link) 6%, var(--redis-surface-alt));
+}
+
+.design-operator-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px;
+  border-bottom: 1px dashed var(--redis-border-muted);
+  color: var(--redis-text-secondary);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.design-operator-hint {
+  padding: 6px 8px;
+  font-size: 11px;
+  color: var(--redis-text-secondary);
 }
 
 .design-root-head,

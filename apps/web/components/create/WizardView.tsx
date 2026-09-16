@@ -49,6 +49,8 @@ type ClusterDraft = {
   rs_version: string;
   rec_nodes: number;
   RS_admin: string;
+  /** GKE only: name of the operator that owns this REC. */
+  operator: string;
   license: string;
   databases: DatabaseDraft[];
 };
@@ -61,11 +63,24 @@ type StoredCluster = {
   rs_version?: string;
   rec_nodes?: number;
   RS_admin?: string;
+  operator?: string;
   license?: string;
   databases?: Record<string, unknown>[];
 };
 
-function blankCluster(machine = ""): ClusterDraft {
+/** GKE Redis Operator (owns a set of RECs). */
+type OperatorDraft = { name: string; operator_chart_version: string };
+
+function blankOperator(): OperatorDraft {
+  return { name: "", operator_chart_version: "latest" };
+}
+
+/** The resolved (slugged) name for an operator draft, matching the backend/diagram. */
+function operatorDraftName(op: OperatorDraft, index: number): string {
+  return clusterSlug(op.name) || (index <= 0 ? "operator" : `operator-${index + 1}`);
+}
+
+function blankCluster(machine = "", operator = ""): ClusterDraft {
   return {
     name: "",
     nodes: 3,
@@ -74,6 +89,7 @@ function blankCluster(machine = ""): ClusterDraft {
     rs_version: DEFAULT_RS_VERSION,
     rec_nodes: 3,
     RS_admin: "admin@redis.io",
+    operator,
     license: "",
     databases: [],
   };
@@ -147,6 +163,7 @@ function clusterDraftFromConfig(c: StoredCluster, fallbackAdmin = ""): ClusterDr
     rs_version: c.rs_version || DEFAULT_RS_VERSION,
     rec_nodes: Number(c.rec_nodes ?? c.nodes ?? 3) || 3,
     RS_admin: c.RS_admin || fallbackAdmin || "admin@redis.io",
+    operator: c.operator || "",
     license: c.license || "",
     databases: Array.isArray(c.databases) ? c.databases.map(databaseDraftFromConfig) : [],
   };
@@ -194,7 +211,7 @@ type WizardForm = {
   gke_clustersize: number;
   gke_machine_type: string;
   rec_nodes: number;
-  operator_chart_version: string;
+  operators: OperatorDraft[];
   dns_managed_zone: string;
   dns_zone_dns_name: string;
 };
@@ -339,7 +356,19 @@ function formFromConfig(
     gke_clustersize: Number(cfg.gke_clustersize) || clusters[0]?.rec_nodes || 3,
     gke_machine_type: str(cfg.gke_machine_type),
     rec_nodes: Number(cfg.rec_nodes) || clusters[0]?.rec_nodes || 3,
-    operator_chart_version: str(cfg.operator_chart_version) || "latest",
+    operators: (() => {
+      const raw = Array.isArray(cfg.operators) ? (cfg.operators as Record<string, unknown>[]) : [];
+      if (raw.length) {
+        return raw.map((o) => ({
+          name: str(o.name),
+          operator_chart_version: str(o.operator_chart_version) || "latest",
+        }));
+      }
+      // Back-compat: synthesize one default operator from the legacy field.
+      return mode === "gke"
+        ? [{ name: "operator", operator_chart_version: str(cfg.operator_chart_version) || "latest" }]
+        : [];
+    })(),
     dns_managed_zone: str(cfg.dns_managed_zone),
     dns_zone_dns_name: str(cfg.dns_zone_dns_name),
   };
@@ -389,7 +418,7 @@ function blankForm(): WizardForm {
     gke_clustersize: 3,
     gke_machine_type: "",
     rec_nodes: 3,
-    operator_chart_version: "latest",
+    operators: [],
     dns_managed_zone: "",
     dns_zone_dns_name: "",
   };
@@ -448,7 +477,9 @@ export function WizardView({
       region_name: settings.region_name,
       region_zones: settings.region_zones,
       mode: settings.mode,
-      operator_chart_version: settings.operator_chart_version,
+      // GKE always has at least one operator; seed a default when none exist yet.
+      operators:
+        settings.mode === "gke" && prev.operators.length === 0 ? [blankOperator()] : prev.operators,
       dns_managed_zone: settings.dns_managed_zone,
       dns_zone_dns_name: settings.dns_zone_dns_name,
     }));
@@ -458,6 +489,12 @@ export function WizardView({
   const clusterConnectNames = useMemo(
     () => form.clusters.map((c, i) => clusterSlug(c.name) || `cluster${i + 1}`),
     [form.clusters],
+  );
+
+  // Resolved (slugged) operator names, for the per-cluster operator picker (GKE).
+  const operatorNames = useMemo(
+    () => form.operators.map((o, i) => operatorDraftName(o, i)),
+    [form.operators],
   );
 
   const appDefaultMachineType = useMemo(
@@ -751,15 +788,22 @@ export function WizardView({
           base.vms_connect = vc;
       }
     } else {
+      const opNames = form.operators.map((o, i) => operatorDraftName(o, i));
       Object.assign(base, {
         gke_clustersize: Number(form.gke_clustersize),
         gke_machine_type: form.gke_machine_type,
         rec_nodes: Number(form.clusters[0]?.rec_nodes || form.rec_nodes),
-        operator_chart_version: form.operator_chart_version,
+        // Deployment-wide version kept as a back-compat fallback (first operator).
+        operator_chart_version: form.operators[0]?.operator_chart_version || "latest",
+        operators: form.operators.map((o, i) => ({
+          name: opNames[i],
+          operator_chart_version: o.operator_chart_version || "latest",
+        })),
         clusters: form.clusters.map((c) => ({
           name: c.name.trim() || undefined,
           rec_nodes: Number(c.rec_nodes),
           nodes: Number(c.rec_nodes),
+          operator: c.operator.trim() || opNames[0] || undefined,
           license: c.license.trim() || undefined,
           ...(c.databases.length ? { databases: databasesToPayload(c.databases, Number(c.rec_nodes)) } : {}),
         })),
@@ -1307,13 +1351,111 @@ export function WizardView({
         {step === 2 && form.mode === "gke" && (
           <div className="grid grid-2">
             <CollapsibleSection
+              title="Redis Operators"
+              noun={{ one: "operator", many: "operators" }}
+              names={operatorNames}
+              intro={
+                <p className="hint" style={{ marginTop: 4 }}>
+                  Each operator installs the redis-enterprise-operator Helm chart into its own namespace and
+                  runs the RECs assigned to it. Set the Redis/operator version here, then pick an operator on
+                  each REC below. At least one operator is required.
+                </p>
+              }
+            >
+              {form.operators.map((op, i) => (
+                <div className="cluster-card" key={`operator-${i}`}>
+                  <div className="wiz-workload-head">
+                    <h3 className="companion-title" style={{ margin: 0 }}>
+                      {operatorDraftName(op, i)}
+                    </h3>
+                    <button
+                      type="button"
+                      className="btn"
+                      disabled={form.operators.length <= 1}
+                      onClick={() => {
+                        setForm((prev) => {
+                          const removed = operatorDraftName(prev.operators[i], i);
+                          const operators = prev.operators.filter((_, idx) => idx !== i);
+                          const fallback = operators.length ? operatorDraftName(operators[0], 0) : "";
+                          // Re-home any REC that pointed at the removed operator.
+                          const clusters = prev.clusters.map((c) =>
+                            c.operator === removed ? { ...c, operator: fallback } : c,
+                          );
+                          return { ...prev, operators, clusters };
+                        });
+                        setPreflightResult(null);
+                      }}
+                      title={form.operators.length <= 1 ? "At least one operator is required" : undefined}
+                    >
+                      Remove
+                    </button>
+                  </div>
+                  <label>
+                    Operator name
+                    <input
+                      value={op.name}
+                      onChange={(e) => {
+                        const name = e.target.value.slice(0, 40);
+                        setForm((prev) => ({
+                          ...prev,
+                          operators: prev.operators.map((o, idx) => (idx === i ? { ...o, name } : o)),
+                        }));
+                        setPreflightResult(null);
+                      }}
+                      placeholder={i === 0 ? "operator" : "search-ops"}
+                    />
+                    <span className="hint">Namespace: rec-ns{operatorDraftName(op, i) === "operator" ? "" : `-${operatorDraftName(op, i)}`}</span>
+                  </label>
+                  <label>
+                    Operator / Redis version
+                    <select
+                      value={op.operator_chart_version || "latest"}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        setForm((prev) => ({
+                          ...prev,
+                          operators: prev.operators.map((o, idx) =>
+                            idx === i ? { ...o, operator_chart_version: v } : o,
+                          ),
+                        }));
+                        setPreflightResult(null);
+                      }}
+                    >
+                      {(gcp.gkeReleases.length
+                        ? gcp.gkeReleases
+                        : [{ id: "latest", label: "Latest operator chart", chartVersion: "" }]
+                      ).map((r) => (
+                        <option key={r.id} value={r.id}>
+                          {r.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+              ))}
+              <div style={{ gridColumn: "1 / -1" }}>
+                <button
+                  type="button"
+                  className="btn"
+                  disabled={form.operators.length >= 3}
+                  onClick={() => {
+                    setForm((prev) => ({ ...prev, operators: [...prev.operators, blankOperator()] }));
+                    setPreflightResult(null);
+                  }}
+                >
+                  Add operator
+                </button>
+              </div>
+            </CollapsibleSection>
+
+            <CollapsibleSection
               title="Redis Enterprise clusters"
               noun={{ one: "REC", many: "RECs" }}
               names={form.clusters.map((c, i) => clusterSlug(c.name) || `REC ${i + 1}`)}
               intro={
                 <p className="hint" style={{ marginTop: 4 }}>
-                  One GKE cluster and one operator. Add at least one REC to deploy; each can have a
-                  different node count. The Redis version is the operator chart (in Deployment settings).
+                  Add at least one REC to deploy; each can have a different node count and run on any operator
+                  above. The Redis version comes from the chosen operator&apos;s chart.
                 </p>
               }
             >
@@ -1366,6 +1508,27 @@ export function WizardView({
                     REC: {previewClusterPrefix(form.name, form.env, cluster.name, i)}-rec
                     {form.clusters.length > 1 ? " · required, unique" : " · optional"}
                   </span>
+                </label>
+                <label>
+                  Operator
+                  <select
+                    value={cluster.operator || operatorNames[0] || ""}
+                    onChange={(e) => {
+                      const operator = e.target.value;
+                      setForm((prev) => ({
+                        ...prev,
+                        clusters: prev.clusters.map((c, idx) => (idx === i ? { ...c, operator } : c)),
+                      }));
+                      setPreflightResult(null);
+                    }}
+                  >
+                    {operatorNames.map((n) => (
+                      <option key={n} value={n}>
+                        {n}
+                      </option>
+                    ))}
+                  </select>
+                  <span className="hint">Which operator runs this REC.</span>
                 </label>
                 <label>
                   {form.clusters.length > 1 ? "REC nodes" : "REC nodes"}
@@ -1437,7 +1600,8 @@ export function WizardView({
                 disabled={form.clusters.length >= 3}
                 onClick={() => {
                   setForm((prev) => {
-                    const clusters = [...prev.clusters, blankCluster(prev.gke_machine_type)];
+                    const firstOp = prev.operators.length ? operatorDraftName(prev.operators[0], 0) : "";
+                    const clusters = [...prev.clusters, blankCluster(prev.gke_machine_type, firstOp)];
                     const sum = clusters.reduce((n, c) => n + c.rec_nodes, 0);
                     return {
                       ...prev,

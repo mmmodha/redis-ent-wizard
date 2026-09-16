@@ -10,7 +10,6 @@ export type DesignMeta = {
   youremail: string;
   skip_deletion: boolean;
   mode: "vm" | "gke";
-  operator_chart_version: string;
 };
 
 export function ownerError(value: string): string {
@@ -219,22 +218,10 @@ export function DeploymentSettings({
         </label>
 
         {meta.mode === "gke" ? (
-          <label>
-            Operator / Redis version
-            <select
-              value={meta.operator_chart_version}
-              onChange={(e) => setMeta((m) => ({ ...m, operator_chart_version: e.target.value }))}
-            >
-              {(gcp.gkeReleases.length
-                ? gcp.gkeReleases
-                : [{ id: "latest", label: "Latest operator chart", chartVersion: "" }]
-              ).map((r) => (
-                <option key={r.id} value={r.id}>
-                  {r.label}
-                </option>
-              ))}
-            </select>
-          </label>
+          <p className="hint design-field-wide">
+            Redis Operators and their versions are configured as components — add a Redis Operator in the
+            wizard&apos;s Operators section or on the diagram.
+          </p>
         ) : null}
       </div>
 

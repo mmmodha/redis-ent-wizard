@@ -25,6 +25,12 @@ export function defaultNodeData(
         gke_machine_type: pick(machineTypes, ["e2-standard-8", "n2-standard-8"]),
         gke_clustersize: 3,
       };
+    case "operator":
+      return {
+        kind: "operator",
+        name: "",
+        operator_chart_version: "latest",
+      };
     case "cluster":
       return {
         kind: "cluster",

@@ -3,7 +3,13 @@ import os from "node:os";
 import path from "node:path";
 import { normalizeAppDiskGib, normalizeAppMachineTypes, parseAppExtraPorts } from "./app-web.js";
 import { normalizeApplications } from "./applications.js";
-import { clusterNamePrefix, normalizeClusters } from "./clusters.js";
+import {
+  clusterNamePrefix,
+  normalizeClusters,
+  normalizeOperators,
+  operatorForCluster,
+  type OperatorSpec,
+} from "./clusters.js";
 import { bucketFullName, bucketGrantRole, normalizeStorageBuckets } from "./storage.js";
 import { grantsPublisher, grantsSubscriber, normalizePubsub, topicFullName } from "./pubsub.js";
 import { datasetFullId, datasetGrantRole, normalizeBigquery } from "./bigquery.js";
@@ -115,8 +121,8 @@ function vendorTerraform(workDir: string): string {
   return dest;
 }
 
-// In-cluster namespaces for GKE DNS wiring — must match the Terraform modules.
-const GKE_REC_NS = "rec-ns"; // terraform/modules/re-k8s (local.namespace)
+// In-cluster namespace for GKE app DNS wiring — must match the Terraform module.
+// REC namespaces are per-operator (see operatorForCluster / operatorNamespace).
 const GKE_APP_NS = "apps"; //  terraform/modules/app-k8s (var.namespace default)
 
 /** Uppercased env-var slug from a component name (e.g. "cache-1" -> "CACHE_1"). */
@@ -475,10 +481,14 @@ export function buildRdi(input: CreateInstanceInput, prefix: string, mode: Deplo
   if (!rdi) return disabled;
 
   const clusters = normalizeClusters(mode === "gke" ? { ...input, mode: "gke" } : input);
+  const operators = mode === "gke" ? normalizeOperators(input) : [];
   const dnsSuffix = input.dns_zone_dns_name || "demo.redislabs.com";
   const endpointOf = (clusterIdx: number, db: DatabaseSpec): { host: string; port: number } => {
     const port = db.port ?? 12000;
-    if (mode === "gke") return { host: `${db.name}.${GKE_REC_NS}.svc.cluster.local`, port };
+    if (mode === "gke") {
+      const ns = operatorForCluster(clusters[clusterIdx], operators).namespace;
+      return { host: `${db.name}.${ns}.svc.cluster.local`, port };
+    }
     const cprefix = clusterNamePrefix(prefix, clusterIdx, clusters[clusterIdx].name);
     return { host: `redis-${port}.cluster.${cprefix}.${dnsSuffix}`, port };
   };
@@ -624,6 +634,7 @@ interface GkeSecretRef {
 export function resolveGkeConnections(
   sel: ConnectSelections,
   clusters: ReturnType<typeof normalizeClusters>,
+  operators: OperatorSpec[],
   prefix: string,
   apps: string[],
   storageBuckets: Map<string, string> = new Map(),
@@ -640,7 +651,8 @@ export function resolveGkeConnections(
   clusters.forEach((c, i) => {
     const recName = `${clusterNamePrefix(prefix, i, c.name)}-rec`;
     const connectName = c.name || `cluster${i + 1}`;
-    const host = `${recName}.${GKE_REC_NS}.svc.cluster.local`;
+    const ns = operatorForCluster(c, operators).namespace;
+    const host = `${recName}.${ns}.svc.cluster.local`;
     clusterHost.set(connectName, host);
     clusterSecret.set(connectName, recName);
     if (c.name) {
@@ -649,7 +661,7 @@ export function resolveGkeConnections(
     }
     for (const db of c.databases || []) {
       const port = db.port ?? 12000;
-      dbEndpoints.set(db.name, `${db.name}.${GKE_REC_NS}.svc.cluster.local:${port}`);
+      dbEndpoints.set(db.name, `${db.name}.${ns}.svc.cluster.local:${port}`);
     }
   });
 
@@ -705,9 +717,39 @@ export function resolveGkeConnections(
   return { env, secretRefs };
 }
 
+/**
+ * Group the normalized GKE clusters under their operators and produce the
+ * per-operator tfvars: each operator carries its resolved Helm chart version,
+ * its namespace, and the RECs (name + node count) it owns. Clusters whose
+ * `operator` is unset/unknown fall back to the first operator.
+ */
+export function buildGkeOperators(
+  input: CreateInstanceInput,
+  clusters: ReturnType<typeof normalizeClusters>,
+  prefix: string,
+): Record<string, unknown>[] {
+  const operators = normalizeOperators(input);
+  const recsByOperator = new Map<string, Array<{ name: string; nodes: number }>>();
+  for (const op of operators) recsByOperator.set(op.name, []);
+  clusters.forEach((c, i) => {
+    const op = operatorForCluster(c, operators);
+    recsByOperator.get(op.name)!.push({
+      name: `${clusterNamePrefix(prefix, i, c.name)}-rec`,
+      nodes: c.rec_nodes,
+    });
+  });
+  return operators.map((op) => ({
+    name: op.name,
+    namespace: op.namespace,
+    chart_version: resolveGkeOperatorChart(op.operator_chart_version),
+    recs: recsByOperator.get(op.name) || [],
+  }));
+}
+
 function buildGkeApplications(input: CreateInstanceInput): Record<string, unknown>[] {
   const apps = normalizeApplications({ mode: "gke", applications: input.applications });
   const clusters = normalizeClusters({ ...input, mode: "gke" });
+  const operators = normalizeOperators(input);
   const prefix = `${input.name}-${input.env || "default"}`;
   const appNames = apps.map((a) => a.name);
   const storageBuckets = new Map<string, string>();
@@ -716,7 +758,7 @@ function buildGkeApplications(input: CreateInstanceInput): Record<string, unknow
   const bigquery = bigqueryEnvMap(input, prefix);
   const sql = sqlEnvMap(input, prefix);
   return apps.map((app) => {
-    const conn = resolveGkeConnections(app, clusters, prefix, appNames, storageBuckets, pubsub, bigquery, sql);
+    const conn = resolveGkeConnections(app, clusters, operators, prefix, appNames, storageBuckets, pubsub, bigquery, sql);
     return {
       name: app.name,
       image: app.image || "",
@@ -830,9 +872,7 @@ ${
     : `
   gke_clustersize          = var.gke_clustersize
   gke_machine_type         = var.gke_machine_type
-  rec_nodes                = var.rec_nodes
-  rec_specs                = var.rec_specs
-  operator_chart_version   = var.operator_chart_version
+  operators                = var.operators
   outputs_dir              = var.outputs_dir
   applications             = var.applications
   storage_buckets          = var.storage_buckets
@@ -1072,14 +1112,17 @@ variable "env" { type = string }
 variable "region_name" { type = string }
 variable "gke_clustersize" { type = number }
 variable "gke_machine_type" { type = string }
-variable "rec_nodes" { type = number }
-variable "rec_specs" {
+variable "operators" {
   type = list(object({
-    name  = string
-    nodes = number
+    name          = string
+    namespace     = string
+    chart_version = string
+    recs = list(object({
+      name  = string
+      nodes = number
+    }))
   }))
 }
-variable "operator_chart_version" { type = string }
 variable "dns_managed_zone" { type = string }
 variable "dns_zone_dns_name" { type = string }
 variable "rs_private_subnet" { type = string }
@@ -1248,12 +1291,7 @@ variable "rdi" {
     Object.assign(tfvars, {
       gke_clustersize: input.gke_clustersize ?? 3,
       gke_machine_type: input.gke_machine_type || "e2-standard-8",
-      rec_nodes: clusters[0].rec_nodes,
-      rec_specs: clusters.map((c, i) => ({
-        name: `${clusterNamePrefix(prefix, i, c.name)}-rec`,
-        nodes: c.rec_nodes,
-      })),
-      operator_chart_version: resolveGkeOperatorChart(input.operator_chart_version),
+      operators: buildGkeOperators(input, clusters, prefix),
       outputs_dir: workDir,
     });
     tfvars.applications = buildGkeApplications(input);

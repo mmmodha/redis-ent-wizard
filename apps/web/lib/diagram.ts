@@ -10,6 +10,7 @@ import { effectiveDbReplication, clusterRedisNodeCount } from "./db-replication"
 export type NodeKind =
   | "network"
   | "gke"
+  | "operator"
   | "cluster"
   | "database"
   | "vms"
@@ -26,6 +27,15 @@ export type RootData = {
   label: string;
   gke_machine_type?: string;
   gke_clustersize?: number;
+  [k: string]: unknown;
+};
+
+/** GKE only: a Redis Operator container. Holds cluster (REC) nodes as children. */
+export type OperatorData = {
+  kind: "operator";
+  name: string;
+  /** Helm chart version id ("latest"/"" or a known release id). */
+  operator_chart_version: string;
   [k: string]: unknown;
 };
 
@@ -164,6 +174,7 @@ export type RdiData = {
 
 export type DesignNodeData =
   | RootData
+  | OperatorData
   | ClusterData
   | DatabaseData
   | VmsData
@@ -185,7 +196,8 @@ export type DesignSettings = {
   youremail: string;
   skip_deletion: boolean;
   mode: "vm" | "gke";
-  operator_chart_version: string;
+  /** Legacy deployment-wide operator version; the version now lives on operator nodes. */
+  operator_chart_version?: string;
   credentialsFile: string;
   project: string;
   region_name: string;
@@ -268,6 +280,9 @@ function envToRecord(rows: { key: string; value: string }[]): Record<string, str
 }
 
 /** Data accessors keep the discriminated union readable without casts everywhere. */
+function isOperator(n: DesignNode): n is Node<OperatorData> {
+  return n.data.kind === "operator";
+}
 function isCluster(n: DesignNode): n is Node<ClusterData> {
   return n.data.kind === "cluster";
 }
@@ -306,6 +321,11 @@ function isRdiInternalDb(n: DesignNode): boolean {
 /** Human-facing name for a cluster node, used for edge connect references. */
 export function clusterName(node: Node<ClusterData>, index: number): string {
   return clusterSlug(node.data.name) || `cluster${index + 1}`;
+}
+
+/** Slugged operator name; falls back to a stable per-index name when blank. */
+export function operatorName(node: Node<OperatorData>, index: number): string {
+  return clusterSlug(node.data.name) || (index <= 0 ? "operator" : `operator-${index + 1}`);
 }
 
 /**
@@ -868,15 +888,24 @@ export function diagramToCreateInput(
     const root = nodes.find((n) => n.data.kind === "gke");
     const rootData = (root?.data as RootData | undefined) || undefined;
     const recSum = clusters.reduce((n, c) => n + Number(c.data.rec_nodes), 0);
+    // Operators own clusters via containment (cluster.parentId === operator.id).
+    const operators = nodes.filter(isOperator);
+    const operatorNameById = new Map<string, string>();
+    operators.forEach((o, i) => operatorNameById.set(o.id, operatorName(o, i)));
     Object.assign(base, {
       gke_clustersize: Math.max(Number(rootData?.gke_clustersize) || 0, recSum, 1),
       gke_machine_type: rootData?.gke_machine_type || "",
-      rec_nodes: clusters[0] ? Number(clusters[0].data.rec_nodes) : 3,
-      operator_chart_version: settings.operator_chart_version,
+      // Deployment-wide version kept as a back-compat fallback (first operator).
+      operator_chart_version: operators[0]?.data.operator_chart_version || settings.operator_chart_version,
+      operators: operators.map((o, i) => ({
+        name: operatorName(o, i),
+        operator_chart_version: o.data.operator_chart_version || "latest",
+      })),
       clusters: clusters.map((c) => ({
         name: c.data.name.trim() || undefined,
         rec_nodes: Number(c.data.rec_nodes),
         nodes: Number(c.data.rec_nodes),
+        operator: c.parentId ? operatorNameById.get(c.parentId) : undefined,
         license: c.data.license?.trim() || undefined,
         databases: databasesFor(c.id),
       })),
@@ -901,6 +930,7 @@ export const LAYOUT = {
   PAD: 32,
   GAP: 24,
   CLUSTER_HEADER: 120,
+  OPERATOR_HEADER: 96,
   ROOT_HEADER: 64,
 } as const;
 
@@ -908,6 +938,7 @@ export const LAYOUT = {
 export const NODE_SIZE: Record<string, { width: number; height: number }> = {
   database: { width: 248, height: 192 },
   loadbalancer: { width: 224, height: 120 },
+  operator: { width: 376, height: 160 },
   cluster: { width: 312, height: 128 },
   vms: { width: 232, height: 120 },
   application: { width: 232, height: 120 },
@@ -940,7 +971,7 @@ export function layoutDiagram(
   edges: DesignEdge[] = [],
   rootMin?: { width: number; height: number },
 ): DesignNode[] {
-  const { PAD, GAP, CLUSTER_HEADER, ROOT_HEADER } = LAYOUT;
+  const { PAD, GAP, CLUSTER_HEADER, OPERATOR_HEADER, ROOT_HEADER } = LAYOUT;
   const DB = NODE_SIZE.database;
   const CLUSTER_WIDTH = Math.max(NODE_SIZE.cluster.width, DB.width + 2 * PAD);
 
@@ -951,10 +982,13 @@ export function layoutDiagram(
     style: { ...(n.style ?? {}) },
   })) as DesignNode[];
 
+  const byId = new Map(out.map((n) => [n.id, n]));
+
   // 1) Fixed sizes for leaf and peer nodes (vms, application, loadbalancer, database).
+  //    Containers (operator, cluster) grow to fit their children below.
   for (const n of out) {
     const kind = n.data.kind as string;
-    if (kind === "cluster") continue; // clusters grow, handled below
+    if (kind === "cluster" || kind === "operator") continue;
     const preset = NODE_SIZE[kind];
     if (preset) n.style = { ...n.style, width: preset.width, height: preset.height };
   }
@@ -974,16 +1008,40 @@ export function layoutDiagram(
     cluster.style = { ...cluster.style, width: CLUSTER_WIDTH, height };
   }
 
-  // 3) Arrange every root child with dagre, using the edges between components.
+  // 3) Stack clusters vertically inside each operator and grow the operator to fit
+  //    (GKE only — operators contain clusters, which are themselves containers).
+  for (const operator of out) {
+    if (operator.data.kind !== "operator") continue;
+    const kids = out.filter((n) => n.parentId === operator.id && n.data.kind === "cluster");
+    let y: number = OPERATOR_HEADER;
+    let maxChildW = 0;
+    for (const c of kids) {
+      c.position = { x: PAD, y };
+      const w = styleNum(c.style?.width, CLUSTER_WIDTH);
+      const h = styleNum(c.style?.height, NODE_SIZE.cluster.height);
+      maxChildW = Math.max(maxChildW, w);
+      y += h + GAP;
+    }
+    const width = Math.max(NODE_SIZE.operator.width, maxChildW + 2 * PAD);
+    const height = kids.length > 0 ? y - GAP + PAD : NODE_SIZE.operator.height;
+    operator.style = { ...operator.style, width, height };
+  }
+
+  // 4) Arrange every root child with dagre, using the edges between components.
   const root = out.find((n) => n.id === ROOT_ID);
   if (root) {
     const children = out.filter((n) => n.parentId === ROOT_ID);
-    // Map any node id to the top-level component it belongs to (a database → its
-    // parent cluster) so edges to nested nodes rank their container.
+    // Map any node id to the top-level component it belongs to by climbing the
+    // parent chain up to the node whose parent is the root (a database → its
+    // cluster → its operator) so edges to nested nodes rank their container.
     const topLevelOf = new Map<string, string>();
     for (const n of out) {
       if (n.id === ROOT_ID) continue;
-      topLevelOf.set(n.id, n.parentId === ROOT_ID ? n.id : n.parentId ?? n.id);
+      let cur: DesignNode | undefined = n;
+      while (cur && cur.parentId && cur.parentId !== ROOT_ID) {
+        cur = byId.get(cur.parentId);
+      }
+      topLevelOf.set(n.id, cur ? cur.id : n.id);
     }
 
     const g = new dagre.graphlib.Graph();
@@ -1088,8 +1146,14 @@ type StoredClusterCfg = {
   rs_version?: string;
   rec_nodes?: number;
   RS_admin?: string;
+  operator?: string;
   license?: string;
   databases?: Record<string, unknown>[];
+};
+
+type StoredOperatorCfg = {
+  name?: string;
+  operator_chart_version?: string;
 };
 
 type StoredAppCfg = {
@@ -1155,6 +1219,43 @@ export function createInputToDiagram(
           },
         ];
 
+  // GKE: rebuild the Redis Operators (containers) and remember each by slug so
+  // clusters can nest under the operator they reference. A pre-operator config
+  // (no `operators`) synthesizes a single default operator from the legacy
+  // deployment-wide operator_chart_version.
+  const operatorIdBySlug = new Map<string, string>();
+  const operatorIds: string[] = [];
+  if (mode === "gke" && !redisOff) {
+    const rawOps = Array.isArray(cfg.operators) ? (cfg.operators as StoredOperatorCfg[]) : [];
+    const opCfgs: StoredOperatorCfg[] = rawOps.length
+      ? rawOps
+      : [{ name: "operator", operator_chart_version: dstr(cfg.operator_chart_version) || "latest" }];
+    opCfgs.forEach((op, i) => {
+      const operatorId = nextId("operator");
+      operatorIds.push(operatorId);
+      const slug = clusterSlug(op.name || "") || (i <= 0 ? "operator" : `operator-${i + 1}`);
+      operatorIdBySlug.set(slug, operatorId);
+      nodes.push({
+        id: operatorId,
+        type: "operator",
+        parentId: ROOT_ID,
+        extent: "parent",
+        position: { x: 24 + i * 420, y: 48 },
+        style: { width: NODE_SIZE.operator.width, height: NODE_SIZE.operator.height },
+        data: {
+          kind: "operator",
+          name: op.name || (i <= 0 ? "operator" : `operator-${i + 1}`),
+          operator_chart_version: dstr(op.operator_chart_version) || "latest",
+        },
+      });
+    });
+  }
+  const clusterOperatorId = (c: StoredClusterCfg): string | undefined => {
+    if (mode !== "gke" || !operatorIds.length) return undefined;
+    const want = clusterSlug(c.operator || "");
+    return (want && operatorIdBySlug.get(want)) || operatorIds[0];
+  };
+
   const clusterIds: string[] = [];
   clusterCfgs.forEach((c, i) => {
     const clusterId = nextId("cluster");
@@ -1162,8 +1263,10 @@ export function createInputToDiagram(
     nodes.push({
       id: clusterId,
       type: "cluster",
-      parentId: ROOT_ID,
-      extent: "parent",
+      parentId: clusterOperatorId(c) ?? ROOT_ID,
+      // GKE clusters must stay draggable onto another operator, so they are not
+      // confined to their parent's extent (VM clusters sit under the root).
+      ...(mode === "gke" ? {} : { extent: "parent" as const }),
       position: { x: 24 + i * 290, y: 56 },
       style: { width: NODE_SIZE.cluster.width, height: NODE_SIZE.cluster.height },
       data: {

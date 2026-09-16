@@ -84,6 +84,52 @@ describe("renderTerraform (define render, no apply)", () => {
     assert.match(tfvars, /primary_admin@redis\.io/);
     assert.match(tfvars, /cache_admin@redis\.io/);
   });
+
+  it("renders GKE operators, each with its version + namespace and its RECs", () => {
+    const gke = {
+      name: "demo",
+      mode: "gke",
+      youremail: "jane_doe",
+      project: "proj",
+      credentialsFile: "key.json",
+      region_name: "europe-west1",
+      operators: [
+        { name: "operator", operator_chart_version: "latest" },
+        { name: "search-ops", operator_chart_version: "7.22.2-16" },
+      ],
+      clusters: [
+        { name: "cache", rec_nodes: 3, operator: "operator" },
+        { name: "search", rec_nodes: 5, operator: "search-ops" },
+      ],
+    } as unknown as CreateInstanceInput;
+    const { tfvars, variablesTf } = renderTerraform("gke", gke);
+    // The operators variable replaces the old flat rec_specs/operator_chart_version.
+    assert.match(variablesTf, /variable "operators"/);
+    assert.doesNotMatch(variablesTf, /variable "rec_specs"/);
+    // Each operator lands with its resolved chart version and namespace.
+    assert.match(tfvars, /chart_version\s*=\s*"7\.22\.2-16"/);
+    assert.match(tfvars, /namespace\s*=\s*"rec-ns"/); // default operator
+    assert.match(tfvars, /namespace\s*=\s*"rec-ns-search-ops"/);
+    // Each cluster becomes a REC grouped under its operator.
+    assert.match(tfvars, /demo-default-cache-rec/);
+    assert.match(tfvars, /demo-default-search-rec/);
+  });
+
+  it("synthesizes a single default operator for a pre-operator GKE config", () => {
+    const legacy = {
+      name: "demo",
+      mode: "gke",
+      youremail: "jane_doe",
+      project: "proj",
+      credentialsFile: "key.json",
+      operator_chart_version: "7.8.6-2",
+      clusters: [{ name: "cache", rec_nodes: 3 }],
+    } as unknown as CreateInstanceInput;
+    const { tfvars } = renderTerraform("gke", legacy);
+    assert.match(tfvars, /name\s*=\s*"operator"/);
+    assert.match(tfvars, /namespace\s*=\s*"rec-ns"/);
+    assert.match(tfvars, /chart_version\s*=\s*"7\.8\.6-2"/);
+  });
 });
 
 describe("create-config JSON Schema (MCP tool input)", () => {

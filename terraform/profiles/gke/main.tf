@@ -67,15 +67,13 @@ module "gke" {
 module "re_k8s" {
   source = "../../modules/re-k8s"
 
-  name_prefix            = local.name_prefix
-  project                = var.project
-  cluster_name           = module.gke.cluster_name
-  cluster_location       = module.gke.location
-  rec_nodes              = var.rec_nodes
-  rec_specs              = var.rec_specs
-  credentials_file       = abspath(var.credentials)
-  outputs_dir            = var.outputs_dir
-  operator_chart_version = var.operator_chart_version
+  name_prefix      = local.name_prefix
+  project          = var.project
+  cluster_name     = module.gke.cluster_name
+  cluster_location = module.gke.location
+  operators        = var.operators
+  credentials_file = abspath(var.credentials)
+  outputs_dir      = var.outputs_dir
 
   depends_on = [module.gke]
 }

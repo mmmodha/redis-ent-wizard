@@ -8,7 +8,8 @@ export const PALETTE_MIME = "application/x-redis-design-kind";
 type PaletteItem = { kind: NodeKind; label: string; icon: IconName; hint: string };
 
 const ITEMS: PaletteItem[] = [
-  { kind: "cluster", label: "Redis cluster", icon: "cluster", hint: "Drop on the network or GKE root" },
+  { kind: "operator", label: "Redis Operator", icon: "operator", hint: "Drop on the GKE root (GKE mode)" },
+  { kind: "cluster", label: "Redis cluster", icon: "cluster", hint: "Drop on the network root, or on an operator (GKE)" },
   { kind: "database", label: "Database", icon: "database", hint: "Drop inside a cluster" },
   { kind: "vms", label: "Set of VMs", icon: "vm", hint: "Drop on the network root (VM mode)" },
   { kind: "application", label: "Application", icon: "application", hint: "Drop on the root" },
@@ -29,6 +30,7 @@ export function Palette({
 }) {
   const items = ITEMS.filter((i) => {
     if (mode === "gke" && i.kind === "vms") return false;
+    if (mode === "vm" && i.kind === "operator") return false;
     return true;
   });
   return (

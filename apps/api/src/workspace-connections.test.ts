@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { buildCloudSql, buildRdi, buildVmRegistry, resolveVmConnections, resolveGkeConnections } from "./workspace.js";
-import { normalizeClusters } from "./clusters.js";
+import { normalizeClusters, normalizeOperators } from "./clusters.js";
 import { withRdiInternalDatabases } from "./rdi.js";
 import type { CreateInstanceInput } from "./types.js";
 
@@ -106,6 +106,7 @@ describe("resolveGkeConnections", () => {
     const { env, secretRefs } = resolveGkeConnections(
       { connectClusters: ["cache"], connectDatabases: ["sessions"], connectApps: ["web"], connectSql: ["orders"] },
       clusters,
+      normalizeOperators(input),
       "demo-default",
       ["web"],
       [],

@@ -5,6 +5,8 @@ import {
   countRedisClusters,
   normalizeClusterName,
   normalizeClusters,
+  normalizeOperators,
+  operatorForCluster,
   plannedDnsNames,
   summarizeClusters,
   totalClusterNodes,
@@ -27,6 +29,43 @@ describe("normalizeClusters RS_admin (per-cluster admin)", () => {
   it("defaults to admin@redis.io when nothing is set", () => {
     const clusters = normalizeClusters({ mode: "vm", clusters: [{ name: "a", nodes: 3 }] });
     assert.equal(clusters[0].RS_admin, "admin@redis.io");
+  });
+});
+
+describe("GKE operators", () => {
+  it("carries a cluster's operator reference through normalization", () => {
+    const clusters = normalizeClusters({
+      mode: "gke",
+      clusters: [{ name: "cache", rec_nodes: 3, operator: "search-ops" }],
+    });
+    assert.equal(clusters[0].operator, "search-ops");
+  });
+
+  it("synthesizes a single default operator when none are listed", () => {
+    const ops = normalizeOperators({ operator_chart_version: "7.8.6-2" });
+    assert.equal(ops.length, 1);
+    assert.equal(ops[0].name, "operator");
+    assert.equal(ops[0].namespace, "rec-ns");
+    assert.equal(ops[0].operator_chart_version, "7.8.6-2");
+  });
+
+  it("slugs operator names and derives per-operator namespaces", () => {
+    const ops = normalizeOperators({
+      operators: [{ name: "operator" }, { name: "Search Ops" }],
+    });
+    assert.deepEqual(ops.map((o) => o.name), ["operator", "search-ops"]);
+    assert.deepEqual(ops.map((o) => o.namespace), ["rec-ns", "rec-ns-search-ops"]);
+  });
+
+  it("rejects duplicate operator names", () => {
+    assert.throws(() => normalizeOperators({ operators: [{ name: "a" }, { name: "a" }] }));
+  });
+
+  it("matches a cluster to its operator, falling back to the first", () => {
+    const ops = normalizeOperators({ operators: [{ name: "a" }, { name: "b" }] });
+    assert.equal(operatorForCluster({ operator: "b" }, ops).name, "b");
+    assert.equal(operatorForCluster({ operator: "missing" }, ops).name, "a");
+    assert.equal(operatorForCluster({}, ops).name, "a");
   });
 });
 

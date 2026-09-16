@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { MachineTypePicker } from "@/components/MachineTypePicker";
-import { uploadArtifact, type MachineTypeInfo, type RsReleaseInfo } from "@/lib/api";
+import { uploadArtifact, type GkeOperatorInfo, type MachineTypeInfo, type RsReleaseInfo } from "@/lib/api";
 import {
   APP_REQUIREMENTS,
   ARTIFACT_SOURCE_OPTIONS,
@@ -17,6 +17,7 @@ import {
   type BigqueryData,
   type CloudSqlData,
   type LoadBalancerData,
+  type OperatorData,
   type PubsubData,
   type RdiData,
   type StorageData,
@@ -40,6 +41,8 @@ type Props = {
   machineTypes: MachineTypeInfo[];
   loadingMachines?: boolean;
   vmReleases: RsReleaseInfo[];
+  /** GKE operator chart versions to choose from (operator dialog). */
+  gkeReleases?: GkeOperatorInfo[];
   probeZone: string;
   /** Whether the database's parent cluster has NVMe disks (enables Flex). */
   clusterHasNvme?: boolean;
@@ -65,6 +68,7 @@ export function NodeDialog({
   machineTypes,
   loadingMachines,
   vmReleases,
+  gkeReleases = [],
   probeZone,
   clusterHasNvme,
   clusterNodes = 0,
@@ -93,6 +97,7 @@ export function NodeDialog({
   const titles: Record<string, string> = {
     network: "VPC network",
     gke: "GKE cluster",
+    operator: "Redis Operator",
     cluster: "Redis cluster",
     database: "Database",
     vms: "Set of VMs",
@@ -123,6 +128,10 @@ export function NodeDialog({
               loadingMachines={loadingMachines}
               probeZone={probeZone}
             />
+          ) : null}
+
+          {target.type === "operator" ? (
+            <OperatorForm data={draft as OperatorData} set={set} gkeReleases={gkeReleases} />
           ) : null}
 
           {target.type === "cluster" ? (
@@ -281,6 +290,47 @@ function ExposesNote({ kind, name }: { kind: NodeKind; name: string }) {
   );
 }
 
+function OperatorForm({
+  data,
+  set,
+  gkeReleases,
+}: {
+  data: OperatorData;
+  set: <T extends DesignNodeData>(p: Partial<T>) => void;
+  gkeReleases: GkeOperatorInfo[];
+}) {
+  const releases = gkeReleases.length
+    ? gkeReleases
+    : [{ id: "latest", label: "Latest operator chart", chartVersion: "" }];
+  return (
+    <div className="grid">
+      <label>
+        Operator name
+        <input
+          value={data.name}
+          onChange={(e) => set<OperatorData>({ name: e.target.value.slice(0, 40) })}
+          placeholder="operator"
+        />
+        <span className="hint">Names the operator&apos;s namespace; clusters dropped here run on it.</span>
+      </label>
+      <label>
+        Operator / Redis version
+        <select
+          value={data.operator_chart_version || "latest"}
+          onChange={(e) => set<OperatorData>({ operator_chart_version: e.target.value })}
+        >
+          {releases.map((r) => (
+            <option key={r.id} value={r.id}>
+              {r.label}
+            </option>
+          ))}
+        </select>
+        <span className="hint">The redis-enterprise-operator Helm chart version for this operator.</span>
+      </label>
+    </div>
+  );
+}
+
 function GkeRootForm({
   data,
   set,
@@ -419,7 +469,10 @@ function ClusterForm({
           </label>
         </>
       ) : (
-        <p className="hint">Redis version and node sizing come from the GKE operator chart and node pool.</p>
+        <p className="hint">
+          Redis version and node sizing come from the operator chart and node pool. Drag this cluster onto a
+          Redis Operator to choose which operator runs it.
+        </p>
       )}
       <label className="design-field-wide">
         License key

@@ -30,6 +30,7 @@ function nonEmpty(v: unknown): boolean {
 // not listed here is treated as a value array and replaced wholesale by a patch.
 const ARRAY_MATCH_KEY: Record<string, string> = {
   clusters: "name",
+  operators: "name",
   databases: "name",
   applications: "name",
   load_balancers: "name",
