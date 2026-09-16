@@ -1,10 +1,22 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { normalizeAppDiskGib, normalizeAppMachineTypes, parseAppExtraPorts } from "./app-web.js";
 import { normalizeApplications } from "./applications.js";
-import { clusterNamePrefix, normalizeClusters } from "./clusters.js";
+import {
+  clusterNamePrefix,
+  normalizeClusters,
+  normalizeOperators,
+  operatorForCluster,
+  type OperatorSpec,
+} from "./clusters.js";
+import { bucketFullName, bucketGrantRole, normalizeStorageBuckets } from "./storage.js";
+import { grantsPublisher, grantsSubscriber, normalizePubsub, topicFullName } from "./pubsub.js";
+import { datasetFullId, datasetGrantRole, normalizeBigquery } from "./bigquery.js";
+import { normalizeCloudSql, sqlDatabaseVersion, sqlInstanceFullName, sqlPort } from "./cloudsql.js";
+import { normalizeRdi, rdiFullName, rdiSourceNames, rdiStateDbName, renderRdiPipelineConfig } from "./rdi.js";
 import { resolveGkeOperatorChart } from "./rs-releases.js";
-import type { CreateInstanceInput, DeploymentMode } from "./types.js";
+import type { CreateInstanceInput, DatabaseSpec, DeploymentMode } from "./types.js";
 
 const terraformDir =
   process.env.TERRAFORM_DIR || path.resolve(process.cwd(), "../../terraform");
@@ -109,44 +121,474 @@ function vendorTerraform(workDir: string): string {
   return dest;
 }
 
-function injectClusterEnv(
-  env: Record<string, string> | undefined,
-  connectClusters: string[] | undefined,
-  clusterEndpoints: Map<string, string>,
-): Record<string, string> {
-  const out: Record<string, string> = { ...(env || {}) };
-  const connected = (connectClusters || []).filter(Boolean);
-  connected.forEach((name, i) => {
-    const host = clusterEndpoints.get(name);
-    if (!host) return;
-    const slug = name.toUpperCase().replace(/[^A-Z0-9]+/g, "_").replace(/^_+|_+$/g, "");
-    out[`REDIS_${slug}_HOST`] = host;
-    if (i === 0) out.REDIS_HOST = host;
-  });
-  return out;
+// In-cluster namespace for GKE app DNS wiring — must match the Terraform module.
+// REC namespaces are per-operator (see operatorForCluster / operatorNamespace).
+const GKE_APP_NS = "apps"; //  terraform/modules/app-k8s (var.namespace default)
+
+/** Uppercased env-var slug from a component name (e.g. "cache-1" -> "CACHE_1"). */
+function envSlug(name: string): string {
+  return name.toUpperCase().replace(/[^A-Z0-9]+/g, "_").replace(/^_+|_+$/g, "");
 }
 
-function buildVmApplications(
+/** A consumer's connection selections, from an app or the Set-of-VMs group. */
+interface ConnectSelections {
+  connectClusters?: string[];
+  connectDatabases?: string[];
+  connectLoadBalancers?: string[];
+  connectApps?: string[];
+  connectStorage?: string[];
+  connectPubsub?: string[];
+  connectBigquery?: string[];
+  connectSql?: string[];
+}
+
+/** Static Pub/Sub env values (global, identical for VM and GKE). */
+interface PubsubRef {
+  topic: string;
+  subscription: string;
+  project: string;
+}
+function pubsubEnvMap(input: CreateInstanceInput, prefix: string): Map<string, PubsubRef> {
+  const project = input.project || "";
+  const m = new Map<string, PubsubRef>();
+  for (const t of normalizePubsub(input)) {
+    const full = topicFullName(prefix, t.name);
+    m.set(t.name, {
+      topic: `projects/${project}/topics/${full}`,
+      subscription: t.create_subscription ? `projects/${project}/subscriptions/${full}-sub` : "",
+      project,
+    });
+  }
+  return m;
+}
+
+/** Static BigQuery env values (identical for VM and GKE). */
+interface BigqueryRef {
+  dataset: string;
+  project: string;
+  location: string;
+}
+function bigqueryEnvMap(input: CreateInstanceInput, prefix: string): Map<string, BigqueryRef> {
+  const project = input.project || "";
+  const region = input.region_name || "europe-west1";
+  const m = new Map<string, BigqueryRef>();
+  for (const d of normalizeBigquery(input)) {
+    m.set(d.name, { dataset: datasetFullId(prefix, d.name), project, location: d.location || region });
+  }
+  return m;
+}
+
+/** Static Cloud SQL env values; HOST + PASSWORD are apply-time (Terraform-merged). */
+interface SqlRef {
+  db: string;
+  user: string;
+  port: number;
+  connectionName: string;
+  instanceFull: string;
+}
+function sqlEnvMap(input: CreateInstanceInput, prefix: string): Map<string, SqlRef> {
+  const project = input.project || "";
+  const region = input.region_name || "europe-west1";
+  const m = new Map<string, SqlRef>();
+  for (const s of normalizeCloudSql(input)) {
+    const instanceFull = sqlInstanceFullName(prefix, s.name);
+    m.set(s.name, {
+      db: s.db_name,
+      user: s.db_user,
+      port: sqlPort(s.engine),
+      connectionName: `${project}:${region}:${instanceFull}`,
+      instanceFull,
+    });
+  }
+  return m;
+}
+
+/** Static env plus the apply-time refs that Terraform resolves in profiles/vm. */
+interface ResolvedConnections {
+  env: Record<string, string>;
+  /** REDIS_<C>_ADMIN_PASSWORD env-var name -> re_vm module index. */
+  connectClusterAdmin: Record<string, number>;
+  /** LB_<LB>_ENDPOINT env-var name -> load-balancer name. */
+  connectLb: Record<string, string>;
+  /** SQL env-var slug -> Cloud SQL instance full name (TF fills HOST + PASSWORD). */
+  connectSql: Record<string, string>;
+}
+
+interface VmRegistry {
+  clusterHosts: Map<string, string>;
+  clusterIndex: Map<string, number>;
+  dbEndpoints: Map<string, string>;
+  appHosts: Map<string, string>;
+  lbNames: Set<string>;
+  /** Bucket slug -> full bucket name (`<prefix>-<slug>`). */
+  storageBuckets: Map<string, string>;
+  /** Topic slug -> static Pub/Sub env values. */
+  pubsub: Map<string, PubsubRef>;
+  /** Dataset slug -> static BigQuery env values. */
+  bigquery: Map<string, BigqueryRef>;
+  /** Instance slug -> static Cloud SQL env values. */
+  sql: Map<string, SqlRef>;
+  /** Admin username per cluster, indexed by cluster position (clusterIndex). */
+  adminUsers: string[];
+  vmPrefix: string;
+  dnsSuffix: string;
+  appCount: number;
+}
+
+/** Provider registry for VM mode: predicted DNS hosts + apply-time ref keys. */
+export function buildVmRegistry(
   input: CreateInstanceInput,
-  clusterEndpoints: Map<string, string>,
-): Record<string, unknown>[] {
+  clusters: ReturnType<typeof normalizeClusters>,
+  vmPrefix: string,
+  dnsSuffix: string,
+): VmRegistry {
+  const clusterHosts = new Map<string, string>();
+  const clusterIndex = new Map<string, number>();
+  const dbEndpoints = new Map<string, string>();
+  clusters.forEach((c, i) => {
+    const prefix = clusterNamePrefix(vmPrefix, i, c.name);
+    const host = `cluster.${prefix}.${dnsSuffix}`;
+    const connectName = c.name || `cluster${i + 1}`;
+    clusterHosts.set(connectName, host);
+    clusterIndex.set(connectName, i);
+    if (c.name) {
+      clusterHosts.set(c.name, host);
+      clusterIndex.set(c.name, i);
+    }
+    if (i === 0) {
+      clusterHosts.set(vmPrefix, host);
+      clusterIndex.set(vmPrefix, i);
+    }
+    for (const db of c.databases || []) {
+      const port = db.port ?? 12000;
+      dbEndpoints.set(db.name, `redis-${port}.cluster.${prefix}.${dnsSuffix}:${port}`);
+    }
+  });
   const apps = normalizeApplications({ mode: "vm", applications: input.applications });
-  return apps.map((app) => ({
-    name: app.name,
-    artifact_local_path: app.artifactLocalPath || "",
-    artifact_type: app.artifact?.type || "binary",
-    artifact_filename: app.artifactFilename || (app.artifact?.type === "jar" ? "app.jar" : "app"),
-    git_url: app.artifact?.kind === "git" ? app.artifact.ref : "",
-    git_ref: app.artifact?.kind === "git" ? app.artifact.branch || "" : "",
-    command: app.command || "",
-    vm_count: app.vm_count ?? 1,
-    machine_type: app.machine_type || "e2-standard-2",
-    disk_gib: app.disk_gib ?? 0,
-    ports: app.ports || [],
-    env: injectClusterEnv(app.env, app.connectClusters, clusterEndpoints),
-    expose_http: app.expose === "http" || app.expose === "lb",
-    expose_https: app.expose === "https" || app.expose === "lb",
-    requirements: app.requirements || [],
+  const appHosts = new Map<string, string>();
+  for (const a of apps) appHosts.set(a.name, `${a.name}.${vmPrefix}.${dnsSuffix}`);
+  const lbNames = new Set<string>((input.load_balancers || []).map((lb) => lb.name));
+  const storageBuckets = new Map<string, string>();
+  for (const b of normalizeStorageBuckets(input)) storageBuckets.set(b.name, bucketFullName(vmPrefix, b.name));
+  return {
+    clusterHosts,
+    clusterIndex,
+    dbEndpoints,
+    appHosts,
+    lbNames,
+    storageBuckets,
+    pubsub: pubsubEnvMap(input, vmPrefix),
+    bigquery: bigqueryEnvMap(input, vmPrefix),
+    sql: sqlEnvMap(input, vmPrefix),
+    adminUsers: clusters.map((c) => c.RS_admin || input.RS_admin || "admin@redis.io"),
+    vmPrefix,
+    dnsSuffix,
+    appCount: input.app ?? 0,
+  };
+}
+
+/** Resolve one consumer's connections against the VM registry. */
+export function resolveVmConnections(sel: ConnectSelections, reg: VmRegistry): ResolvedConnections {
+  const env: Record<string, string> = {};
+  const connectClusterAdmin: Record<string, number> = {};
+  const connectLb: Record<string, string> = {};
+  const connectSql: Record<string, string> = {};
+
+  (sel.connectClusters || []).filter(Boolean).forEach((name, i) => {
+    const host = reg.clusterHosts.get(name);
+    if (host === undefined) return;
+    const slug = envSlug(name);
+    env[`REDIS_${slug}_HOST`] = host;
+    if (i === 0) env.REDIS_HOST = host;
+    const idx = reg.clusterIndex.get(name);
+    // The admin username is the target cluster's own (fallback to the first).
+    env[`REDIS_${slug}_ADMIN_USER`] =
+      reg.adminUsers[idx ?? 0] ?? reg.adminUsers[0] ?? "admin@redis.io";
+    if (idx !== undefined) connectClusterAdmin[`REDIS_${slug}_ADMIN_PASSWORD`] = idx;
+  });
+
+  for (const db of (sel.connectDatabases || []).filter(Boolean)) {
+    const endpoint = reg.dbEndpoints.get(db);
+    if (endpoint) env[`REDIS_${envSlug(db)}_ENDPOINT`] = endpoint;
+  }
+
+  for (const name of (sel.connectApps || []).filter(Boolean)) {
+    // Known application name, otherwise the single Set-of-VMs group ("app.<prefix>").
+    const host =
+      reg.appHosts.get(name) ?? (reg.appCount > 0 ? `app.${reg.vmPrefix}.${reg.dnsSuffix}` : undefined);
+    if (host) env[`${envSlug(name)}_HOST`] = host;
+  }
+
+  for (const lb of (sel.connectLoadBalancers || []).filter(Boolean)) {
+    if (reg.lbNames.has(lb)) connectLb[`LB_${envSlug(lb)}_ENDPOINT`] = lb;
+  }
+
+  for (const bucket of (sel.connectStorage || []).filter(Boolean)) {
+    const full = reg.storageBuckets.get(bucket);
+    if (full) {
+      const slug = envSlug(bucket);
+      env[`GCS_${slug}_BUCKET`] = full;
+      env[`GCS_${slug}_URL`] = `gs://${full}`;
+    }
+  }
+
+  injectPubsubEnv(env, sel.connectPubsub, reg.pubsub);
+  injectBigqueryEnv(env, sel.connectBigquery, reg.bigquery);
+
+  for (const s of (sel.connectSql || []).filter(Boolean)) {
+    const ref = reg.sql.get(s);
+    if (!ref) continue;
+    const slug = envSlug(s);
+    // Static parts inline; HOST + PASSWORD are filled by Terraform from the instance.
+    env[`SQL_${slug}_DB`] = ref.db;
+    env[`SQL_${slug}_USER`] = ref.user;
+    env[`SQL_${slug}_PORT`] = String(ref.port);
+    env[`SQL_${slug}_CONNECTION_NAME`] = ref.connectionName;
+    connectSql[slug] = ref.instanceFull;
+  }
+
+  return { env, connectClusterAdmin, connectLb, connectSql };
+}
+
+/** Shared Pub/Sub env injection (VM and GKE produce identical values). */
+function injectPubsubEnv(
+  env: Record<string, string>,
+  connectPubsub: string[] | undefined,
+  pubsub: Map<string, PubsubRef>,
+): void {
+  for (const p of (connectPubsub || []).filter(Boolean)) {
+    const ref = pubsub.get(p);
+    if (!ref) continue;
+    const slug = envSlug(p);
+    env[`PUBSUB_${slug}_TOPIC`] = ref.topic;
+    if (ref.subscription) env[`PUBSUB_${slug}_SUBSCRIPTION`] = ref.subscription;
+    env[`PUBSUB_${slug}_PROJECT`] = ref.project;
+  }
+}
+
+/** Shared BigQuery env injection (VM and GKE produce identical values). */
+function injectBigqueryEnv(
+  env: Record<string, string>,
+  connectBigquery: string[] | undefined,
+  bigquery: Map<string, BigqueryRef>,
+): void {
+  for (const d of (connectBigquery || []).filter(Boolean)) {
+    const ref = bigquery.get(d);
+    if (!ref) continue;
+    const slug = envSlug(d);
+    env[`BIGQUERY_${slug}_DATASET`] = ref.dataset;
+    env[`BIGQUERY_${slug}_PROJECT`] = ref.project;
+    env[`BIGQUERY_${slug}_LOCATION`] = ref.location;
+  }
+}
+
+function buildVmApplications(input: CreateInstanceInput, reg: VmRegistry): Record<string, unknown>[] {
+  const apps = normalizeApplications({ mode: "vm", applications: input.applications });
+  return apps.map((app) => {
+    const conn = resolveVmConnections(app, reg);
+    return {
+      name: app.name,
+      artifact_local_path: app.artifactLocalPath || "",
+      artifact_type: app.artifact?.type || "binary",
+      artifact_filename: app.artifactFilename || (app.artifact?.type === "jar" ? "app.jar" : "app"),
+      git_url: app.artifact?.kind === "git" ? app.artifact.ref : "",
+      git_ref: app.artifact?.kind === "git" ? app.artifact.branch || "" : "",
+      command: app.command || "",
+      vm_count: app.vm_count ?? 1,
+      machine_type: app.machine_type || "e2-standard-2",
+      disk_gib: app.disk_gib ?? 0,
+      ports: app.ports || [],
+      env: { ...(app.env || {}), ...conn.env },
+      connect_cluster_admin: conn.connectClusterAdmin,
+      connect_lb: conn.connectLb,
+      connect_sql: conn.connectSql,
+      expose_http: app.expose === "http" || app.expose === "lb",
+      expose_https: app.expose === "https" || app.expose === "lb",
+      requirements: app.requirements || [],
+    };
+  });
+}
+
+/** Connections for the single Set-of-VMs group (app_vm), from input.vms_connect. */
+function buildVmSetConnections(input: CreateInstanceInput, reg: VmRegistry): ResolvedConnections {
+  const vc = input.vms_connect || {};
+  return resolveVmConnections(
+    {
+      connectClusters: vc.clusters,
+      connectDatabases: vc.databases,
+      connectLoadBalancers: vc.load_balancers,
+      connectApps: vc.apps,
+      connectStorage: vc.storage,
+      connectPubsub: vc.pubsub,
+      connectBigquery: vc.bigquery,
+      connectSql: vc.sql,
+    },
+    reg,
+  );
+}
+
+/** Instance short-names that at least one consumer connects to. */
+function connectedSqlNames(input: CreateInstanceInput): Set<string> {
+  const set = new Set<string>();
+  for (const a of input.applications || []) for (const s of a.connectSql || []) set.add(String(s));
+  for (const s of input.vms_connect?.sql || []) set.add(String(s));
+  return set;
+}
+
+/** tfvars for the shared cloudsql module; grant_client set only for connected instances. */
+export function buildCloudSql(input: CreateInstanceInput, prefix: string): Record<string, unknown>[] {
+  const connected = connectedSqlNames(input);
+  // A Cloud SQL instance wired as an RDI source needs CDC enabled even if the
+  // user did not toggle it directly.
+  const rdiSources = rdiSourceNames(input);
+  return normalizeCloudSql(input).map((s) => ({
+    name: sqlInstanceFullName(prefix, s.name),
+    database_version: sqlDatabaseVersion(s.engine),
+    tier: s.tier,
+    db_name: s.db_name,
+    db_user: s.db_user,
+    connectivity: s.connectivity,
+    grant_client: connected.has(s.name),
+    cdc_enabled: s.cdc_enabled || rdiSources.has(s.name),
+  }));
+}
+
+// Pinned RDI versions (overridable per deployment later). Verify against the
+// current Redis Data Integration release before relying on these in a real apply.
+const RDI_VM_VERSION = "1.6.4";
+const RDI_CHART_VERSION = "";
+
+interface RdiTfvars {
+  rdi_enabled: boolean;
+  rdi: Record<string, unknown>;
+  rdi_connect_cluster_admin: Record<string, number>;
+  rdi_connect_sql: Record<string, string>;
+}
+
+/**
+ * tfvars for the RDI runtime: static env values plus the apply-time reference
+ * maps that the VM profile resolves (cluster-admin password + Cloud SQL source
+ * host/password). Returns a disabled shell when no RDI is configured.
+ */
+export function buildRdi(input: CreateInstanceInput, prefix: string, mode: DeploymentMode): RdiTfvars {
+  const disabled: RdiTfvars = {
+    rdi_enabled: false,
+    rdi: { name: "", machine_type: "", version: "", chart_version: "", env: {}, pipeline_config: "" },
+    rdi_connect_cluster_admin: {},
+    rdi_connect_sql: {},
+  };
+  const rdi = normalizeRdi(input);
+  if (!rdi) return disabled;
+
+  const clusters = normalizeClusters(mode === "gke" ? { ...input, mode: "gke" } : input);
+  const operators = mode === "gke" ? normalizeOperators(input) : [];
+  const dnsSuffix = input.dns_zone_dns_name || "demo.redislabs.com";
+  const endpointOf = (clusterIdx: number, db: DatabaseSpec): { host: string; port: number } => {
+    const port = db.port ?? 12000;
+    if (mode === "gke") {
+      const ns = operatorForCluster(clusters[clusterIdx], operators).namespace;
+      return { host: `${db.name}.${ns}.svc.cluster.local`, port };
+    }
+    const cprefix = clusterNamePrefix(prefix, clusterIdx, clusters[clusterIdx].name);
+    return { host: `redis-${port}.cluster.${cprefix}.${dnsSuffix}`, port };
+  };
+  const findDb = (name?: string): { db: DatabaseSpec; clusterIdx: number } | null => {
+    if (!name) return null;
+    for (let i = 0; i < clusters.length; i++) {
+      const db = (clusters[i].databases || []).find((d) => d.name === name);
+      if (db) return { db, clusterIdx: i };
+    }
+    return null;
+  };
+
+  const env: Record<string, string> = {};
+  const connectClusterAdmin: Record<string, number> = {};
+  const connectSql: Record<string, string> = {};
+
+  const target = findDb(rdi.target);
+  if (target) {
+    const { host, port } = endpointOf(target.clusterIdx, target.db);
+    env.RDI_TARGET_HOST = host;
+    env.RDI_TARGET_PORT = String(port);
+    if (target.db.password) env.RDI_TARGET_PASSWORD = target.db.password;
+    env.RDI_REDIS_ADMIN_USER =
+      clusters[target.clusterIdx]?.RS_admin || input.RS_admin || "admin@redis.io";
+    // Cluster admin password is apply-time on VM; on GKE it is read from the RE secret at deploy.
+    if (mode === "vm") connectClusterAdmin.RDI_REDIS_ADMIN_PASSWORD = target.clusterIdx;
+  }
+
+  const state = findDb(rdiStateDbName(rdi.name));
+  if (state) {
+    const { host, port } = endpointOf(state.clusterIdx, state.db);
+    env.RDI_STATE_HOST = host;
+    env.RDI_STATE_PORT = String(port);
+    if (state.db.password) env.RDI_STATE_PASSWORD = state.db.password;
+  }
+
+  // Source connection details: static parts inline; host/password apply-time (VM only).
+  const sqlMap = sqlEnvMap(input, prefix);
+  for (const p of rdi.pipelines) {
+    const ref = sqlMap.get(p.source);
+    if (!ref) continue;
+    const slug = envSlug(p.source);
+    env[`SQL_${slug}_DB`] = ref.db;
+    env[`SQL_${slug}_USER`] = ref.user;
+    env[`SQL_${slug}_PORT`] = String(ref.port);
+    env[`SQL_${slug}_CONNECTION_NAME`] = ref.connectionName;
+    if (mode === "vm") connectSql[slug] = ref.instanceFull;
+  }
+
+  return {
+    rdi_enabled: true,
+    rdi: {
+      name: rdiFullName(prefix, rdi.name),
+      machine_type: rdi.machine_type,
+      version: RDI_VM_VERSION,
+      chart_version: RDI_CHART_VERSION,
+      env,
+      pipeline_config: renderRdiPipelineConfig(rdi),
+    },
+    rdi_connect_cluster_admin: connectClusterAdmin,
+    rdi_connect_sql: connectSql,
+  };
+}
+
+/** Topic short-names that at least one consumer connects to. */
+function connectedPubsubNames(input: CreateInstanceInput): Set<string> {
+  const set = new Set<string>();
+  for (const a of input.applications || []) for (const p of a.connectPubsub || []) set.add(String(p));
+  for (const p of input.vms_connect?.pubsub || []) set.add(String(p));
+  return set;
+}
+
+/** tfvars for the shared pubsub module; grants set only for connected topics. */
+function buildPubsub(input: CreateInstanceInput, prefix: string): Record<string, unknown>[] {
+  const connected = connectedPubsubNames(input);
+  return normalizePubsub(input).map((t) => ({
+    name: topicFullName(prefix, t.name),
+    create_subscription: t.create_subscription,
+    grant_publisher: connected.has(t.name) && grantsPublisher(t.role),
+    grant_subscriber: connected.has(t.name) && grantsSubscriber(t.role),
+  }));
+}
+
+/** Dataset short-names that at least one consumer connects to. */
+function connectedBigqueryNames(input: CreateInstanceInput): Set<string> {
+  const set = new Set<string>();
+  for (const a of input.applications || []) for (const d of a.connectBigquery || []) set.add(String(d));
+  for (const d of input.vms_connect?.bigquery || []) set.add(String(d));
+  return set;
+}
+
+/** tfvars for the shared bigquery module; grants set only for connected datasets. */
+function buildBigquery(input: CreateInstanceInput, prefix: string): Record<string, unknown>[] {
+  const connected = connectedBigqueryNames(input);
+  const region = input.region_name || "europe-west1";
+  return normalizeBigquery(input).map((d) => ({
+    name: datasetFullId(prefix, d.name),
+    location: d.location || region,
+    grant_role: connected.has(d.name) ? datasetGrantRole(d.access) : "",
+    grant_jobuser: connected.has(d.name),
   }));
 }
 
@@ -160,17 +602,178 @@ function buildLoadBalancers(input: CreateInstanceInput): Record<string, unknown>
   }));
 }
 
+/** Bucket short-names that at least one consumer (app or Set-of-VMs) connects to. */
+function connectedStorageNames(input: CreateInstanceInput): Set<string> {
+  const set = new Set<string>();
+  for (const a of input.applications || []) for (const s of a.connectStorage || []) set.add(String(s));
+  for (const s of input.vms_connect?.storage || []) set.add(String(s));
+  return set;
+}
+
+/** tfvars for the shared storage module; `grant_role` set only for connected buckets. */
+function buildStorageBuckets(input: CreateInstanceInput, prefix: string): Record<string, unknown>[] {
+  const connected = connectedStorageNames(input);
+  const defaultLocation = input.region_name || "europe-west1";
+  return normalizeStorageBuckets(input).map((b) => ({
+    name: bucketFullName(prefix, b.name),
+    location: b.location || defaultLocation,
+    storage_class: b.storage_class,
+    versioning: b.versioning,
+    force_destroy: b.force_destroy,
+    grant_role: connected.has(b.name) ? bucketGrantRole(b.access) : "",
+  }));
+}
+
+interface GkeSecretRef {
+  name: string;
+  secret: string;
+  key: string;
+}
+
+/** Resolve GKE connections to in-cluster DNS; admin creds via optional secretKeyRef. */
+export function resolveGkeConnections(
+  sel: ConnectSelections,
+  clusters: ReturnType<typeof normalizeClusters>,
+  operators: OperatorSpec[],
+  prefix: string,
+  apps: string[],
+  storageBuckets: Map<string, string> = new Map(),
+  pubsub: Map<string, PubsubRef> = new Map(),
+  bigquery: Map<string, BigqueryRef> = new Map(),
+  sql: Map<string, SqlRef> = new Map(),
+): { env: Record<string, string>; secretRefs: GkeSecretRef[] } {
+  const env: Record<string, string> = {};
+  const secretRefs: GkeSecretRef[] = [];
+
+  const clusterHost = new Map<string, string>();
+  const clusterSecret = new Map<string, string>();
+  const dbEndpoints = new Map<string, string>();
+  clusters.forEach((c, i) => {
+    const recName = `${clusterNamePrefix(prefix, i, c.name)}-rec`;
+    const connectName = c.name || `cluster${i + 1}`;
+    const ns = operatorForCluster(c, operators).namespace;
+    const host = `${recName}.${ns}.svc.cluster.local`;
+    clusterHost.set(connectName, host);
+    clusterSecret.set(connectName, recName);
+    if (c.name) {
+      clusterHost.set(c.name, host);
+      clusterSecret.set(c.name, recName);
+    }
+    for (const db of c.databases || []) {
+      const port = db.port ?? 12000;
+      dbEndpoints.set(db.name, `${db.name}.${ns}.svc.cluster.local:${port}`);
+    }
+  });
+
+  (sel.connectClusters || []).filter(Boolean).forEach((name, i) => {
+    const host = clusterHost.get(name);
+    if (host === undefined) return;
+    const slug = envSlug(name);
+    env[`REDIS_${slug}_HOST`] = host;
+    if (i === 0) env.REDIS_HOST = host;
+    const secret = clusterSecret.get(name);
+    if (secret) {
+      // The redis-enterprise operator stores REC credentials in a secret named
+      // after the REC; optional so a name/key mismatch never blocks the pod.
+      secretRefs.push({ name: `REDIS_${slug}_ADMIN_USER`, secret, key: "username" });
+      secretRefs.push({ name: `REDIS_${slug}_ADMIN_PASSWORD`, secret, key: "password" });
+    }
+  });
+
+  for (const db of (sel.connectDatabases || []).filter(Boolean)) {
+    const endpoint = dbEndpoints.get(db);
+    if (endpoint) env[`REDIS_${envSlug(db)}_ENDPOINT`] = endpoint;
+  }
+
+  const appSet = new Set(apps);
+  for (const name of (sel.connectApps || []).filter(Boolean)) {
+    if (appSet.has(name)) env[`${envSlug(name)}_HOST`] = `${name}.${GKE_APP_NS}.svc.cluster.local`;
+  }
+
+  for (const bucket of (sel.connectStorage || []).filter(Boolean)) {
+    const full = storageBuckets.get(bucket);
+    if (full) {
+      const slug = envSlug(bucket);
+      env[`GCS_${slug}_BUCKET`] = full;
+      env[`GCS_${slug}_URL`] = `gs://${full}`;
+    }
+  }
+
+  injectPubsubEnv(env, sel.connectPubsub, pubsub);
+  injectBigqueryEnv(env, sel.connectBigquery, bigquery);
+
+  // GKE gets the static Cloud SQL vars; host/password are apply-time — pods use
+  // the Cloud SQL Auth Proxy + connection name (documented, not injected here).
+  for (const s of (sel.connectSql || []).filter(Boolean)) {
+    const ref = sql.get(s);
+    if (!ref) continue;
+    const slug = envSlug(s);
+    env[`SQL_${slug}_DB`] = ref.db;
+    env[`SQL_${slug}_USER`] = ref.user;
+    env[`SQL_${slug}_PORT`] = String(ref.port);
+    env[`SQL_${slug}_CONNECTION_NAME`] = ref.connectionName;
+  }
+
+  return { env, secretRefs };
+}
+
+/**
+ * Group the normalized GKE clusters under their operators and produce the
+ * per-operator tfvars: each operator carries its resolved Helm chart version,
+ * its namespace, and the RECs (name + node count) it owns. Clusters whose
+ * `operator` is unset/unknown fall back to the first operator.
+ */
+export function buildGkeOperators(
+  input: CreateInstanceInput,
+  clusters: ReturnType<typeof normalizeClusters>,
+  prefix: string,
+): Record<string, unknown>[] {
+  const operators = normalizeOperators(input);
+  const recsByOperator = new Map<string, Array<{ name: string; nodes: number }>>();
+  for (const op of operators) recsByOperator.set(op.name, []);
+  clusters.forEach((c, i) => {
+    const op = operatorForCluster(c, operators);
+    recsByOperator.get(op.name)!.push({
+      name: `${clusterNamePrefix(prefix, i, c.name)}-rec`,
+      nodes: c.rec_nodes,
+    });
+  });
+  return operators.map((op) => ({
+    name: op.name,
+    namespace: op.namespace,
+    chart_version: resolveGkeOperatorChart(op.operator_chart_version),
+    recs: recsByOperator.get(op.name) || [],
+  }));
+}
+
 function buildGkeApplications(input: CreateInstanceInput): Record<string, unknown>[] {
   const apps = normalizeApplications({ mode: "gke", applications: input.applications });
-  return apps.map((app) => ({
-    name: app.name,
-    image: app.image || "",
-    command: app.command || "",
-    replicas: app.replicas ?? 1,
-    ports: app.ports || [],
-    env: app.env || {},
-    expose: app.expose || "none",
-  }));
+  const clusters = normalizeClusters({ ...input, mode: "gke" });
+  const operators = normalizeOperators(input);
+  const prefix = `${input.name}-${input.env || "default"}`;
+  const appNames = apps.map((a) => a.name);
+  const storageBuckets = new Map<string, string>();
+  for (const b of normalizeStorageBuckets(input)) storageBuckets.set(b.name, bucketFullName(prefix, b.name));
+  const pubsub = pubsubEnvMap(input, prefix);
+  const bigquery = bigqueryEnvMap(input, prefix);
+  const sql = sqlEnvMap(input, prefix);
+  return apps.map((app) => {
+    const conn = resolveGkeConnections(app, clusters, operators, prefix, appNames, storageBuckets, pubsub, bigquery, sql);
+    return {
+      name: app.name,
+      image: app.image || "",
+      command: app.command || "",
+      replicas: app.replicas ?? 1,
+      ports: app.ports || [],
+      env: { ...(app.env || {}), ...conn.env },
+      env_secret_refs: conn.secretRefs.map((r) => ({
+        name: r.name,
+        secret_name: r.secret,
+        secret_key: r.key,
+      })),
+      expose: app.expose || "none",
+    };
+  });
 }
 
 export function vmStackModuleArguments(): string {
@@ -195,6 +798,18 @@ export function vmStackModuleArguments(): string {
   ssh_private_key_path = var.ssh_private_key_path
   applications     = var.applications
   load_balancers   = var.load_balancers
+  storage_buckets  = var.storage_buckets
+  pubsub_topics    = var.pubsub_topics
+  bigquery_datasets = var.bigquery_datasets
+  cloud_sql_instances = var.cloud_sql_instances
+  app_injected_env = var.app_injected_env
+  app_connect_cluster_admin = var.app_connect_cluster_admin
+  app_connect_lb   = var.app_connect_lb
+  app_connect_sql  = var.app_connect_sql
+  rdi_enabled      = var.rdi_enabled
+  rdi              = var.rdi
+  rdi_connect_cluster_admin = var.rdi_connect_cluster_admin
+  rdi_connect_sql  = var.rdi_connect_sql
 `;
 }
 
@@ -203,12 +818,13 @@ export function writeInstanceWorkspace(
   mode: DeploymentMode,
   input: CreateInstanceInput,
   credentialsAbs: string,
+  opts?: { sshPublicKey?: string },
 ): void {
   fs.mkdirSync(workDir, { recursive: true });
 
   vendorTerraform(workDir);
   const profileSource = `./tf/profiles/${mode}`;
-  const sshKey = mode === "vm" ? resolveSshPublicKey() : "";
+  const sshKey = mode === "vm" ? opts?.sshPublicKey ?? resolveSshPublicKey() : "";
 
   const rootTf = `terraform {
   required_version = ">= 1.5.0"
@@ -256,11 +872,15 @@ ${
     : `
   gke_clustersize          = var.gke_clustersize
   gke_machine_type         = var.gke_machine_type
-  rec_nodes                = var.rec_nodes
-  rec_specs                = var.rec_specs
-  operator_chart_version   = var.operator_chart_version
+  operators                = var.operators
   outputs_dir              = var.outputs_dir
   applications             = var.applications
+  storage_buckets          = var.storage_buckets
+  pubsub_topics            = var.pubsub_topics
+  bigquery_datasets        = var.bigquery_datasets
+  cloud_sql_instances      = var.cloud_sql_instances
+  rdi_enabled              = var.rdi_enabled
+  rdi                      = var.rdi
 `
 }
 }
@@ -294,6 +914,11 @@ output "clusters" {
 }
 output "app_workloads" { value = module.stack.app_workloads }
 output "load_balancers" { value = module.stack.load_balancers }
+output "storage_buckets" { value = module.stack.storage_buckets }
+output "pubsub_topics" { value = module.stack.pubsub_topics }
+output "bigquery_datasets" { value = module.stack.bigquery_datasets }
+output "cloud_sql_instances" { value = module.stack.cloud_sql_instances }
+output "rdi" { value = module.stack.rdi }
 output "deployment_mode" { value = module.stack.deployment_mode }
 `
     : `
@@ -305,6 +930,11 @@ output "rec_names" { value = module.stack.rec_names }
 output "rec_namespace" { value = module.stack.rec_namespace }
 output "k8s_outputs_file" { value = module.stack.k8s_outputs_file }
 output "app_outputs_file" { value = module.stack.app_outputs_file }
+output "storage_buckets" { value = module.stack.storage_buckets }
+output "pubsub_topics" { value = module.stack.pubsub_topics }
+output "bigquery_datasets" { value = module.stack.bigquery_datasets }
+output "cloud_sql_instances" { value = module.stack.cloud_sql_instances }
+output "rdi" { value = module.stack.rdi }
 output "deployment_mode" { value = module.stack.deployment_mode }
 `
 }
@@ -331,6 +961,7 @@ variable "clusters" {
     machine_type   = string
     rof_nvme_disks = number
     RS_release     = string
+    RS_admin       = optional(string, "admin@redis.io")
   }))
 }
 variable "RS_admin" { type = string }
@@ -352,21 +983,24 @@ variable "ssh_public_key" { type = string }
 variable "ssh_private_key_path" { type = string }
 variable "applications" {
   type = list(object({
-    name                = string
-    artifact_local_path = string
-    artifact_type       = string
-    artifact_filename   = string
-    git_url             = string
-    git_ref             = string
-    command             = string
-    vm_count            = number
-    machine_type        = string
-    disk_gib            = number
-    ports               = list(number)
-    env                 = map(string)
-    expose_http         = bool
-    expose_https        = bool
-    requirements        = list(string)
+    name                  = string
+    artifact_local_path   = string
+    artifact_type         = string
+    artifact_filename     = string
+    git_url               = string
+    git_ref               = string
+    command               = string
+    vm_count              = number
+    machine_type          = string
+    disk_gib              = number
+    ports                 = list(number)
+    env                   = map(string)
+    connect_cluster_admin = map(number)
+    connect_lb            = map(string)
+    connect_sql           = map(string)
+    expose_http           = bool
+    expose_https          = bool
+    requirements          = list(string)
   }))
   default = []
 }
@@ -379,6 +1013,94 @@ variable "load_balancers" {
   }))
   default = []
 }
+variable "app_injected_env" {
+  type    = map(string)
+  default = {}
+}
+variable "app_connect_cluster_admin" {
+  type    = map(number)
+  default = {}
+}
+variable "app_connect_lb" {
+  type    = map(string)
+  default = {}
+}
+variable "app_connect_sql" {
+  type    = map(string)
+  default = {}
+}
+variable "storage_buckets" {
+  type = list(object({
+    name          = string
+    location      = string
+    storage_class = string
+    versioning    = bool
+    force_destroy = bool
+    grant_role    = string
+  }))
+  default = []
+}
+variable "pubsub_topics" {
+  type = list(object({
+    name                = string
+    create_subscription = bool
+    grant_publisher     = bool
+    grant_subscriber    = bool
+  }))
+  default = []
+}
+variable "bigquery_datasets" {
+  type = list(object({
+    name          = string
+    location      = string
+    grant_role    = string
+    grant_jobuser = bool
+  }))
+  default = []
+}
+variable "cloud_sql_instances" {
+  type = list(object({
+    name             = string
+    database_version = string
+    tier             = string
+    db_name          = string
+    db_user          = string
+    connectivity     = string
+    grant_client     = bool
+    cdc_enabled      = bool
+  }))
+  default = []
+}
+variable "rdi_enabled" {
+  type    = bool
+  default = false
+}
+variable "rdi" {
+  type = object({
+    name            = string
+    machine_type    = string
+    version         = string
+    chart_version   = string
+    env             = map(string)
+    pipeline_config = string
+  })
+  default = {
+    name            = ""
+    machine_type    = ""
+    version         = ""
+    chart_version   = ""
+    env             = {}
+    pipeline_config = ""
+  }
+}
+variable "rdi_connect_cluster_admin" {
+  type    = map(number)
+  default = {}
+}
+variable "rdi_connect_sql" {
+  type    = map(string)
+  default = {}
+}
 `
       : `
 variable "yourname" { type = string }
@@ -390,14 +1112,17 @@ variable "env" { type = string }
 variable "region_name" { type = string }
 variable "gke_clustersize" { type = number }
 variable "gke_machine_type" { type = string }
-variable "rec_nodes" { type = number }
-variable "rec_specs" {
+variable "operators" {
   type = list(object({
-    name  = string
-    nodes = number
+    name          = string
+    namespace     = string
+    chart_version = string
+    recs = list(object({
+      name  = string
+      nodes = number
+    }))
   }))
 }
-variable "operator_chart_version" { type = string }
 variable "dns_managed_zone" { type = string }
 variable "dns_zone_dns_name" { type = string }
 variable "rs_private_subnet" { type = string }
@@ -411,9 +1136,78 @@ variable "applications" {
     replicas = number
     ports    = list(number)
     env      = map(string)
-    expose   = string
+    env_secret_refs = list(object({
+      name        = string
+      secret_name = string
+      secret_key  = string
+    }))
+    expose = string
   }))
   default = []
+}
+variable "storage_buckets" {
+  type = list(object({
+    name          = string
+    location      = string
+    storage_class = string
+    versioning    = bool
+    force_destroy = bool
+    grant_role    = string
+  }))
+  default = []
+}
+variable "pubsub_topics" {
+  type = list(object({
+    name                = string
+    create_subscription = bool
+    grant_publisher     = bool
+    grant_subscriber    = bool
+  }))
+  default = []
+}
+variable "bigquery_datasets" {
+  type = list(object({
+    name          = string
+    location      = string
+    grant_role    = string
+    grant_jobuser = bool
+  }))
+  default = []
+}
+variable "cloud_sql_instances" {
+  type = list(object({
+    name             = string
+    database_version = string
+    tier             = string
+    db_name          = string
+    db_user          = string
+    connectivity     = string
+    grant_client     = bool
+    cdc_enabled      = bool
+  }))
+  default = []
+}
+variable "rdi_enabled" {
+  type    = bool
+  default = false
+}
+variable "rdi" {
+  type = object({
+    name            = string
+    machine_type    = string
+    version         = string
+    chart_version   = string
+    env             = map(string)
+    pipeline_config = string
+  })
+  default = {
+    name            = ""
+    machine_type    = ""
+    version         = ""
+    chart_version   = ""
+    env             = {}
+    pipeline_config = ""
+  }
 }
 `;
 
@@ -447,8 +1241,10 @@ variable "applications" {
         machine_type: c.machine_type,
         rof_nvme_disks: c.rof_nvme_disks,
         RS_release: c.RS_release,
+        RS_admin: c.RS_admin,
       })),
-      RS_admin: input.RS_admin || "admin@redis.io",
+      // Deployment-wide fallback; each cluster carries its own RS_admin above.
+      RS_admin: clusters[0]?.RS_admin || input.RS_admin || "admin@redis.io",
       app: input.app ?? 0,
       app_machine_types: normalizeAppMachineTypes({
         app: input.app ?? 0,
@@ -471,29 +1267,41 @@ variable "applications" {
     });
     const vmPrefix = `${input.name}-${input.env || "default"}`;
     const dnsSuffix = String(tfvars.dns_zone_dns_name);
-    const clusterEndpoints = new Map<string, string>();
-    clusters.forEach((c, i) => {
-      const host = `cluster.${clusterNamePrefix(vmPrefix, i, c.name)}.${dnsSuffix}`;
-      if (c.name) clusterEndpoints.set(c.name, host);
-      if (i === 0) clusterEndpoints.set(vmPrefix, host);
-    });
-    tfvars.applications = buildVmApplications(input, clusterEndpoints);
+    const registry = buildVmRegistry(input, clusters, vmPrefix, dnsSuffix);
+    tfvars.applications = buildVmApplications(input, registry);
     tfvars.load_balancers = buildLoadBalancers(input);
+    // Connections for the Set-of-VMs group (app_vm); TF fills in admin pw + LB VIP.
+    const vmsConn = buildVmSetConnections(input, registry);
+    tfvars.app_injected_env = vmsConn.env;
+    tfvars.app_connect_cluster_admin = vmsConn.connectClusterAdmin;
+    tfvars.app_connect_lb = vmsConn.connectLb;
+    tfvars.storage_buckets = buildStorageBuckets(input, vmPrefix);
+    tfvars.pubsub_topics = buildPubsub(input, vmPrefix);
+    tfvars.bigquery_datasets = buildBigquery(input, vmPrefix);
+    tfvars.cloud_sql_instances = buildCloudSql(input, vmPrefix);
+    tfvars.app_connect_sql = vmsConn.connectSql;
+    const rdiVars = buildRdi(input, vmPrefix, "vm");
+    tfvars.rdi_enabled = rdiVars.rdi_enabled;
+    tfvars.rdi = rdiVars.rdi;
+    tfvars.rdi_connect_cluster_admin = rdiVars.rdi_connect_cluster_admin;
+    tfvars.rdi_connect_sql = rdiVars.rdi_connect_sql;
   } else {
     const clusters = normalizeClusters({ ...input, mode: "gke" });
     const prefix = `${input.name}-${input.env || "default"}`;
     Object.assign(tfvars, {
       gke_clustersize: input.gke_clustersize ?? 3,
       gke_machine_type: input.gke_machine_type || "e2-standard-8",
-      rec_nodes: clusters[0].rec_nodes,
-      rec_specs: clusters.map((c, i) => ({
-        name: `${clusterNamePrefix(prefix, i, c.name)}-rec`,
-        nodes: c.rec_nodes,
-      })),
-      operator_chart_version: resolveGkeOperatorChart(input.operator_chart_version),
+      operators: buildGkeOperators(input, clusters, prefix),
       outputs_dir: workDir,
     });
     tfvars.applications = buildGkeApplications(input);
+    tfvars.storage_buckets = buildStorageBuckets(input, prefix);
+    tfvars.pubsub_topics = buildPubsub(input, prefix);
+    tfvars.bigquery_datasets = buildBigquery(input, prefix);
+    tfvars.cloud_sql_instances = buildCloudSql(input, prefix);
+    const rdiVars = buildRdi(input, prefix, "gke");
+    tfvars.rdi_enabled = rdiVars.rdi_enabled;
+    tfvars.rdi = rdiVars.rdi;
   }
 
   const tfvarsBody = Object.entries(tfvars)
@@ -503,4 +1311,29 @@ variable "applications" {
   fs.writeFileSync(path.join(workDir, "main.tf"), rootTf, "utf8");
   fs.writeFileSync(path.join(workDir, "variables.tf"), varsTf, "utf8");
   fs.writeFileSync(path.join(workDir, "terraform.tfvars"), tfvarsBody + "\n", "utf8");
+}
+
+/**
+ * Render the Terraform for a config as text WITHOUT provisioning — used by the
+ * define-only surface (MCP) so an AI/human can inspect what would be created.
+ * Reuses writeInstanceWorkspace against a throwaway scratch dir (with placeholder
+ * credentials/SSH values) and reads the files back, so it can never apply.
+ */
+export function renderTerraform(
+  mode: DeploymentMode,
+  input: CreateInstanceInput,
+): { mainTf: string; variablesTf: string; tfvars: string } {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rew-render-"));
+  try {
+    writeInstanceWorkspace(dir, mode, input, "credentials.json", {
+      sshPublicKey: "<ssh-public-key>",
+    });
+    return {
+      mainTf: fs.readFileSync(path.join(dir, "main.tf"), "utf8"),
+      variablesTf: fs.readFileSync(path.join(dir, "variables.tf"), "utf8"),
+      tfvars: fs.readFileSync(path.join(dir, "terraform.tfvars"), "utf8"),
+    };
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 }

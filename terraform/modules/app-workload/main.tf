@@ -112,6 +112,12 @@ variable "env" {
   default     = {}
 }
 
+variable "oauth_scopes" {
+  type        = list(string)
+  description = "VM service-account OAuth scopes. Empty keeps the GCE default (storage read-only)."
+  default     = []
+}
+
 variable "expose_http" {
   type    = bool
   default = false
@@ -136,10 +142,10 @@ locals {
     var.expose_https ? ["app-https"] : [],
     length(var.ports) > 0 ? ["app-extra"] : [],
   )
-  command_set = trimspace(var.command) != ""
-  env_file    = join("\n", [for k, v in var.env : "${k}=${v}"])
-  is_git      = trimspace(var.git_url) != ""
-  needs_docker = contains(var.requirements, "docker")
+  command_set   = trimspace(var.command) != ""
+  env_file      = join("\n", [for k, v in var.env : "${k}=${v}"])
+  is_git        = trimspace(var.git_url) != ""
+  needs_docker  = contains(var.requirements, "docker")
   deploy_source = local.is_git ? "${path.module}/placeholder.txt" : var.artifact_local_path
   deploy_dest   = local.is_git ? "/tmp/placeholder.txt" : "/tmp/${var.artifact_filename}"
 
@@ -388,6 +394,15 @@ resource "google_compute_instance" "vm" {
   network_interface {
     subnetwork = var.public_subnet_name
     access_config {}
+  }
+
+  # Widen the default compute SA's scope only when object-storage write access is
+  # needed (empty list = keep the GCE default: storage read-only).
+  dynamic "service_account" {
+    for_each = length(var.oauth_scopes) > 0 ? [1] : []
+    content {
+      scopes = var.oauth_scopes
+    }
   }
 }
 

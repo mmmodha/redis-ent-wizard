@@ -14,8 +14,15 @@ import {
   readKey,
   testIamPermissions,
   STORAGE_READ_PERMISSIONS,
+  STORAGE_ADMIN_PERMISSIONS,
+  bucketAvailability,
 } from "./gcp.js";
 import { normalizeApplications } from "./applications.js";
+import { bucketFullName, normalizeStorageBuckets } from "./storage.js";
+import { normalizePubsub } from "./pubsub.js";
+import { normalizeBigquery } from "./bigquery.js";
+import { normalizeCloudSql } from "./cloudsql.js";
+import { normalizeRdi } from "./rdi.js";
 import { capacityFor } from "./databases.js";
 import { clusterTrialShardGate } from "./trial-shards.js";
 import { LOCAL_SSD_GIB, maxLocalSsdsForMachineType } from "./nvme.js";
@@ -841,6 +848,383 @@ export async function preflight(
         } catch (err) {
           checks.push(warn("app_storage", "Artifact read IAM", `Could not verify: ${errorText(err)}`));
         }
+      }
+    }
+  }
+
+  // 12f. Component connection references resolve, and no self-LB loops
+  {
+    const clusterConnectNames = new Set<string>();
+    clusters.forEach((c, i) => {
+      clusterConnectNames.add(c.name || `cluster${i + 1}`);
+      if (c.name) clusterConnectNames.add(c.name);
+    });
+    const dbNames = new Set<string>();
+    (Array.isArray(input.clusters) ? input.clusters : []).forEach((c) =>
+      (c.databases || []).forEach((d) => dbNames.add(d.name)),
+    );
+    const lbByName = new Map((input.load_balancers || []).map((lb) => [lb.name, lb]));
+    const bucketNames = new Set<string>((input.storage_buckets || []).map((b) => b.name));
+    const topicNames = new Set<string>((input.pubsub_topics || []).map((t) => t.name));
+    const datasetNames = new Set<string>((input.bigquery_datasets || []).map((d) => d.name));
+    const sqlNames = new Set<string>((input.cloud_sql_instances || []).map((d) => d.name));
+    let connApps: ReturnType<typeof normalizeApplications> = [];
+    try {
+      connApps = normalizeApplications({ mode, applications: input.applications });
+    } catch {
+      connApps = [];
+    }
+    const appNames = new Set(connApps.map((a) => a.name));
+    const appCount = mode === "vm" ? input.app ?? 0 : 0;
+    const problems: string[] = [];
+
+    const check = (
+      label: string,
+      sel: {
+        connectClusters?: string[];
+        connectDatabases?: string[];
+        connectLoadBalancers?: string[];
+        connectApps?: string[];
+        connectStorage?: string[];
+        connectPubsub?: string[];
+        connectBigquery?: string[];
+        connectSql?: string[];
+      },
+      self: { app?: string; isVmsGroup?: boolean },
+    ) => {
+      for (const c of sel.connectClusters || [])
+        if (!clusterConnectNames.has(c)) problems.push(`${label} → unknown cluster "${c}"`);
+      for (const d of sel.connectDatabases || [])
+        if (!dbNames.has(d)) problems.push(`${label} → unknown database "${d}"`);
+      for (const b of sel.connectStorage || [])
+        if (!bucketNames.has(b)) problems.push(`${label} → unknown storage bucket "${b}"`);
+      for (const p of sel.connectPubsub || [])
+        if (!topicNames.has(p)) problems.push(`${label} → unknown Pub/Sub topic "${p}"`);
+      for (const d of sel.connectBigquery || [])
+        if (!datasetNames.has(d)) problems.push(`${label} → unknown BigQuery dataset "${d}"`);
+      for (const s of sel.connectSql || [])
+        if (!sqlNames.has(s)) problems.push(`${label} → unknown Cloud SQL instance "${s}"`);
+      for (const a of sel.connectApps || []) {
+        if (self.app && a === self.app) problems.push(`${label} cannot connect to itself`);
+        else if (!appNames.has(a) && appCount === 0)
+          problems.push(`${label} → unknown app/VMs "${a}"`);
+      }
+      if (mode === "vm") {
+        for (const lb of sel.connectLoadBalancers || []) {
+          const def = lbByName.get(lb);
+          if (!def) {
+            problems.push(`${label} → unknown load balancer "${lb}"`);
+          } else if (
+            (self.app && def.target_kind === "application" && def.target === self.app) ||
+            (self.isVmsGroup && def.target_kind === "vms")
+          ) {
+            problems.push(`${label} cannot consume its own load balancer "${lb}"`);
+          }
+        }
+      }
+    };
+
+    for (const a of connApps) check(`Application ${a.name}`, a, { app: a.name });
+    if (input.vms_connect) {
+      check(
+        "Set-of-VMs",
+        {
+          connectClusters: input.vms_connect.clusters,
+          connectDatabases: input.vms_connect.databases,
+          connectLoadBalancers: input.vms_connect.load_balancers,
+          connectApps: input.vms_connect.apps,
+          connectStorage: input.vms_connect.storage,
+          connectPubsub: input.vms_connect.pubsub,
+          connectBigquery: input.vms_connect.bigquery,
+          connectSql: input.vms_connect.sql,
+        },
+        { isVmsGroup: true },
+      );
+    }
+
+    const anySelection =
+      connApps.some(
+        (a) =>
+          (a.connectClusters?.length ||
+            a.connectDatabases?.length ||
+            a.connectLoadBalancers?.length ||
+            a.connectApps?.length ||
+            a.connectStorage?.length ||
+            a.connectPubsub?.length ||
+            a.connectBigquery?.length ||
+            a.connectSql?.length) ??
+          0,
+      ) ||
+      Boolean(
+        input.vms_connect &&
+          (input.vms_connect.clusters?.length ||
+            input.vms_connect.databases?.length ||
+            input.vms_connect.load_balancers?.length ||
+            input.vms_connect.apps?.length ||
+            input.vms_connect.storage?.length ||
+            input.vms_connect.pubsub?.length ||
+            input.vms_connect.bigquery?.length ||
+            input.vms_connect.sql?.length),
+      );
+    if (problems.length) {
+      checks.push(fail("connections", "Component connections", problems.join("; ")));
+    } else if (anySelection) {
+      checks.push(pass("connections", "Component connections", "All wired endpoints resolve"));
+    }
+  }
+
+  // 12g. Cloud Storage buckets
+  {
+    let buckets: ReturnType<typeof normalizeStorageBuckets> = [];
+    try {
+      buckets = normalizeStorageBuckets(input);
+    } catch (err) {
+      checks.push(fail("storage", "Cloud Storage", err instanceof Error ? err.message : String(err)));
+    }
+    if (buckets.length) {
+      const connectedBuckets = new Set<string>();
+      for (const a of input.applications || [])
+        for (const s of a.connectStorage || []) connectedBuckets.add(String(s));
+      for (const s of input.vms_connect?.storage || []) connectedBuckets.add(String(s));
+
+      let nameProblem = false;
+      for (const b of buckets) {
+        const full = bucketFullName(namePrefix, b.name);
+        const id = `storage_${b.name}`;
+        if (full.length > 63) {
+          checks.push(fail(id, `Bucket ${b.name}`, `Full name "${full}" exceeds 63 chars — shorten the name, instance, or env`));
+          nameProblem = true;
+          continue;
+        }
+        try {
+          const avail = await bucketAvailability(credentialsFile, full);
+          if (avail === "taken") {
+            checks.push(fail(id, `Bucket ${b.name}`, `${full} already exists globally — pick another name`));
+            nameProblem = true;
+          } else if (avail === "unknown") {
+            checks.push(warn(id, `Bucket ${b.name}`, `Could not verify global availability of ${full}`));
+          }
+        } catch (err) {
+          checks.push(warn(id, `Bucket ${b.name}`, `Could not verify ${full}: ${errorText(err)}`));
+        }
+      }
+
+      try {
+        const enabled = await listEnabledServices(credentialsFile, project);
+        if (!enabled.includes("storage.googleapis.com")) {
+          checks.push(fail("storage_api", "Storage API", "Not enabled: storage.googleapis.com"));
+        }
+      } catch {
+        /* enabled-services already warned in the APIs check */
+      }
+
+      try {
+        const perms = connectedBuckets.size ? STORAGE_ADMIN_PERMISSIONS : ["storage.buckets.create"];
+        const granted = await testIamPermissions(credentialsFile, project, perms);
+        const missing = perms.filter((p) => !granted.includes(p));
+        if (missing.length) {
+          checks.push(
+            fail("storage_iam", "Storage IAM", `Missing ${missing.join(", ")} — grant roles/storage.admin to create buckets`),
+          );
+        } else if (!nameProblem) {
+          checks.push(
+            pass("storage", "Cloud Storage", `${buckets.length} bucket(s), ${connectedBuckets.size} connected to a consumer`),
+          );
+        }
+      } catch (err) {
+        checks.push(warn("storage_iam", "Storage IAM", `Could not verify: ${errorText(err)}`));
+      }
+    }
+  }
+
+  // 12h. Pub/Sub topics
+  {
+    let topics: ReturnType<typeof normalizePubsub> = [];
+    try {
+      topics = normalizePubsub(input);
+    } catch (err) {
+      checks.push(fail("pubsub", "Pub/Sub", err instanceof Error ? err.message : String(err)));
+    }
+    if (topics.length) {
+      const connected = new Set<string>();
+      for (const a of input.applications || [])
+        for (const p of a.connectPubsub || []) connected.add(String(p));
+      for (const p of input.vms_connect?.pubsub || []) connected.add(String(p));
+
+      try {
+        const enabled = await listEnabledServices(credentialsFile, project);
+        if (!enabled.includes("pubsub.googleapis.com")) {
+          checks.push(fail("pubsub_api", "Pub/Sub API", "Not enabled: pubsub.googleapis.com"));
+        }
+      } catch {
+        /* covered by the APIs check */
+      }
+
+      try {
+        const perms = connected.size
+          ? ["pubsub.topics.create", "pubsub.topics.setIamPolicy"]
+          : ["pubsub.topics.create"];
+        const granted = await testIamPermissions(credentialsFile, project, perms);
+        const missing = perms.filter((p) => !granted.includes(p));
+        if (missing.length) {
+          checks.push(fail("pubsub_iam", "Pub/Sub IAM", `Missing ${missing.join(", ")} — grant roles/pubsub.admin`));
+        } else {
+          checks.push(pass("pubsub", "Pub/Sub", `${topics.length} topic(s), ${connected.size} connected to a consumer`));
+        }
+      } catch (err) {
+        checks.push(warn("pubsub_iam", "Pub/Sub IAM", `Could not verify: ${errorText(err)}`));
+      }
+    }
+  }
+
+  // 12i. BigQuery datasets
+  {
+    let datasets: ReturnType<typeof normalizeBigquery> = [];
+    try {
+      datasets = normalizeBigquery(input);
+    } catch (err) {
+      checks.push(fail("bigquery", "BigQuery", err instanceof Error ? err.message : String(err)));
+    }
+    if (datasets.length) {
+      const connected = new Set<string>();
+      for (const a of input.applications || [])
+        for (const d of a.connectBigquery || []) connected.add(String(d));
+      for (const d of input.vms_connect?.bigquery || []) connected.add(String(d));
+
+      try {
+        const enabled = await listEnabledServices(credentialsFile, project);
+        if (!enabled.includes("bigquery.googleapis.com")) {
+          checks.push(fail("bigquery_api", "BigQuery API", "Not enabled: bigquery.googleapis.com"));
+        }
+      } catch {
+        /* covered by the APIs check */
+      }
+
+      try {
+        // dataset create/IAM plus (when connected) the project-level jobUser binding.
+        const perms = connected.size
+          ? ["bigquery.datasets.create", "bigquery.datasets.setIamPolicy", "resourcemanager.projects.setIamPolicy"]
+          : ["bigquery.datasets.create"];
+        const granted = await testIamPermissions(credentialsFile, project, perms);
+        const missing = perms.filter((p) => !granted.includes(p));
+        if (missing.length) {
+          checks.push(
+            fail("bigquery_iam", "BigQuery IAM", `Missing ${missing.join(", ")} — grant roles/bigquery.admin (+ project IAM admin for jobUser)`),
+          );
+        } else {
+          checks.push(pass("bigquery", "BigQuery", `${datasets.length} dataset(s), ${connected.size} connected to a consumer`));
+        }
+      } catch (err) {
+        checks.push(warn("bigquery_iam", "BigQuery IAM", `Could not verify: ${errorText(err)}`));
+      }
+    }
+  }
+
+  // 12j. Cloud SQL instances
+  {
+    let instances: ReturnType<typeof normalizeCloudSql> = [];
+    try {
+      instances = normalizeCloudSql(input);
+    } catch (err) {
+      checks.push(fail("cloudsql", "Cloud SQL", err instanceof Error ? err.message : String(err)));
+    }
+    if (instances.length) {
+      const connected = new Set<string>();
+      for (const a of input.applications || [])
+        for (const s of a.connectSql || []) connected.add(String(s));
+      for (const s of input.vms_connect?.sql || []) connected.add(String(s));
+      const anyPrivate = instances.some((i) => i.connectivity === "private");
+
+      try {
+        const enabled = await listEnabledServices(credentialsFile, project);
+        if (!enabled.includes("sqladmin.googleapis.com")) {
+          checks.push(fail("cloudsql_api", "Cloud SQL API", "Not enabled: sqladmin.googleapis.com"));
+        }
+        if (anyPrivate && !enabled.includes("servicenetworking.googleapis.com")) {
+          checks.push(
+            fail(
+              "cloudsql_psa",
+              "Service Networking API",
+              "Not enabled: servicenetworking.googleapis.com — required for a Private IP Cloud SQL instance",
+            ),
+          );
+        }
+      } catch {
+        /* covered by the APIs check */
+      }
+
+      try {
+        const perms = connected.size
+          ? ["cloudsql.instances.create", "resourcemanager.projects.setIamPolicy"]
+          : ["cloudsql.instances.create"];
+        const granted = await testIamPermissions(credentialsFile, project, perms);
+        const missing = perms.filter((p) => !granted.includes(p));
+        if (missing.length) {
+          checks.push(
+            fail(
+              "cloudsql_iam",
+              "Cloud SQL IAM",
+              `Missing ${missing.join(", ")} — grant roles/cloudsql.admin (+ project IAM admin for the client role)`,
+            ),
+          );
+        } else {
+          const modes = [...new Set(instances.map((i) => i.connectivity))].join(", ");
+          checks.push(
+            pass(
+              "cloudsql",
+              "Cloud SQL",
+              `${instances.length} instance(s) [${modes}], ${connected.size} connected to a consumer`,
+            ),
+          );
+        }
+      } catch (err) {
+        checks.push(warn("cloudsql_iam", "Cloud SQL IAM", `Could not verify: ${errorText(err)}`));
+      }
+    }
+  }
+
+  // 12k. RDI (Redis Data Integration)
+  {
+    let rdi: ReturnType<typeof normalizeRdi> = null;
+    try {
+      rdi = normalizeRdi(input);
+    } catch (err) {
+      checks.push(fail("rdi", "RDI", err instanceof Error ? err.message : String(err)));
+    }
+    if (rdi) {
+      const problems: string[] = [];
+      const dbNames = new Set<string>();
+      (Array.isArray(input.clusters) ? input.clusters : []).forEach((c) =>
+        (c.databases || []).forEach((d) => dbNames.add(d.name)),
+      );
+      const sqlNames = new Set<string>((input.cloud_sql_instances || []).map((s) => s.name));
+
+      if (rdi.target && !dbNames.has(rdi.target)) {
+        problems.push(`RDI target → unknown database "${rdi.target}"`);
+      }
+      for (const p of rdi.pipelines) {
+        if (!sqlNames.has(p.source)) problems.push(`RDI pipeline → unknown Cloud SQL source "${p.source}"`);
+      }
+
+      if (problems.length) {
+        checks.push(fail("rdi", "RDI", problems.join("; ")));
+      } else if (!rdi.target) {
+        checks.push(
+          warn("rdi", "RDI", "No target Redis database wired — RDI will deploy but start no pipeline"),
+        );
+      } else if (rdi.pipelines.length === 0) {
+        checks.push(
+          warn("rdi", "RDI", "No Cloud SQL source wired — RDI will deploy but start no pipeline"),
+        );
+      } else {
+        const sources = rdi.pipelines.map((p) => p.source).join(", ");
+        checks.push(
+          pass(
+            "rdi",
+            "RDI",
+            `Target "${rdi.target}", ${rdi.pipelines.length} pipeline(s) [${sources}]; CDC will be enabled on the source(s)`,
+          ),
+        );
       }
     }
   }

@@ -9,6 +9,7 @@ locals {
         machine_type   = var.machine_type
         rof_nvme_disks = var.rof_nvme_disks
         RS_release     = var.RS_release
+        RS_admin       = var.RS_admin
       }] : []
     )
   ) : []
@@ -36,6 +37,48 @@ locals {
     )
   }
   lb_all_ports = distinct(flatten([for lb in var.load_balancers : lb.ports]))
+
+  # Default compute service account the VMs run as; granted access to connected buckets.
+  compute_sa = "${data.google_project.current.number}-compute@developer.gserviceaccount.com"
+  # App VMs need the cloud-platform scope to WRITE to a bucket (default scope is
+  # storage read-only). Widen only when a bucket grants read+write.
+  app_vm_scopes = anytrue([for b in var.storage_buckets : b.grant_role == "roles/storage.objectAdmin"]) ? ["cloud-platform"] : []
+}
+
+data "google_project" "current" {}
+
+module "storage" {
+  source = "../../modules/storage"
+
+  buckets          = var.storage_buckets
+  compute_sa_email = local.compute_sa
+  youremail        = var.youremail
+}
+
+module "pubsub" {
+  source = "../../modules/pubsub"
+
+  topics           = var.pubsub_topics
+  compute_sa_email = local.compute_sa
+  youremail        = var.youremail
+}
+
+module "bigquery" {
+  source = "../../modules/bigquery"
+
+  datasets         = var.bigquery_datasets
+  compute_sa_email = local.compute_sa
+  youremail        = var.youremail
+}
+
+module "cloudsql" {
+  source = "../../modules/cloudsql"
+
+  instances        = var.cloud_sql_instances
+  region           = var.region_name
+  vpc_id           = module.network.vpc_id
+  compute_sa_email = local.compute_sa
+  youremail        = var.youremail
 }
 
 module "network" {
@@ -66,7 +109,7 @@ module "re_vm" {
   region_zones       = var.region_zones
   rof_nvme_disks     = local.clusters[count.index].rof_nvme_disks
   RS_release         = local.clusters[count.index].RS_release
-  RS_admin           = var.RS_admin
+  RS_admin           = local.clusters[count.index].RS_admin
   dns_managed_zone   = var.dns_managed_zone
   dns_zone_dns_name  = var.dns_zone_dns_name
   public_subnet_name = module.network.public_subnet_name
@@ -103,6 +146,43 @@ module "app_vm" {
   app_expose_https   = var.app_expose_https
   app_disk_gib       = var.app_disk_gib
   app_extra_ports    = var.app_extra_ports
+  oauth_scopes       = local.app_vm_scopes
+  # Connection env for the Set-of-VMs group, same merge as app_workload.
+  injected_env = merge(
+    var.app_injected_env,
+    { for k, idx in var.app_connect_cluster_admin : k => module.re_vm[idx].admin_password },
+    { for k, lbname in var.app_connect_lb : k => "${google_compute_address.lb[lbname].address}:${local.lb_by_name[lbname].ports[0]}" },
+    { for slug, inst in var.app_connect_sql : "SQL_${slug}_HOST" => module.cloudsql.hosts[inst] },
+    { for slug, inst in var.app_connect_sql : "SQL_${slug}_PASSWORD" => module.cloudsql.passwords[inst] },
+  )
+}
+
+module "rdi_vm" {
+  source = "../../modules/rdi-vm"
+  count  = var.rdi_enabled ? 1 : 0
+
+  name_prefix        = local.name_prefix
+  youremail          = var.youremail
+  skip_deletion      = var.skip_deletion
+  region_name        = var.region_name
+  region_zones       = var.region_zones
+  machine_type       = var.rdi.machine_type
+  rdi_version        = var.rdi.version
+  public_subnet_name = module.network.public_subnet_name
+  ssh_public_key     = var.ssh_public_key
+  scripts_path       = local.scripts_path
+  dns_managed_zone   = var.dns_managed_zone
+  dns_zone_dns_name  = var.dns_zone_dns_name
+  oauth_scopes       = local.app_vm_scopes
+  pipeline_config    = var.rdi.pipeline_config
+  # Static env plus apply-time refs: target cluster admin password (from re_vm)
+  # and Cloud SQL source host/password (from the cloudsql module).
+  injected_env = merge(
+    var.rdi.env,
+    { for k, idx in var.rdi_connect_cluster_admin : k => module.re_vm[idx].admin_password },
+    { for slug, inst in var.rdi_connect_sql : "SQL_${slug}_HOST" => module.cloudsql.hosts[inst] },
+    { for slug, inst in var.rdi_connect_sql : "SQL_${slug}_PASSWORD" => module.cloudsql.passwords[inst] },
+  )
 }
 
 module "app_workload" {
@@ -131,10 +211,19 @@ module "app_workload" {
   machine_type        = each.value.machine_type
   disk_gib            = each.value.disk_gib
   ports               = each.value.ports
-  env                 = each.value.env
-  expose_http         = each.value.expose_http
-  expose_https        = each.value.expose_https
-  requirements        = each.value.requirements
+  oauth_scopes        = local.app_vm_scopes
+  # Merge static connection env with apply-time refs: cluster admin passwords
+  # (from re_vm) and internal LB VIPs (from the reserved internal address).
+  env = merge(
+    each.value.env,
+    { for k, idx in each.value.connect_cluster_admin : k => module.re_vm[idx].admin_password },
+    { for k, lbname in each.value.connect_lb : k => "${google_compute_address.lb[lbname].address}:${local.lb_by_name[lbname].ports[0]}" },
+    { for slug, inst in each.value.connect_sql : "SQL_${slug}_HOST" => module.cloudsql.hosts[inst] },
+    { for slug, inst in each.value.connect_sql : "SQL_${slug}_PASSWORD" => module.cloudsql.passwords[inst] },
+  )
+  expose_http  = each.value.expose_http
+  expose_https = each.value.expose_https
+  requirements = each.value.requirements
 }
 
 # The network module opens app-http/app-https/app-extra only for companion App
@@ -179,6 +268,21 @@ resource "google_compute_firewall" "app_workload_extra" {
   }
 
   target_tags   = ["app-extra"]
+  source_ranges = ["0.0.0.0/0"]
+}
+
+# Expose the RDI runtime's management/UI ports on the dedicated RDI VM.
+resource "google_compute_firewall" "rdi" {
+  count   = var.rdi_enabled ? 1 : 0
+  name    = "${local.name_prefix}-fw-rdi"
+  network = module.network.vpc_name
+
+  allow {
+    protocol = "tcp"
+    ports    = ["443", "8080"]
+  }
+
+  target_tags   = ["rdi"]
   source_ranges = ["0.0.0.0/0"]
 }
 
@@ -293,7 +397,8 @@ output "nodes_dns" {
 }
 
 output "admin_username" {
-  value = length(module.re_vm) > 0 ? var.RS_admin : ""
+  # Deployment-wide fallback; per-cluster usernames are in the clusters output.
+  value = length(module.re_vm) > 0 ? local.clusters[0].RS_admin : ""
 }
 
 output "admin_password" {
@@ -324,6 +429,7 @@ output "clusters" {
       node_zones     = m.node_zones
       how_to_ssh     = m.how_to_ssh
       node1_name     = m.node1_name
+      admin_username = local.clusters[i].RS_admin
       admin_password = m.admin_password
     }
   ]
@@ -377,6 +483,31 @@ output "load_balancers" {
       ports = local.lb_by_name[k].ports
     }
   ]
+}
+
+output "storage_buckets" {
+  value = module.storage.buckets
+}
+
+output "pubsub_topics" {
+  value = module.pubsub.topics
+}
+
+output "bigquery_datasets" {
+  value = module.bigquery.datasets
+}
+
+output "cloud_sql_instances" {
+  value = module.cloudsql.instances
+}
+
+output "rdi" {
+  value = var.rdi_enabled ? {
+    name       = var.rdi.name
+    ip         = module.rdi_vm[0].rdi_ip
+    dns        = module.rdi_vm[0].rdi_dns
+    how_to_ssh = module.rdi_vm[0].how_to_ssh
+  } : null
 }
 
 output "deployment_mode" {

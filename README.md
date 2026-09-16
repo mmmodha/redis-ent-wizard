@@ -26,6 +26,8 @@ For **GKE** add `roles/container.clusterAdmin`, and `roles/iam.serviceAccountUse
 
 **Application** artifacts are copied onto the VMs over SSH (VM mode already requires the SSH key pair below), so *uploaded* and `https://` artifacts need **no** extra IAM. Only an artifact referenced by `gs://` needs a read role — `roles/storage.objectViewer` — because the API downloads it before copying it across.
 
+**Cloud Storage** buckets need `roles/storage.admin` (bucket create + IAM binding). Connecting an application or the Set-of-VMs group to a bucket grants the deployment's compute service account access to it (`roles/storage.objectAdmin` for read+write, `roles/storage.objectViewer` for read-only) and — for read+write — widens the app VMs' OAuth scope to `cloud-platform`. Buckets are created as `<instance>-<env>-<name>` for global uniqueness.
+
 ### Run it
 
 ```bash
@@ -230,6 +232,7 @@ apps/api          Fastify Terraform orchestrator + SSE logs
   src/gcp.ts        GCP REST client (service account JWT auth)
   src/preflight.ts  validation checks
   src/progress.ts   Terraform log -> phase/percent
+apps/mcp          MCP server: let AI tools DEFINE infra (not provision) — see apps/mcp/README.md
 terraform/        modules + vm/gke profiles (refactored from basis repo)
 scripts/          list / destroy helpers for offline cleanup
 data/             credentials, instances.json, per-instance state (gitignored)
@@ -256,6 +259,58 @@ data/             credentials, instances.json, per-instance state (gitignored)
 | POST | `/instances/:id/health` | Probe the cluster now instead of waiting for the next poll |
 | GET | `/instances/:id/logs` | SSE stream of log output and progress |
 | DELETE | `/instances/:id` | Destroy (keeps the record until you Forget) |
+| GET | `/designs/schema` | Create-config JSON Schema + capabilities guide (for AI tools) |
+| POST | `/designs/validate` · `/designs/render` | Validate a config, or render its Terraform — offline, no apply |
+| GET/POST | `/designs` | List draft designs, or save a config as a `draft` for review |
+| GET | `/designs/:id` | Fetch one draft design |
+| GET | `/gcp/resources` | Live resources in a credential's project, grouped by owning instance, with estimated cost |
+
+## Resources & Cost
+
+The **Resources** tab scans a credential's GCP project for **live** resources
+and groups each under the instance (`{name}-{env}`) that created it — anything
+unattributed lands in an **Unowned** group (a leftover from a half-failed
+destroy, a `forget`ten record, or a hand-made resource). It surfaces drift and
+lets you reconcile spend against deployments.
+
+- **Attribution** is by the Terraform `name_prefix` embedded in resource names
+  (labels only identify a person, so they're corroboration, not the key).
+- **cost/hour** is an estimate from the Cloud Billing **Catalog API** (public
+  list prices) — currently VMs (vCPU + RAM) and persistent disks; other kinds
+  show `—`. **cost so far** is `rate × uptime`, or **actual billed cost** when a
+  billing export is configured (see below).
+- Costs are **approximate** — they exclude sustained/committed-use discounts,
+  exact regional pricing, egress, and actual usage. For exact charges use Cloud
+  Billing. The page states this prominently.
+- Scans are **on-demand** and cached server-side (~10 min); **Refresh** forces a
+  fresh scan.
+
+**Required SA IAM** (missing `*.list` permissions are surfaced, not fatal — that
+part of the inventory is just skipped): `compute.instances.list`,
+`compute.disks.list`, `compute.addresses.list`, `compute.forwardingRules.list`,
+`compute.subnetworks.list`, `compute.networks.list`, `compute.firewalls.list`,
+`cloudsql.instances.list`, `container.clusters.list`, `storage.buckets.list`,
+`pubsub.topics.list`, `pubsub.subscriptions.list`, `bigquery.datasets.list`,
+`dns.resourceRecordSets.list` (roughly `roles/viewer`).
+
+**Optional env:**
+
+- `REW_GCP_API_KEY` — used for the Catalog API if the SA OAuth token is not
+  accepted for pricing calls.
+- `REW_BILLING_EXPORT_TABLE` — `<project>.<dataset>.gcp_billing_export_resource_v1_XXXXXX`,
+  a Cloud Billing **detailed usage** BigQuery export. When set (and the SA has
+  `bigquery.jobs.create` + read on the dataset), cost-so-far shows **actual
+  billed cost** per resource instead of the estimate.
+
+## Define infrastructure with AI tools (MCP)
+
+Claude and other AI tools can **define** a deployment for you to review and
+apply, without any ability to provision or destroy. This runs through the
+`apps/mcp` MCP server, which talks to the API with a `define`-scoped token:
+saving a design creates a `draft` instance on the board with a review link
+(`/edit?from=<id>`), and every provisioning route is refused (`403`) for that
+scope. Set up (stdio for Claude Desktop/Code, or a hosted HTTP endpoint) is in
+[apps/mcp/README.md](apps/mcp/README.md).
 
 ## When is an instance really ready?
 

@@ -39,6 +39,8 @@ const INITIAL_SETTINGS: GcpSettings = {
 
 export type UseGcpLookups = {
   credentials: Credential[];
+  /** True once the initial credentials fetch has completed (list may be empty). */
+  credentialsLoaded: boolean;
   projects: ProjectInfo[];
   regions: RegionInfo[];
   machineTypes: MachineTypeInfo[];
@@ -59,6 +61,7 @@ export type UseGcpLookups = {
  */
 export function useGcpLookups(initial?: Partial<GcpSettings>): UseGcpLookups {
   const [credentials, setCredentials] = useState<Credential[]>([]);
+  const [credentialsLoaded, setCredentialsLoaded] = useState(false);
   const [projects, setProjects] = useState<ProjectInfo[]>([]);
   const [regions, setRegions] = useState<RegionInfo[]>([]);
   const [machineTypes, setMachineTypes] = useState<MachineTypeInfo[]>([]);
@@ -84,7 +87,8 @@ export function useGcpLookups(initial?: Partial<GcpSettings>): UseGcpLookups {
   useEffect(() => {
     listCredentials()
       .then(setCredentials)
-      .catch((err) => setError(err instanceof Error ? err.message : "Failed to list credentials"));
+      .catch((err) => setError(err instanceof Error ? err.message : "Failed to list credentials"))
+      .finally(() => setCredentialsLoaded(true));
     listReleases()
       .then((r) => {
         setVmReleases(r.vm);
@@ -191,6 +195,7 @@ export function useGcpLookups(initial?: Partial<GcpSettings>): UseGcpLookups {
 
   return {
     credentials,
+    credentialsLoaded,
     projects,
     regions,
     machineTypes,

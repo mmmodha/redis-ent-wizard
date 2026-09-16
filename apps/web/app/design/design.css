@@ -41,6 +41,30 @@
   -webkit-mask-image: url(/brand/icons/gke.svg);
   mask-image: url(/brand/icons/gke.svg);
 }
+.design-icon-operator {
+  -webkit-mask-image: url(/brand/icons/operator.svg);
+  mask-image: url(/brand/icons/operator.svg);
+}
+.design-icon-storage {
+  -webkit-mask-image: url(/brand/icons/storage.svg);
+  mask-image: url(/brand/icons/storage.svg);
+}
+.design-icon-pubsub {
+  -webkit-mask-image: url(/brand/icons/pubsub.svg);
+  mask-image: url(/brand/icons/pubsub.svg);
+}
+.design-icon-bigquery {
+  -webkit-mask-image: url(/brand/icons/bigquery.svg);
+  mask-image: url(/brand/icons/bigquery.svg);
+}
+.design-icon-cloudsql {
+  -webkit-mask-image: url(/brand/icons/cloudsql.svg);
+  mask-image: url(/brand/icons/cloudsql.svg);
+}
+.design-icon-rdi {
+  -webkit-mask-image: url(/brand/icons/rdi.svg);
+  mask-image: url(/brand/icons/rdi.svg);
+}
 
 /* Settings panel */
 .design-settings-panel {
@@ -209,11 +233,56 @@
   stroke-dasharray: 6 4;
 }
 
+/* The RDI link to its managed pipeline-state database is visually distinct. */
+.design-canvas-wrap .react-flow__edge.design-edge-rdi .react-flow__edge-path {
+  stroke: var(--redis-violet-70, #8a5cf6);
+  stroke-width: 2.5;
+  stroke-dasharray: 2 4;
+}
+
 .design-handle {
-  width: 8px;
-  height: 8px;
+  width: 11px;
+  height: 11px;
   background: var(--redis-hyper);
   border: 1px solid var(--redis-bg-primary);
+}
+
+/*
+ * Full-node connection target. Invisible, and only intercepts pointer events
+ * while a connection line is being dragged (the `.design-connecting` class is
+ * toggled on the flow), so it never blocks node click/drag. Lets a user drop a
+ * connection anywhere on the component instead of on a tiny handle dot.
+ */
+.design-hit {
+  position: absolute !important;
+  inset: 0 !important;
+  width: 100% !important;
+  height: 100% !important;
+  min-width: 0 !important;
+  min-height: 0 !important;
+  transform: none !important;
+  border: none !important;
+  border-radius: var(--radius) !important;
+  background: transparent !important;
+  opacity: 0;
+  pointer-events: none !important;
+}
+.design-connecting .design-hit {
+  pointer-events: all !important;
+}
+
+/* Connection-drag feedback: green when the hovered target is valid, red if not. */
+.design-connline {
+  stroke: var(--redis-text-secondary);
+  stroke-width: 2;
+}
+.design-connline.valid {
+  stroke: #21a67a;
+  stroke-width: 2.5;
+}
+.design-connline.invalid {
+  stroke: #e5484d;
+  stroke-width: 2.5;
 }
 
 /* Nodes */
@@ -227,6 +296,33 @@
 
 .design-root-gke {
   border-color: var(--redis-text-link);
+}
+
+/* Redis Operator: a container (GKE) that holds the clusters it manages. */
+.design-operator {
+  width: 100%;
+  height: 100%;
+  border: 1px dashed var(--redis-text-link);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--redis-text-link) 6%, var(--redis-surface-alt));
+}
+
+.design-operator-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px;
+  border-bottom: 1px dashed var(--redis-border-muted);
+  color: var(--redis-text-secondary);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.design-operator-hint {
+  padding: 6px 8px;
+  font-size: 11px;
+  color: var(--redis-text-secondary);
 }
 
 .design-root-head,
@@ -269,11 +365,50 @@
   flex-shrink: 0;
 }
 
+/* "Exposes" hint on provider nodes — the env vars injected into consumers. */
+.design-exposes {
+  margin-top: auto;
+  padding: 4px 8px 6px;
+  font-size: 10px;
+  line-height: 1.35;
+  color: var(--redis-text-secondary);
+  border-top: 1px dashed var(--border-soft);
+  word-break: break-word;
+}
+
+.design-exposes-label {
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.7;
+  margin-right: 4px;
+}
+
+/* "Exposes" read-only section inside a node dialog. */
+.design-exposes-list {
+  margin: 4px 0 0;
+  padding-left: 0;
+  list-style: none;
+}
+
+.design-exposes-list li {
+  font-size: 12px;
+  margin-bottom: 2px;
+}
+
+.design-exposes-desc {
+  color: var(--redis-text-secondary);
+}
+
 .design-cluster,
 .design-db,
 .design-vms,
 .design-app,
-.design-lb {
+.design-lb,
+.design-storage,
+.design-pubsub,
+.design-bigquery,
+.design-cloudsql,
+.design-rdi {
   width: 100%;
   height: 100%;
   border: 1px solid var(--border-soft);
@@ -306,6 +441,37 @@
 
 .design-lb {
   border-left: 3px solid var(--redis-text-link);
+}
+
+.design-storage {
+  border-left: 3px solid var(--redis-dusk-90);
+}
+
+.design-pubsub {
+  border-left: 3px solid var(--redis-hyper);
+}
+
+.design-bigquery {
+  border-left: 3px solid var(--redis-text-link);
+}
+
+.design-cloudsql {
+  border-left: 3px solid var(--redis-dusk-90);
+}
+
+.design-rdi {
+  border-left: 3px solid var(--redis-violet-70, #8a5cf6);
+}
+
+/* The tool-managed RDI pipeline-state database stands apart from user databases. */
+.design-db-rdi {
+  border-left: 3px dashed var(--redis-violet-70, #8a5cf6);
+  background: var(--redis-bg-secondary, #faf7ff);
+}
+
+.design-badge-rdi {
+  background: var(--redis-violet-70, #8a5cf6);
+  color: #fff;
 }
 
 .design-cap {

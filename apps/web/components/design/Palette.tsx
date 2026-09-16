@@ -8,25 +8,29 @@ export const PALETTE_MIME = "application/x-redis-design-kind";
 type PaletteItem = { kind: NodeKind; label: string; icon: IconName; hint: string };
 
 const ITEMS: PaletteItem[] = [
-  { kind: "cluster", label: "Redis cluster", icon: "cluster", hint: "Drop on the network or GKE root" },
+  { kind: "operator", label: "Redis Operator", icon: "operator", hint: "Drop on the GKE root (GKE mode)" },
+  { kind: "cluster", label: "Redis cluster", icon: "cluster", hint: "Drop on the network root, or on an operator (GKE)" },
   { kind: "database", label: "Database", icon: "database", hint: "Drop inside a cluster" },
   { kind: "vms", label: "Set of VMs", icon: "vm", hint: "Drop on the network root (VM mode)" },
   { kind: "application", label: "Application", icon: "application", hint: "Drop on the root" },
   { kind: "loadbalancer", label: "Load balancer", icon: "load-balancer", hint: "Drop on VMs or an app" },
+  { kind: "storage", label: "Cloud Storage", icon: "storage", hint: "Drop on the root; connect an app or VMs" },
+  { kind: "pubsub", label: "Pub/Sub", icon: "pubsub", hint: "Drop on the root; connect an app or VMs" },
+  { kind: "bigquery", label: "BigQuery", icon: "bigquery", hint: "Drop on the root; connect an app or VMs" },
+  { kind: "cloudsql", label: "Cloud SQL", icon: "cloudsql", hint: "Drop on the root; connect an app or VMs" },
+  { kind: "rdi", label: "RDI", icon: "rdi", hint: "Drop on the root; wire to Cloud SQL sources and a target database" },
 ];
 
 export function Palette({
   mode,
-  redisEnabled = true,
   disabled,
 }: {
   mode: "vm" | "gke";
-  redisEnabled?: boolean;
   disabled?: boolean;
 }) {
   const items = ITEMS.filter((i) => {
     if (mode === "gke" && i.kind === "vms") return false;
-    if (!redisEnabled && (i.kind === "cluster" || i.kind === "database")) return false;
+    if (mode === "vm" && i.kind === "operator") return false;
     return true;
   });
   return (

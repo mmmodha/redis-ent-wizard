@@ -140,8 +140,12 @@ export class GcpApiError extends Error {
   }
 }
 
-async function gcpGet<T>(credentialsFile: string, url: string): Promise<T> {
+export async function gcpGet<T>(credentialsFile: string, url: string): Promise<T> {
   return gcpRequest<T>(credentialsFile, url, { method: "GET" });
+}
+
+export async function gcpPost<T>(credentialsFile: string, url: string, body: unknown): Promise<T> {
+  return gcpRequest<T>(credentialsFile, url, { method: "POST", body });
 }
 
 async function gcpRequest<T>(
@@ -187,7 +191,7 @@ export async function testIamPermissions(
   return body.permissions || [];
 }
 
-async function gcpGetAll<T>(
+export async function gcpGetAll<T>(
   credentialsFile: string,
   url: string,
   itemsKey = "items",
@@ -201,6 +205,34 @@ async function gcpGetAll<T>(
     const items = (body[itemsKey] as T[] | undefined) || [];
     out.push(...items);
     pageToken = body.nextPageToken as string | undefined;
+  } while (pageToken);
+  return out;
+}
+
+/**
+ * Compute `aggregatedList` returns `items` as a map of scope
+ * (e.g. "zones/europe-west1-b") → `{ <itemsKey>: [...] }` (or a `warning` when
+ * that scope is empty/inaccessible). Paginate and flatten to a single array.
+ */
+export async function gcpGetAggregated<T>(
+  credentialsFile: string,
+  url: string,
+  itemsKey: string,
+): Promise<T[]> {
+  const out: T[] = [];
+  let pageToken: string | undefined;
+  do {
+    const sep = url.includes("?") ? "&" : "?";
+    const paged = pageToken ? `${url}${sep}pageToken=${encodeURIComponent(pageToken)}` : url;
+    const body = await gcpGet<{
+      items?: Record<string, Record<string, T[] | undefined>>;
+      nextPageToken?: string;
+    }>(credentialsFile, paged);
+    for (const scope of Object.values(body.items || {})) {
+      const items = scope?.[itemsKey];
+      if (Array.isArray(items)) out.push(...items);
+    }
+    pageToken = body.nextPageToken;
   } while (pageToken);
   return out;
 }
@@ -464,6 +496,28 @@ export async function gkeClusterExists(
 
 /** Permission needed to read a gs:// artifact (checked in preflight). */
 export const STORAGE_READ_PERMISSIONS = ["storage.objects.get"];
+
+/** Project-level permissions Terraform needs to create + bind IAM on buckets. */
+export const STORAGE_ADMIN_PERMISSIONS = ["storage.buckets.create", "storage.buckets.setIamPolicy"];
+
+/**
+ * Whether a global bucket name is free. GCS bucket names are globally unique, so
+ * a GET returns 404 when free and 200/403 when the name is already taken (by any
+ * project). Returns "free" | "taken" | "unknown" (couldn't determine).
+ */
+export async function bucketAvailability(
+  credentialsFile: string,
+  bucket: string,
+): Promise<"free" | "taken" | "unknown"> {
+  const token = await fetchAccessToken(credentialsFile);
+  const res = await fetch(
+    `https://storage.googleapis.com/storage/v1/b/${encodeURIComponent(bucket)}?fields=name`,
+    { headers: { Authorization: `Bearer ${token}` } },
+  );
+  if (res.status === 404) return "free";
+  if (res.status === 200 || res.status === 403) return "taken";
+  return "unknown";
+}
 
 /** Download a GCS object's bytes (media). Requires storage.objects.get. */
 export async function downloadObject(

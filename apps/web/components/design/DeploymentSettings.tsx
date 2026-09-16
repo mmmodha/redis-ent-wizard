@@ -9,10 +9,7 @@ export type DesignMeta = {
   folder: string;
   youremail: string;
   skip_deletion: boolean;
-  redis_enabled: boolean;
   mode: "vm" | "gke";
-  RS_admin: string;
-  operator_chart_version: string;
 };
 
 export function ownerError(value: string): string {
@@ -112,20 +109,6 @@ export function DeploymentSettings({
             <option value="yes">Yes — add skip_deletion=yes</option>
           </select>
         </label>
-
-        {meta.mode === "vm" ? (
-          <label className="design-check-row">
-            <input
-              type="checkbox"
-              checked={meta.redis_enabled}
-              onChange={(e) => setMeta((m) => ({ ...m, redis_enabled: e.target.checked }))}
-            />
-            Include Redis Enterprise cluster
-            <span className="hint" style={{ flexBasis: "100%", margin: 0 }}>
-              Off deploys only application VMs on the VPC. GKE still requires Redis.
-            </span>
-          </label>
-        ) : null}
 
         <label>
           Service account key
@@ -234,32 +217,12 @@ export function DeploymentSettings({
           </select>
         </label>
 
-        {meta.mode === "vm" ? (
-          <label>
-            Redis Enterprise admin
-            <input
-              value={meta.RS_admin}
-              onChange={(e) => setMeta((m) => ({ ...m, RS_admin: e.target.value }))}
-            />
-          </label>
-        ) : (
-          <label>
-            Operator / Redis version
-            <select
-              value={meta.operator_chart_version}
-              onChange={(e) => setMeta((m) => ({ ...m, operator_chart_version: e.target.value }))}
-            >
-              {(gcp.gkeReleases.length
-                ? gcp.gkeReleases
-                : [{ id: "latest", label: "Latest operator chart", chartVersion: "" }]
-              ).map((r) => (
-                <option key={r.id} value={r.id}>
-                  {r.label}
-                </option>
-              ))}
-            </select>
-          </label>
-        )}
+        {meta.mode === "gke" ? (
+          <p className="hint design-field-wide">
+            Redis Operators and their versions are configured as components — add a Redis Operator in the
+            wizard&apos;s Operators section or on the diagram.
+          </p>
+        ) : null}
       </div>
 
       {!validCredential && settings.credentialsFile ? (

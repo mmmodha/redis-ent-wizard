@@ -28,6 +28,7 @@ import {
 import { normalizeApplications, resolveApplicationArtifacts } from "./applications.js";
 import { probeHealth } from "./health.js";
 import { writeInstanceWorkspace } from "./workspace.js";
+import { withRdiInternalDatabases } from "./rdi.js";
 import { computeProgress, progressExtrasFromConfig } from "./progress.js";
 import { preflight } from "./preflight.js";
 import { clusterTrialShardGate } from "./trial-shards.js";
@@ -43,6 +44,7 @@ import {
   assertAdmin,
   assertCanMutate,
   assertCanView,
+  canMutateInstance,
   filterInstances,
   isAdmin,
 } from "./authz.js";
@@ -54,7 +56,7 @@ import {
 } from "./credentials-store.js";
 import { verifyCredentialFile, verifyCredentialJson } from "./credential-verify.js";
 import { normalizeAppDiskGib, normalizeAppMachineTypes, parseAppExtraPorts } from "./app-web.js";
-import { hasAppCompute, normalizeClusters } from "./clusters.js";
+import { hasAppCompute, normalizeClusters, normalizeOperators } from "./clusters.js";
 import { buildAccessView } from "./access.js";
 import { GKE_OPERATOR_RELEASES, VM_RS_RELEASES, resolveGkeOperatorChart } from "./rs-releases.js";
 import { audit, listAudit } from "./audit.js";
@@ -62,126 +64,10 @@ import { checkCreateQuota, getQuotaLimits, iamHint } from "./quotas.js";
 import { queueStats } from "./jobs.js";
 import { initDb, migrateFileRegistryIfNeeded } from "./db.js";
 import { CREATED_BY_ERROR, isValidCreatedBy, resolveCreatedBy } from "./created-by.js";
+import { createSchema, databaseSchema, preflightSchema } from "./schema.js";
+import { registerDesignRoutes } from "./designs.js";
+import { registerResourceRoutes } from "./resources.js";
 import type { CreateInstanceInput, InstanceRecord } from "./types.js";
-
-const databaseSchema = z.object({
-  name: z
-    .string()
-    .min(1)
-    .max(40)
-    .regex(/^[a-z][a-z0-9-]*$/, "database name must be lowercase alphanumeric/hyphen"),
-  memory_gb: z.number().positive().max(1024),
-  replication: z.boolean().optional(),
-  sharding: z.boolean().optional(),
-  shards_count: z.number().int().min(1).max(512).optional(),
-  eviction_policy: z.string().max(40).optional(),
-  port: z.number().int().min(1024).max(65535).optional(),
-  password: z.string().max(256).optional(),
-  modules: z.array(z.string().min(1).max(40)).max(16).optional(),
-  proxy_policy: z.enum(["single", "all-master-shards"]).optional(),
-  shards_placement: z.enum(["dense", "sparse"]).optional(),
-  oss_cluster: z.boolean().optional(),
-  flex: z.boolean().optional(),
-});
-
-const applicationSchema = z.object({
-  name: z.string().min(1).max(24),
-  command: z.string().max(2048).optional(),
-  ports: z.array(z.number().int().min(1).max(65535)).max(16).optional(),
-  env: z.record(z.string()).optional(),
-  connectClusters: z.array(z.string().max(40)).max(3).optional(),
-  artifact: z
-    .object({
-      kind: z.enum(["upload", "url", "gcs", "git"]),
-      ref: z.string().min(1).max(2048),
-      type: z.enum(["jar", "binary"]),
-      branch: z.string().max(200).optional(),
-      runInDocker: z.boolean().optional(),
-    })
-    .optional(),
-  vm_count: z.number().int().min(1).max(10).optional(),
-  machine_type: z.string().optional(),
-  disk_gib: z.number().int().min(0).max(65536).optional(),
-  image: z.string().max(512).optional(),
-  replicas: z.number().int().min(1).max(20).optional(),
-  expose: z.enum(["none", "http", "https", "lb"]).optional(),
-  requirements: z.array(z.string().min(1).max(40)).max(20).optional(),
-});
-
-const loadBalancerSchema = z.object({
-  name: z.string().min(1).max(40),
-  target: z.string().min(1).max(40),
-  target_kind: z.enum(["application", "vms"]),
-  ports: z.array(z.number().int().min(1).max(65535)).min(1).max(16),
-});
-
-const createSchema = z.object({
-  name: z
-    .string()
-    .min(2)
-    .max(32)
-    .regex(/^[a-z][a-z0-9-]*$/, "name must be lowercase alphanumeric/hyphen"),
-  mode: z.enum(["vm", "gke"]),
-  youremail: z
-    .string()
-    .trim()
-    .max(63)
-    .refine((v) => isValidCreatedBy(v), { message: CREATED_BY_ERROR }),
-  skip_deletion: z.boolean().optional(),
-  redis_enabled: z.boolean().optional(),
-  project: z.string().min(1),
-  credentialsFile: z.string().min(1),
-  region_name: z.string().optional(),
-  env: z.string().optional(),
-  folder: z.string().max(60).optional(),
-  clustersize: z.number().int().min(0).max(9).optional(),
-  machine_type: z.string().optional(),
-  RS_release: z.string().optional(),
-  RS_admin: z.string().optional(),
-  app: z.number().int().min(0).max(5).optional(),
-  app_machine_types: z.array(z.string().min(1)).max(5).optional(),
-  app_machine_type: z.string().optional(),
-  memviz_enabled: z.boolean().optional(),
-  memviz_port: z.number().optional(),
-  app_expose_http: z.boolean().optional(),
-  app_expose_https: z.boolean().optional(),
-  app_disk_gib: z.array(z.number().int()).max(5).optional(),
-  app_extra_ports: z.union([z.string(), z.array(z.number().int())]).optional(),
-  rof_nvme_disks: z.number().int().min(0).max(24).optional(),
-  gke_clustersize: z.number().int().min(1).max(10).optional(),
-  gke_machine_type: z.string().optional(),
-  rec_nodes: z.number().int().min(1).max(9).optional(),
-  operator_chart_version: z.string().optional(),
-  rs_version: z.string().optional(),
-  clusters: z
-    .array(
-      z.object({
-        name: z.string().max(40).optional(),
-        nodes: z.number().int().min(1).max(9).optional(),
-        machine_type: z.string().optional(),
-        rof_nvme_disks: z.number().int().min(0).max(24).optional(),
-        rs_version: z.string().optional(),
-        RS_release: z.string().optional(),
-        rec_nodes: z.number().int().min(1).max(9).optional(),
-        databases: z.array(databaseSchema).max(16).optional(),
-        license: z.string().max(20000).optional(),
-      }),
-    )
-    .min(0)
-    .max(3)
-    .optional(),
-  applications: z.array(applicationSchema).max(8).optional(),
-  load_balancers: z.array(loadBalancerSchema).max(8).optional(),
-  dns_managed_zone: z.string().optional(),
-  dns_zone_dns_name: z.string().optional(),
-  rs_private_subnet: z.string().optional(),
-  rs_public_subnet: z.string().optional(),
-  region_zones: z.array(z.string()).optional(),
-});
-
-const preflightSchema = createSchema.partial({ project: true }).extend({
-  project: z.string().optional(),
-});
 
 function toId(name: string, env?: string): string {
   return `${name}-${env || "default"}`;
@@ -241,6 +127,9 @@ app.addHook("preHandler", async (req, reply) => {
   await authHook(req, reply);
   if (reply.sent) return;
 });
+
+registerDesignRoutes(app);
+registerResourceRoutes(app);
 
 app.get("/health", async () => ({
   ok: true,
@@ -437,7 +326,15 @@ app.post("/preflight", async (req, reply) => {
     input.youremail = createdBy;
     const { absPath } = await resolveOwnedCredentialsPath(user, input.credentialsFile);
     input.credentialsFile = absPath;
-    return await preflight(input);
+    // When re-validating an instance the caller is editing (a draft or a
+    // destroyed record they may overwrite), don't flag its own id as a clash.
+    const id = toId(input.name, input.env);
+    const existing = await getInstance(id);
+    const overwriteable =
+      existing &&
+      (existing.status === "destroyed" || existing.status === "draft") &&
+      canMutateInstance(user, existing);
+    return await preflight(input, overwriteable ? { allowExistingId: id } : undefined);
   } catch (err) {
     const { status, body } = gcpErrorReply(err);
     return reply.code(status).send(body);
@@ -673,10 +570,10 @@ app.post("/instances", async (req, reply) => {
   input.youremail = createdBy;
   const id = toId(input.name, input.env);
   const existing = await getInstance(id);
-  // A destroyed instance keeps its record until it is forgotten; re-creating
-  // over it (e.g. after editing its config in the wizard/designer) overwrites
-  // it. A live instance still blocks with 409.
-  if (existing && existing.status !== "destroyed") {
+  // A destroyed instance keeps its record until it is forgotten, and a draft is
+  // an AI/human-defined config not yet applied; applying either (e.g. from the
+  // designer or a reviewed draft) overwrites it. A live instance blocks with 409.
+  if (existing && existing.status !== "destroyed" && existing.status !== "draft") {
     return reply.code(409).send({ error: `Instance ${id} already exists` });
   }
   const overwriting = Boolean(existing);
@@ -764,6 +661,9 @@ app.post("/instances", async (req, reply) => {
       if (input.mode === "gke") {
         input.rec_nodes = clusters[0].rec_nodes;
         input.operator_chart_version = resolveGkeOperatorChart(input.operator_chart_version);
+        // Validate operator structure (count/uniqueness) and each version id;
+        // both throw → 400 below. Operator version ids are kept as authored.
+        for (const op of normalizeOperators(input)) resolveGkeOperatorChart(op.operator_chart_version);
       }
     } else if (input.mode === "gke") {
       return reply.code(400).send({
@@ -791,6 +691,12 @@ app.post("/instances", async (req, reply) => {
     } catch (err) {
       return reply.code(400).send({ error: err instanceof Error ? err.message : String(err) });
     }
+  }
+
+  // Synthesize the RDI pipeline-state database (once, persisted) so it flows
+  // into both workspace generation and post-bootstrap database creation.
+  if (input.rdi) {
+    Object.assign(input, withRdiInternalDatabases(input));
   }
 
   const workDir = instanceDir(id);
@@ -883,7 +789,8 @@ app.post<{ Params: { id: string } }>("/instances/:id/forget", async (req, reply)
     return httpError(reply, err);
   }
   if (isBusy(inst.id)) return reply.code(409).send({ error: "instance is busy" });
-  if (inst.status !== "destroyed" && inst.status !== "failed") {
+  // Drafts never provisioned anything, so they are safe to drop without a destroy.
+  if (inst.status !== "destroyed" && inst.status !== "failed" && inst.status !== "draft") {
     return reply.code(409).send({
       error: `Refusing to forget an instance in status "${inst.status}" — destroy it first`,
     });

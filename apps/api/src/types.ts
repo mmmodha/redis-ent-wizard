@@ -1,4 +1,6 @@
 export type InstanceStatus =
+  /** Defined (e.g. by an AI tool via MCP) but not yet applied; awaiting human review. */
+  | "draft"
   | "pending"
   | "applying"
   /** Terraform finished; Redis Enterprise is still installing/forming the cluster. */
@@ -42,6 +44,11 @@ export interface DatabaseSpec {
   oss_cluster?: boolean;
   /** Redis on Flash (Auto Tiering) — needs NVMe disks on the cluster. */
   flex?: boolean;
+  /**
+   * Marks a database that the tool synthesizes as the RDI pipeline state store.
+   * Set only by `withRdiInternalDatabases`; never authored by the user.
+   */
+  rdi_internal?: boolean;
 }
 
 export type ArtifactKind = "upload" | "url" | "gcs" | "git";
@@ -71,6 +78,92 @@ export interface LoadBalancerSpec {
   ports: number[];
 }
 
+/** A Cloud SQL instance (Postgres or MySQL) available to workloads. */
+export interface CloudSqlSpec {
+  /** Short name; the actual instance is `<deploymentPrefix>-<slug>`. */
+  name: string;
+  engine?: "postgres" | "mysql";
+  /** Machine tier, e.g. db-f1-micro, db-custom-1-3840. */
+  tier?: string;
+  /** Application database created on the instance. */
+  db_name?: string;
+  /** Application database user (password is auto-generated). */
+  db_user?: string;
+  /** How consumers reach the instance. */
+  connectivity?: "private" | "proxy" | "public";
+  /**
+   * Enable change-data-capture prerequisites (Postgres logical decoding /
+   * MySQL binlog). Set automatically when the instance is wired as an RDI
+   * source; may force an instance restart.
+   */
+  cdc_enabled?: boolean;
+}
+
+/** One source table in an RDI pipeline and how its rows land in Redis. */
+export interface RdiTableSpec {
+  /** Source table, optionally schema-qualified (e.g. public.orders). */
+  table: string;
+  /** Target Redis key prefix for rows from this table (defaults to the table name). */
+  key_prefix?: string;
+}
+
+/** One RDI pipeline: change data from a single Cloud SQL source. */
+export interface RdiPipelineSpec {
+  /** Cloud SQL source instance short-name — a wired RDI→Cloud SQL edge. */
+  source: string;
+  /** Tables to ingest; empty means "all tables" (RDI default). */
+  tables?: RdiTableSpec[];
+}
+
+/**
+ * Redis Data Integration: a connector that ingests change data from one or
+ * more Cloud SQL sources into a target Redis database. One RDI per deployment.
+ */
+export interface RdiSpec {
+  /** Short name; the runtime is `<deploymentPrefix>-<slug>`. */
+  name: string;
+  /** VM-mode machine type for the dedicated RDI VM. */
+  machine_type?: string;
+  /** Target Redis database short-name — a wired RDI→database edge. */
+  target?: string;
+  /** One pipeline per wired Cloud SQL source. */
+  pipelines?: RdiPipelineSpec[];
+}
+
+/** A BigQuery dataset available to workloads. */
+export interface BigquerySpec {
+  /** Short name; the actual dataset id is `<deploymentPrefix>_<slug>` (underscores). */
+  name: string;
+  /** BigQuery location: a region (e.g. europe-west1) or a multi-region (US/EU). Defaults to the deployment region. */
+  location?: string;
+  /** Access granted to a connected consumer's SA on the dataset. */
+  access?: "read" | "readwrite";
+}
+
+/** A Pub/Sub topic (with an optional subscription) available to workloads. */
+export interface PubsubSpec {
+  /** Short name; the actual topic is `<deploymentPrefix>-<slug>`. */
+  name: string;
+  /** Also create a pull subscription `<topic>-sub`. */
+  create_subscription?: boolean;
+  /** Which IAM roles a connected consumer's SA gets on the topic/subscription. */
+  role?: "publish" | "subscribe" | "both";
+}
+
+/** A Google Cloud Storage bucket available as object storage to workloads. */
+export interface StorageBucketSpec {
+  /** Short name; the actual bucket is `<deploymentPrefix>-<slug>`. */
+  name: string;
+  /** GCS location: a region (e.g. europe-west1) or a multi-region (US/EU/ASIA). Defaults to the deployment region. */
+  location?: string;
+  storage_class?: "STANDARD" | "NEARLINE" | "COLDLINE" | "ARCHIVE";
+  versioning?: boolean;
+  /** Allow terraform destroy to delete a non-empty bucket (default true for lab teardown). */
+  force_destroy?: boolean;
+  /** Access granted to a connected consumer's service account. */
+  access?: "read" | "readwrite";
+}
+
 export interface Application {
   name: string;
   /** Optional. When empty on VM, the artifact is only staged (manual start). */
@@ -81,6 +174,20 @@ export interface Application {
   requirements?: string[];
   /** Names of clusters in this deployment whose endpoint is injected as env. */
   connectClusters?: string[];
+  /** Names of databases whose endpoint is injected as REDIS_<DB>_ENDPOINT. */
+  connectDatabases?: string[];
+  /** Names of load balancers whose VIP is injected as LB_<LB>_ENDPOINT. */
+  connectLoadBalancers?: string[];
+  /** Names of other applications / Set-of-VMs whose host is injected as <NAME>_HOST. */
+  connectApps?: string[];
+  /** Names of storage buckets injected as GCS_<NAME>_BUCKET / GCS_<NAME>_URL. */
+  connectStorage?: string[];
+  /** Names of Pub/Sub topics injected as PUBSUB_<NAME>_TOPIC / _SUBSCRIPTION / _PROJECT. */
+  connectPubsub?: string[];
+  /** Names of BigQuery datasets injected as BIGQUERY_<NAME>_DATASET / _PROJECT / _LOCATION. */
+  connectBigquery?: string[];
+  /** Names of Cloud SQL instances injected as SQL_<NAME>_HOST / _DB / _USER / _PASSWORD / _CONNECTION_NAME. */
+  connectSql?: string[];
   // VM
   artifact?: ApplicationArtifact;
   vm_count?: number;
@@ -104,6 +211,8 @@ export interface DatabaseState {
   endpoint?: string;
   port?: number;
   error?: string;
+  /** Set when the actual bdb endpoint differs from the predicted one injected into consumers. */
+  warning?: string;
 }
 
 /** Per-cluster license application state recorded after the cluster forms. */
@@ -186,6 +295,10 @@ export interface CreateInstanceInput {
     rs_version?: string;
     RS_release?: string;
     rec_nodes?: number;
+    /** Redis Enterprise admin username for this cluster (VM mode). */
+    RS_admin?: string;
+    /** GKE only: name of the operator that owns this cluster (REC). */
+    operator?: string;
     /** Databases to create on this cluster after it forms. */
     databases?: DatabaseSpec[];
     /** Redis Enterprise license key applied to this cluster once it forms. */
@@ -195,12 +308,42 @@ export interface CreateInstanceInput {
   applications?: Application[];
   /** Internal load balancers fronting application / Set-of-VMs groups (VM mode). */
   load_balancers?: LoadBalancerSpec[];
+  /** Cloud Storage buckets provisioned for this deployment (VM and GKE). */
+  storage_buckets?: StorageBucketSpec[];
+  /** Pub/Sub topics provisioned for this deployment (VM and GKE). */
+  pubsub_topics?: PubsubSpec[];
+  /** BigQuery datasets provisioned for this deployment (VM and GKE). */
+  bigquery_datasets?: BigquerySpec[];
+  /** Cloud SQL instances provisioned for this deployment (VM and GKE). */
+  cloud_sql_instances?: CloudSqlSpec[];
+  /** Redis Data Integration runtime + pipelines for this deployment (one per deployment). */
+  rdi?: RdiSpec;
+  /** Connection references from the Set-of-VMs group (app VMs) to providers in this deployment. */
+  vms_connect?: {
+    clusters?: string[];
+    databases?: string[];
+    load_balancers?: string[];
+    apps?: string[];
+    storage?: string[];
+    pubsub?: string[];
+    bigquery?: string[];
+    sql?: string[];
+  };
   // GKE
   gke_clustersize?: number;
   gke_machine_type?: string;
   rec_nodes?: number;
-  /** Helm chart version for redis-enterprise-operator. Empty = latest. */
+  /**
+   * Deployment-wide Helm chart version for redis-enterprise-operator. Empty =
+   * latest. Back-compat fallback for configs without per-operator `operators[]`.
+   */
   operator_chart_version?: string;
+  /** GKE Redis Operators; each owns the clusters (RECs) that reference it. */
+  operators?: Array<{
+    name?: string;
+    /** Helm chart version for this operator. Empty/"latest" = latest chart. */
+    operator_chart_version?: string;
+  }>;
   // shared
   dns_managed_zone?: string;
   dns_zone_dns_name?: string;

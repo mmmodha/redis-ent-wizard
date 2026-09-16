@@ -155,6 +155,7 @@ variable "clusters" {
     machine_type   = string
     rof_nvme_disks = number
     RS_release     = string
+    RS_admin       = optional(string, "admin@redis.io")
   }))
   description = "Redis clusters in this deployment. Empty means no Redis VMs when redis_enabled is false."
   default     = []
@@ -168,24 +169,45 @@ variable "ssh_private_key_path" {
 
 variable "applications" {
   type = list(object({
-    name                = string
-    artifact_local_path = string
-    artifact_type       = string
-    artifact_filename   = string
-    git_url             = string
-    git_ref             = string
-    command             = string
-    vm_count            = number
-    machine_type        = string
-    disk_gib            = number
-    ports               = list(number)
-    env                 = map(string)
-    expose_http         = bool
-    expose_https        = bool
-    requirements        = list(string)
+    name                  = string
+    artifact_local_path   = string
+    artifact_type         = string
+    artifact_filename     = string
+    git_url               = string
+    git_ref               = string
+    command               = string
+    vm_count              = number
+    machine_type          = string
+    disk_gib              = number
+    ports                 = list(number)
+    env                   = map(string)
+    connect_cluster_admin = map(number)
+    connect_lb            = map(string)
+    connect_sql           = map(string)
+    expose_http           = bool
+    expose_https          = bool
+    requirements          = list(string)
   }))
   description = "Custom application workloads run on dedicated VMs."
   default     = []
+}
+
+variable "app_injected_env" {
+  type        = map(string)
+  description = "Static connection env for the Set-of-VMs group (app_vm)."
+  default     = {}
+}
+
+variable "app_connect_cluster_admin" {
+  type        = map(number)
+  description = "Set-of-VMs: env-var name -> re_vm index for the injected cluster admin password."
+  default     = {}
+}
+
+variable "app_connect_lb" {
+  type        = map(string)
+  description = "Set-of-VMs: env-var name -> load-balancer name for the injected LB endpoint."
+  default     = {}
 }
 
 variable "load_balancers" {
@@ -197,4 +219,98 @@ variable "load_balancers" {
   }))
   description = "Regional internal TCP passthrough load balancers fronting app VMs."
   default     = []
+}
+
+variable "storage_buckets" {
+  type = list(object({
+    name          = string
+    location      = string
+    storage_class = string
+    versioning    = bool
+    force_destroy = bool
+    grant_role    = string # "" = no IAM grant; else the role granted to the compute SA
+  }))
+  description = "Cloud Storage buckets provisioned for this deployment."
+  default     = []
+}
+
+variable "pubsub_topics" {
+  type = list(object({
+    name                = string
+    create_subscription = bool
+    grant_publisher     = bool
+    grant_subscriber    = bool
+  }))
+  description = "Pub/Sub topics provisioned for this deployment."
+  default     = []
+}
+
+variable "bigquery_datasets" {
+  type = list(object({
+    name          = string
+    location      = string
+    grant_role    = string
+    grant_jobuser = bool
+  }))
+  description = "BigQuery datasets provisioned for this deployment."
+  default     = []
+}
+
+variable "cloud_sql_instances" {
+  type = list(object({
+    name             = string
+    database_version = string
+    tier             = string
+    db_name          = string
+    db_user          = string
+    connectivity     = string
+    grant_client     = bool
+    cdc_enabled      = bool
+  }))
+  description = "Cloud SQL instances provisioned for this deployment."
+  default     = []
+}
+
+variable "rdi_enabled" {
+  type        = bool
+  description = "Deploy the Redis Data Integration runtime."
+  default     = false
+}
+
+variable "rdi" {
+  type = object({
+    name            = string
+    machine_type    = string
+    version         = string
+    chart_version   = string
+    env             = map(string)
+    pipeline_config = string
+  })
+  description = "RDI runtime + rendered pipeline config."
+  default = {
+    name            = ""
+    machine_type    = ""
+    version         = ""
+    chart_version   = ""
+    env             = {}
+    pipeline_config = ""
+  }
+}
+
+variable "rdi_connect_cluster_admin" {
+  type        = map(number)
+  description = "RDI env-var name -> re_vm cluster index for the apply-time admin password."
+  default     = {}
+}
+
+variable "rdi_connect_sql" {
+  type        = map(string)
+  description = "RDI Cloud SQL source slug -> instance full name for apply-time host/password."
+  default     = {}
+}
+
+variable "app_connect_sql" {
+  type        = map(string)
+  description = "Set-of-VMs: SQL env-var slug -> Cloud SQL instance name for injected HOST/PASSWORD."
+  default     = {}
 }

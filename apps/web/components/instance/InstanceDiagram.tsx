@@ -26,7 +26,10 @@ function rowsFor(node: DesignNode): SpecRow[] {
     if (v) rows.push({ label, value: v });
   };
   add("Kind", d.kind);
-  if (d.kind === "cluster") {
+  if (d.kind === "operator") {
+    add("Name", d.name);
+    add("Version", d.operator_chart_version && d.operator_chart_version !== "latest" ? d.operator_chart_version : "latest");
+  } else if (d.kind === "cluster") {
     add("Name", d.name);
     add("Nodes", d.nodes);
     add("REC nodes", d.rec_nodes);
@@ -83,7 +86,9 @@ function SpecPanel({ node }: { node: DesignNode | null }) {
     );
   }
   const title =
-    node.data.kind === "cluster"
+    node.data.kind === "operator"
+      ? node.data.name.trim() || "Redis Operator"
+      : node.data.kind === "cluster"
       ? node.data.name.trim() || "Redis cluster"
       : node.data.kind === "database"
         ? node.data.name.trim() || "Database"
@@ -199,11 +204,7 @@ export function InstanceDiagram({
     folder: String(config.folder || ""),
     youremail: String(config.youremail || ""),
     skip_deletion: Boolean(config.skip_deletion),
-    redis_enabled: Array.isArray(config.clusters)
-      ? (config.clusters as unknown[]).length > 0
-      : config.redis_enabled !== false,
     mode,
-    RS_admin: String(config.RS_admin || ""),
     operator_chart_version: String(config.operator_chart_version || ""),
     credentialsFile: "",
     project: String(config.project || ""),

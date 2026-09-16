@@ -2,18 +2,26 @@
 
 import { useEffect, useState } from "react";
 import { MachineTypePicker } from "@/components/MachineTypePicker";
-import { uploadArtifact, type MachineTypeInfo, type RsReleaseInfo } from "@/lib/api";
+import { uploadArtifact, type GkeOperatorInfo, type MachineTypeInfo, type RsReleaseInfo } from "@/lib/api";
 import {
   APP_REQUIREMENTS,
   ARTIFACT_SOURCE_OPTIONS,
   DB_MODULES,
   EVICTION_POLICIES,
+  exposedVariables,
   withGitSourceRequirements,
   type ApplicationData,
   type ClusterData,
   type DatabaseData,
   type DesignNodeData,
+  type BigqueryData,
+  type CloudSqlData,
   type LoadBalancerData,
+  type OperatorData,
+  type PubsubData,
+  type RdiData,
+  type StorageData,
+  type NodeKind,
   type RootData,
   type VmsData,
 } from "@/lib/diagram";
@@ -33,6 +41,8 @@ type Props = {
   machineTypes: MachineTypeInfo[];
   loadingMachines?: boolean;
   vmReleases: RsReleaseInfo[];
+  /** GKE operator chart versions to choose from (operator dialog). */
+  gkeReleases?: GkeOperatorInfo[];
   probeZone: string;
   /** Whether the database's parent cluster has NVMe disks (enables Flex). */
   clusterHasNvme?: boolean;
@@ -41,6 +51,8 @@ type Props = {
   onSave: (data: DesignNodeData) => void;
   onCancel: () => void;
   onDelete?: () => void;
+  /** Notifies the parent whenever an artifact upload starts/finishes. */
+  onUploadingChange?: (uploading: boolean) => void;
 };
 
 const NVME_OPTIONS = [0, 1, 2, 4, 8];
@@ -56,12 +68,14 @@ export function NodeDialog({
   machineTypes,
   loadingMachines,
   vmReleases,
+  gkeReleases = [],
   probeZone,
   clusterHasNvme,
   clusterNodes = 0,
   onSave,
   onCancel,
   onDelete,
+  onUploadingChange,
 }: Props) {
   const [draft, setDraft] = useState<DesignNodeData>(target.data);
   const [uploadError, setUploadError] = useState("");
@@ -71,6 +85,11 @@ export function NodeDialog({
     setDraft(target.data);
   }, [target]);
 
+  useEffect(() => {
+    onUploadingChange?.(uploading);
+    return () => onUploadingChange?.(false);
+  }, [uploading, onUploadingChange]);
+
   function set<T extends DesignNodeData>(patch: Partial<T>) {
     setDraft((prev) => ({ ...prev, ...patch }) as DesignNodeData);
   }
@@ -78,11 +97,17 @@ export function NodeDialog({
   const titles: Record<string, string> = {
     network: "VPC network",
     gke: "GKE cluster",
+    operator: "Redis Operator",
     cluster: "Redis cluster",
     database: "Database",
     vms: "Set of VMs",
     application: "Application",
     loadbalancer: "Load balancer",
+    storage: "Cloud Storage bucket",
+    pubsub: "Pub/Sub topic",
+    bigquery: "BigQuery dataset",
+    cloudsql: "Cloud SQL instance",
+    rdi: "Redis Data Integration",
   };
 
   return (
@@ -103,6 +128,10 @@ export function NodeDialog({
               loadingMachines={loadingMachines}
               probeZone={probeZone}
             />
+          ) : null}
+
+          {target.type === "operator" ? (
+            <OperatorForm data={draft as OperatorData} set={set} gkeReleases={gkeReleases} />
           ) : null}
 
           {target.type === "cluster" ? (
@@ -167,6 +196,45 @@ export function NodeDialog({
           {target.type === "loadbalancer" ? (
             <LoadBalancerForm data={draft as LoadBalancerData} set={set} />
           ) : null}
+
+          {target.type === "storage" ? (
+            <StorageForm data={draft as StorageData} set={set} probeZone={probeZone} />
+          ) : null}
+
+          {target.type === "pubsub" ? <PubsubForm data={draft as PubsubData} set={set} /> : null}
+
+          {target.type === "bigquery" ? (
+            <BigqueryForm data={draft as BigqueryData} set={set} probeZone={probeZone} />
+          ) : null}
+
+          {target.type === "cloudsql" ? <CloudSqlForm data={draft as CloudSqlData} set={set} /> : null}
+
+          {target.type === "rdi" ? (
+            <RdiForm
+              data={draft as RdiData}
+              set={set}
+              machineTypes={machineTypes}
+              loadingMachines={loadingMachines}
+              probeZone={probeZone}
+            />
+          ) : null}
+
+          {[
+            "cluster",
+            "database",
+            "vms",
+            "application",
+            "loadbalancer",
+            "storage",
+            "pubsub",
+            "bigquery",
+            "cloudsql",
+          ].includes(target.type) ? (
+            <ExposesNote
+              kind={target.type as NodeKind}
+              name={target.type === "vms" ? "app" : String((draft as { name?: string }).name || "").trim()}
+            />
+          ) : null}
         </div>
         <div className="design-modal-foot">
           {onDelete ? (
@@ -199,6 +267,66 @@ export function NodeDialog({
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+/** Read-only list of the env vars a provider injects into components wired to it. */
+function ExposesNote({ kind, name }: { kind: NodeKind; name: string }) {
+  const vars = exposedVariables(kind, name);
+  if (!vars.length) return null;
+  return (
+    <div className="design-field design-exposes-note">
+      <label>Exposes to connected components</label>
+      <ul className="design-exposes-list">
+        {vars.map((v) => (
+          <li key={v.name}>
+            <code className="mono">{v.name}</code>
+            <span className="design-exposes-desc"> — {v.description}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function OperatorForm({
+  data,
+  set,
+  gkeReleases,
+}: {
+  data: OperatorData;
+  set: <T extends DesignNodeData>(p: Partial<T>) => void;
+  gkeReleases: GkeOperatorInfo[];
+}) {
+  const releases = gkeReleases.length
+    ? gkeReleases
+    : [{ id: "latest", label: "Latest operator chart", chartVersion: "" }];
+  return (
+    <div className="grid">
+      <label>
+        Operator name
+        <input
+          value={data.name}
+          onChange={(e) => set<OperatorData>({ name: e.target.value.slice(0, 40) })}
+          placeholder="operator"
+        />
+        <span className="hint">Names the operator&apos;s namespace; clusters dropped here run on it.</span>
+      </label>
+      <label>
+        Operator / Redis version
+        <select
+          value={data.operator_chart_version || "latest"}
+          onChange={(e) => set<OperatorData>({ operator_chart_version: e.target.value })}
+        >
+          {releases.map((r) => (
+            <option key={r.id} value={r.id}>
+              {r.label}
+            </option>
+          ))}
+        </select>
+        <span className="hint">The redis-enterprise-operator Helm chart version for this operator.</span>
+      </label>
     </div>
   );
 }
@@ -291,6 +419,14 @@ function ClusterForm({
       </label>
       {mode === "vm" ? (
         <>
+          <label>
+            Redis Enterprise admin
+            <input
+              value={data.RS_admin ?? "admin@redis.io"}
+              onChange={(e) => set<ClusterData>({ RS_admin: e.target.value })}
+              placeholder="admin@redis.io"
+            />
+          </label>
           <MachineTypePicker
             label="Redis node machine type"
             value={data.machine_type}
@@ -333,7 +469,10 @@ function ClusterForm({
           </label>
         </>
       ) : (
-        <p className="hint">Redis version and node sizing come from the GKE operator chart and node pool.</p>
+        <p className="hint">
+          Redis version and node sizing come from the operator chart and node pool. Drag this cluster onto a
+          Redis Operator to choose which operator runs it.
+        </p>
       )}
       <label className="design-field-wide">
         License key
@@ -1016,6 +1155,256 @@ function LoadBalancerForm({
         />
         <span className="hint">Comma-separated ports or ranges opened from the internet.</span>
       </label>
+    </div>
+  );
+}
+
+function StorageForm({
+  data,
+  set,
+  probeZone,
+}: {
+  data: StorageData;
+  set: <T extends DesignNodeData>(p: Partial<T>) => void;
+  probeZone: string;
+}) {
+  const region = probeZone.replace(/-[a-z]$/, "");
+  return (
+    <div className="grid">
+      <label>
+        Bucket name
+        <input
+          value={data.name}
+          onChange={(e) => set<StorageData>({ name: e.target.value.slice(0, 40) })}
+          placeholder="assets"
+        />
+        <span className="hint">
+          The real bucket is prefixed with the deployment name for global uniqueness.
+        </span>
+      </label>
+      <label>
+        Location
+        <select value={data.location} onChange={(e) => set<StorageData>({ location: e.target.value })}>
+          <option value="">Deployment region{region ? ` (${region})` : ""}</option>
+          <option value="US">US (multi-region)</option>
+          <option value="EU">EU (multi-region)</option>
+          <option value="ASIA">ASIA (multi-region)</option>
+        </select>
+      </label>
+      <label>
+        Storage class
+        <select
+          value={data.storage_class}
+          onChange={(e) => set<StorageData>({ storage_class: e.target.value as StorageData["storage_class"] })}
+        >
+          <option value="STANDARD">Standard</option>
+          <option value="NEARLINE">Nearline</option>
+          <option value="COLDLINE">Coldline</option>
+          <option value="ARCHIVE">Archive</option>
+        </select>
+      </label>
+      <label>
+        Access for connected components
+        <select
+          value={data.access}
+          onChange={(e) => set<StorageData>({ access: e.target.value as StorageData["access"] })}
+        >
+          <option value="readwrite">Read &amp; write</option>
+          <option value="read">Read-only</option>
+        </select>
+        <span className="hint">Read &amp; write widens connected app VMs to the cloud-platform scope.</span>
+      </label>
+      <label className="design-check-row">
+        <input
+          type="checkbox"
+          checked={data.versioning}
+          onChange={(e) => set<StorageData>({ versioning: e.target.checked })}
+        />
+        Object versioning
+      </label>
+      <label className="design-check-row">
+        <input
+          type="checkbox"
+          checked={data.force_destroy}
+          onChange={(e) => set<StorageData>({ force_destroy: e.target.checked })}
+        />
+        Allow destroy of a non-empty bucket
+      </label>
+    </div>
+  );
+}
+
+function PubsubForm({
+  data,
+  set,
+}: {
+  data: PubsubData;
+  set: <T extends DesignNodeData>(p: Partial<T>) => void;
+}) {
+  return (
+    <div className="grid">
+      <label>
+        Topic name
+        <input
+          value={data.name}
+          onChange={(e) => set<PubsubData>({ name: e.target.value.slice(0, 40) })}
+          placeholder="events"
+        />
+        <span className="hint">The real topic is prefixed with the deployment name.</span>
+      </label>
+      <label>
+        Access for connected components
+        <select value={data.role} onChange={(e) => set<PubsubData>({ role: e.target.value as PubsubData["role"] })}>
+          <option value="both">Publish &amp; subscribe</option>
+          <option value="publish">Publish only</option>
+          <option value="subscribe">Subscribe only</option>
+        </select>
+      </label>
+      <label className="design-check-row">
+        <input
+          type="checkbox"
+          checked={data.create_subscription}
+          onChange={(e) => set<PubsubData>({ create_subscription: e.target.checked })}
+        />
+        Create a pull subscription
+      </label>
+    </div>
+  );
+}
+
+function BigqueryForm({
+  data,
+  set,
+  probeZone,
+}: {
+  data: BigqueryData;
+  set: <T extends DesignNodeData>(p: Partial<T>) => void;
+  probeZone: string;
+}) {
+  const region = probeZone.replace(/-[a-z]$/, "");
+  return (
+    <div className="grid">
+      <label>
+        Dataset name
+        <input
+          value={data.name}
+          onChange={(e) => set<BigqueryData>({ name: e.target.value.slice(0, 40) })}
+          placeholder="analytics"
+        />
+        <span className="hint">The dataset id is prefixed with the deployment name (underscores).</span>
+      </label>
+      <label>
+        Location
+        <select value={data.location} onChange={(e) => set<BigqueryData>({ location: e.target.value })}>
+          <option value="">Deployment region{region ? ` (${region})` : ""}</option>
+          <option value="US">US (multi-region)</option>
+          <option value="EU">EU (multi-region)</option>
+        </select>
+      </label>
+      <label>
+        Access for connected components
+        <select value={data.access} onChange={(e) => set<BigqueryData>({ access: e.target.value as BigqueryData["access"] })}>
+          <option value="readwrite">Read &amp; write (dataEditor)</option>
+          <option value="read">Read-only (dataViewer)</option>
+        </select>
+        <span className="hint">Connected components also get project-level bigquery.jobUser to run queries.</span>
+      </label>
+    </div>
+  );
+}
+
+function CloudSqlForm({
+  data,
+  set,
+}: {
+  data: CloudSqlData;
+  set: <T extends DesignNodeData>(p: Partial<T>) => void;
+}) {
+  return (
+    <div className="grid">
+      <label>
+        Instance name
+        <input
+          value={data.name}
+          onChange={(e) => set<CloudSqlData>({ name: e.target.value.slice(0, 40) })}
+          placeholder="orders"
+        />
+        <span className="hint">The instance is prefixed with the deployment name.</span>
+      </label>
+      <label>
+        Engine
+        <select value={data.engine} onChange={(e) => set<CloudSqlData>({ engine: e.target.value as CloudSqlData["engine"] })}>
+          <option value="postgres">PostgreSQL 15</option>
+          <option value="mysql">MySQL 8.0</option>
+        </select>
+      </label>
+      <label>
+        Machine tier
+        <input value={data.tier} onChange={(e) => set<CloudSqlData>({ tier: e.target.value })} placeholder="db-f1-micro" />
+      </label>
+      <label>
+        Connectivity
+        <select
+          value={data.connectivity}
+          onChange={(e) => set<CloudSqlData>({ connectivity: e.target.value as CloudSqlData["connectivity"] })}
+        >
+          <option value="private">Private IP (VPC peering)</option>
+          <option value="proxy">Public IP + Auth Proxy</option>
+          <option value="public">Public IP + open networks</option>
+        </select>
+        <span className="hint">Private keeps the instance off the internet; peering is added to the VPC.</span>
+      </label>
+      <label>
+        Database name
+        <input value={data.db_name} onChange={(e) => set<CloudSqlData>({ db_name: e.target.value })} placeholder="appdb" />
+      </label>
+      <label>
+        Database user
+        <input value={data.db_user} onChange={(e) => set<CloudSqlData>({ db_user: e.target.value })} placeholder="appuser" />
+        <span className="hint">Password is auto-generated and injected into connected components.</span>
+      </label>
+    </div>
+  );
+}
+
+function RdiForm({
+  data,
+  set,
+  machineTypes,
+  loadingMachines,
+  probeZone,
+}: {
+  data: RdiData;
+  set: <T extends DesignNodeData>(p: Partial<T>) => void;
+  machineTypes: MachineTypeInfo[];
+  loadingMachines?: boolean;
+  probeZone: string;
+}) {
+  return (
+    <div className="grid">
+      <label>
+        Name
+        <input
+          value={data.name}
+          onChange={(e) => set<RdiData>({ name: e.target.value.slice(0, 40) })}
+          placeholder="ingest"
+        />
+        <span className="hint">The RDI runtime is prefixed with the deployment name.</span>
+      </label>
+      <MachineTypePicker
+        label="RDI VM machine type"
+        value={data.machine_type}
+        onChange={(v) => set<RdiData>({ machine_type: v })}
+        machineTypes={machineTypes}
+        loading={loadingMachines}
+        preferredFamilies={["n2", "e2", "n2d"]}
+        hint={`Used in VM mode; types available in ${probeZone || "selected zone"}`}
+      />
+      <p className="hint" style={{ margin: 0 }}>
+        Wire this RDI node to one or more Cloud SQL instances (pipeline sources) and to a single Redis
+        database (the target). The pipeline-state database is created automatically in the target&apos;s
+        cluster.
+      </p>
     </div>
   );
 }

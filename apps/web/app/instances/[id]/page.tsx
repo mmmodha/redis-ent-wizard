@@ -68,11 +68,20 @@ function deploymentSummary(inst: Instance): { label: string; value: string }[] {
       });
     }
   });
-  if (inst.mode === "gke" && cfg.operator_chart_version) {
-    rows.push({
-      label: "Operator",
-      value: String(cfg.operator_chart_version || "latest"),
-    });
+  if (inst.mode === "gke") {
+    const ops = Array.isArray(cfg.operators)
+      ? (cfg.operators as Array<{ name?: string; operator_chart_version?: string }>)
+      : [];
+    if (ops.length) {
+      ops.forEach((op, i) => {
+        rows.push({
+          label: `Operator ${op.name || (i === 0 ? "operator" : `operator-${i + 1}`)}`,
+          value: String(op.operator_chart_version || "latest"),
+        });
+      });
+    } else if (cfg.operator_chart_version) {
+      rows.push({ label: "Operator", value: String(cfg.operator_chart_version || "latest") });
+    }
   }
   const app = Number(cfg.app || 0);
   if (app > 0) {
@@ -379,6 +388,27 @@ export default function InstanceDetailPage() {
     }
   });
   const showLbPanel = loadBalancers.length > 0;
+  const storageBuckets = Array.isArray(inst?.endpoints?.storage_buckets)
+    ? (inst!.endpoints!.storage_buckets as Array<Record<string, unknown>>)
+    : [];
+  const showStoragePanel = storageBuckets.length > 0;
+  const pubsubTopics = Array.isArray(inst?.endpoints?.pubsub_topics)
+    ? (inst!.endpoints!.pubsub_topics as Array<Record<string, unknown>>)
+    : [];
+  const showPubsubPanel = pubsubTopics.length > 0;
+  const bigqueryDatasets = Array.isArray(inst?.endpoints?.bigquery_datasets)
+    ? (inst!.endpoints!.bigquery_datasets as Array<Record<string, unknown>>)
+    : [];
+  const showBigqueryPanel = bigqueryDatasets.length > 0;
+  const cloudSqlInstances = Array.isArray(inst?.endpoints?.cloud_sql_instances)
+    ? (inst!.endpoints!.cloud_sql_instances as Array<Record<string, unknown>>)
+    : [];
+  const showCloudSqlPanel = cloudSqlInstances.length > 0;
+  const rdiInfo =
+    inst?.endpoints?.rdi && typeof inst.endpoints.rdi === "object"
+      ? (inst.endpoints.rdi as Record<string, unknown>)
+      : null;
+  const showRdiPanel = Boolean(rdiInfo && rdiInfo.name);
   const dbStatusColor = (status: string) => statusToneColor(status);
   const showDbPanel = databases.length > 0 || licenses.length > 0 || configuredDbCount > 0;
   const showAppPanel = vmWorkloads.length > 0 || gkeAppServices.length > 0 || configuredAppCount > 0;
@@ -500,14 +530,9 @@ export default function InstanceDetailPage() {
               </button>
             ) : null}
             {inst?.status === "destroyed" ? (
-              <>
-                <Link className="btn" href={`/wizard?from=${encodeURIComponent(id)}`}>
-                  Edit in wizard
-                </Link>
-                <Link className="btn" href={`/design?from=${encodeURIComponent(id)}`}>
-                  Edit in designer
-                </Link>
-              </>
+              <Link className="btn" href={`/edit?from=${encodeURIComponent(id)}`}>
+                Edit
+              </Link>
             ) : null}
             {canForget ? (
               <button
@@ -630,6 +655,7 @@ export default function InstanceDetailPage() {
                       </span>
                     ) : null}
                     {d.error ? <div className="hint">{d.error}</div> : null}
+                    {d.warning ? <div className="notice notice-warn">{d.warning}</div> : null}
                   </div>
                 </div>
               ))}
@@ -742,6 +768,169 @@ export default function InstanceDetailPage() {
             ))}
           </div>
         </div>
+              ) : null}
+
+              {showStoragePanel ? (
+                <div className="access-section">
+                  <h3>Storage buckets</h3>
+                  <div className="summary-grid">
+                    {storageBuckets.map((b, i) => {
+                      const name = String(b.name || "");
+                      const url = String(b.url || `gs://${name}`);
+                      const location = String(b.location || "");
+                      return (
+                        <div className="summary-row" key={`bucket-${name}-${i}`}>
+                          <div className="summary-label">
+                            {name}
+                            {location ? <div className="hint">{location}</div> : null}
+                          </div>
+                          <div className="summary-value">
+                            <span className="db-endpoint-row">
+                              <span className="mono">{url}</span>
+                              <button
+                                type="button"
+                                className="btn btn-copy"
+                                onClick={() => copyEndpoint(url)}
+                                title="Copy bucket URL to clipboard"
+                              >
+                                {copied === url ? "Copied" : "Copy"}
+                              </button>
+                            </span>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              ) : null}
+
+              {showPubsubPanel ? (
+                <div className="access-section">
+                  <h3>Pub/Sub</h3>
+                  <div className="summary-grid">
+                    {pubsubTopics.map((t, i) => {
+                      const topic = String(t.topic || t.name || "");
+                      const subscription = String(t.subscription || "");
+                      return (
+                        <div className="summary-row" key={`topic-${topic}-${i}`}>
+                          <div className="summary-label">{String(t.name || topic)}</div>
+                          <div className="summary-value">
+                            <span className="db-endpoint-row">
+                              <span className="mono">{topic}</span>
+                              <button
+                                type="button"
+                                className="btn btn-copy"
+                                onClick={() => copyEndpoint(topic)}
+                                title="Copy topic to clipboard"
+                              >
+                                {copied === topic ? "Copied" : "Copy"}
+                              </button>
+                            </span>
+                            {subscription ? <div className="hint mono">{subscription}</div> : null}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              ) : null}
+
+              {showBigqueryPanel ? (
+                <div className="access-section">
+                  <h3>BigQuery</h3>
+                  <div className="summary-grid">
+                    {bigqueryDatasets.map((d, i) => {
+                      const name = String(d.name || "");
+                      const location = String(d.location || "");
+                      return (
+                        <div className="summary-row" key={`dataset-${name}-${i}`}>
+                          <div className="summary-label">
+                            {name}
+                            {location ? <div className="hint">{location}</div> : null}
+                          </div>
+                          <div className="summary-value">
+                            <span className="db-endpoint-row">
+                              <span className="mono">{name}</span>
+                              <button
+                                type="button"
+                                className="btn btn-copy"
+                                onClick={() => copyEndpoint(name)}
+                                title="Copy dataset id to clipboard"
+                              >
+                                {copied === name ? "Copied" : "Copy"}
+                              </button>
+                            </span>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              ) : null}
+
+              {showCloudSqlPanel ? (
+                <div className="access-section">
+                  <h3>Cloud SQL</h3>
+                  <div className="summary-grid">
+                    {cloudSqlInstances.map((d, i) => {
+                      const name = String(d.name || "");
+                      const connectionName = String(d.connection_name || "");
+                      const connectivity = String(d.connectivity || "");
+                      return (
+                        <div className="summary-row" key={`sql-${name}-${i}`}>
+                          <div className="summary-label">
+                            {name}
+                            {connectivity ? <div className="hint">{connectivity}</div> : null}
+                          </div>
+                          <div className="summary-value">
+                            <span className="db-endpoint-row">
+                              <span className="mono">{connectionName || name}</span>
+                              <button
+                                type="button"
+                                className="btn btn-copy"
+                                onClick={() => copyEndpoint(connectionName || name)}
+                                title="Copy connection name to clipboard"
+                              >
+                                {copied === (connectionName || name) ? "Copied" : "Copy"}
+                              </button>
+                            </span>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              ) : null}
+
+              {showRdiPanel ? (
+                <div className="access-section">
+                  <h3>Redis Data Integration</h3>
+                  <div className="summary-grid">
+                    <div className="summary-row">
+                      <div className="summary-label">
+                        {String(rdiInfo!.name)}
+                        {rdiInfo!.namespace ? <div className="hint">ns: {String(rdiInfo!.namespace)}</div> : null}
+                      </div>
+                      <div className="summary-value">
+                        {rdiInfo!.dns || rdiInfo!.ip ? (
+                          <span className="db-endpoint-row">
+                            <span className="mono">{String(rdiInfo!.dns || rdiInfo!.ip)}</span>
+                            <button
+                              type="button"
+                              className="btn btn-copy"
+                              onClick={() => copyEndpoint(String(rdiInfo!.dns || rdiInfo!.ip))}
+                              title="Copy RDI host to clipboard"
+                            >
+                              {copied === String(rdiInfo!.dns || rdiInfo!.ip) ? "Copied" : "Copy"}
+                            </button>
+                          </span>
+                        ) : (
+                          <span className="hint">deployed on the GKE cluster</span>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                </div>
               ) : null}
             </>
           )}

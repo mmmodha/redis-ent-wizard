@@ -25,6 +25,12 @@ export function defaultNodeData(
         gke_machine_type: pick(machineTypes, ["e2-standard-8", "n2-standard-8"]),
         gke_clustersize: 3,
       };
+    case "operator":
+      return {
+        kind: "operator",
+        name: "",
+        operator_chart_version: "latest",
+      };
     case "cluster":
       return {
         kind: "cluster",
@@ -88,6 +94,47 @@ export function defaultNodeData(
         expose_http: true,
         expose_https: false,
         extra_ports: "",
+      };
+    case "storage":
+      return {
+        kind: "storage",
+        name: "",
+        location: "",
+        storage_class: "STANDARD",
+        versioning: false,
+        force_destroy: true,
+        access: "readwrite",
+      };
+    case "pubsub":
+      return {
+        kind: "pubsub",
+        name: "",
+        create_subscription: true,
+        role: "both",
+      };
+    case "bigquery":
+      return {
+        kind: "bigquery",
+        name: "",
+        location: "",
+        access: "readwrite",
+      };
+    case "cloudsql":
+      return {
+        kind: "cloudsql",
+        name: "",
+        engine: "postgres",
+        tier: "db-f1-micro",
+        db_name: "appdb",
+        db_user: "appuser",
+        connectivity: "private",
+      };
+    case "rdi":
+      return {
+        kind: "rdi",
+        name: "",
+        machine_type: "n2-standard-4",
+        pipelines: [],
       };
     default:
       return { kind: "network", label: "VPC network" };

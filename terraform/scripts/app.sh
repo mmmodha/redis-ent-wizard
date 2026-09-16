@@ -6,6 +6,18 @@ MEMVIZ_REPO_URL="${memviz_repo_url}"
 MEMVIZ_REPO_REF="${memviz_repo_ref}"
 EXTRA_DISK_GIB="${extra_disk_gib}"
 
+## injected connection environment (endpoints/credentials from wired components)
+install -d -o ubuntu -g ubuntu -m 750 /opt/rew
+cat >/opt/rew/connections.env <<'REWENV'
+${connections_env}
+REWENV
+chown ubuntu:ubuntu /opt/rew/connections.env
+chmod 600 /opt/rew/connections.env
+cat >/etc/profile.d/rew-connections.sh <<'REWPROF'
+[ -f /opt/rew/connections.env ] && . /opt/rew/connections.env
+REWPROF
+chmod 644 /etc/profile.d/rew-connections.sh
+
 ## commons
 
 apt-get -y update

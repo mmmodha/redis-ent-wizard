@@ -1,4 +1,5 @@
 import type { Edge, Node } from "@xyflow/react";
+import dagre from "dagre";
 import { effectiveDbReplication, clusterRedisNodeCount } from "./db-replication";
 
 /**
@@ -9,17 +10,32 @@ import { effectiveDbReplication, clusterRedisNodeCount } from "./db-replication"
 export type NodeKind =
   | "network"
   | "gke"
+  | "operator"
   | "cluster"
   | "database"
   | "vms"
   | "application"
-  | "loadbalancer";
+  | "loadbalancer"
+  | "storage"
+  | "pubsub"
+  | "bigquery"
+  | "cloudsql"
+  | "rdi";
 
 export type RootData = {
   kind: "network" | "gke";
   label: string;
   gke_machine_type?: string;
   gke_clustersize?: number;
+  [k: string]: unknown;
+};
+
+/** GKE only: a Redis Operator container. Holds cluster (REC) nodes as children. */
+export type OperatorData = {
+  kind: "operator";
+  name: string;
+  /** Helm chart version id ("latest"/"" or a known release id). */
+  operator_chart_version: string;
   [k: string]: unknown;
 };
 
@@ -31,6 +47,8 @@ export type ClusterData = {
   rof_nvme_disks: number;
   rs_version: string;
   rec_nodes: number;
+  /** Redis Enterprise admin username for this cluster (VM mode). */
+  RS_admin?: string;
   license?: string;
   [k: string]: unknown;
 };
@@ -50,6 +68,8 @@ export type DatabaseData = {
   shards_placement: "dense" | "sparse";
   oss_cluster: boolean;
   flex: boolean;
+  /** Set on the tool-synthesized RDI pipeline-state database (visual only). */
+  rdiInternal?: boolean;
   [k: string]: unknown;
 };
 
@@ -102,13 +122,69 @@ export type LoadBalancerData = {
   [k: string]: unknown;
 };
 
+export type StorageData = {
+  kind: "storage";
+  name: string;
+  location: string;
+  storage_class: "STANDARD" | "NEARLINE" | "COLDLINE" | "ARCHIVE";
+  versioning: boolean;
+  force_destroy: boolean;
+  access: "read" | "readwrite";
+  [k: string]: unknown;
+};
+
+export type PubsubData = {
+  kind: "pubsub";
+  name: string;
+  create_subscription: boolean;
+  role: "publish" | "subscribe" | "both";
+  [k: string]: unknown;
+};
+
+export type BigqueryData = {
+  kind: "bigquery";
+  name: string;
+  location: string;
+  access: "read" | "readwrite";
+  [k: string]: unknown;
+};
+
+export type CloudSqlData = {
+  kind: "cloudsql";
+  name: string;
+  engine: "postgres" | "mysql";
+  tier: string;
+  db_name: string;
+  db_user: string;
+  connectivity: "private" | "proxy" | "public";
+  [k: string]: unknown;
+};
+
+/** One RDI pipeline's per-table mapping, keyed by source in RdiData.pipelines. */
+export type RdiTableConfig = { table: string; key_prefix?: string };
+
+export type RdiData = {
+  kind: "rdi";
+  name: string;
+  machine_type: string;
+  /** Per-source table/transform config authored in the pipeline editor. */
+  pipelines?: { source: string; tables?: RdiTableConfig[] }[];
+  [k: string]: unknown;
+};
+
 export type DesignNodeData =
   | RootData
+  | OperatorData
   | ClusterData
   | DatabaseData
   | VmsData
   | ApplicationData
-  | LoadBalancerData;
+  | LoadBalancerData
+  | StorageData
+  | PubsubData
+  | BigqueryData
+  | CloudSqlData
+  | RdiData;
 
 export type DesignNode = Node<DesignNodeData>;
 export type DesignEdge = Edge;
@@ -119,10 +195,9 @@ export type DesignSettings = {
   folder: string;
   youremail: string;
   skip_deletion: boolean;
-  redis_enabled: boolean;
   mode: "vm" | "gke";
-  RS_admin: string;
-  operator_chart_version: string;
+  /** Legacy deployment-wide operator version; the version now lives on operator nodes. */
+  operator_chart_version?: string;
   credentialsFile: string;
   project: string;
   region_name: string;
@@ -205,6 +280,9 @@ function envToRecord(rows: { key: string; value: string }[]): Record<string, str
 }
 
 /** Data accessors keep the discriminated union readable without casts everywhere. */
+function isOperator(n: DesignNode): n is Node<OperatorData> {
+  return n.data.kind === "operator";
+}
 function isCluster(n: DesignNode): n is Node<ClusterData> {
   return n.data.kind === "cluster";
 }
@@ -220,10 +298,34 @@ function isApplication(n: DesignNode): n is Node<ApplicationData> {
 function isLoadBalancer(n: DesignNode): n is Node<LoadBalancerData> {
   return n.data.kind === "loadbalancer";
 }
+function isStorage(n: DesignNode): n is Node<StorageData> {
+  return n.data.kind === "storage";
+}
+function isPubsub(n: DesignNode): n is Node<PubsubData> {
+  return n.data.kind === "pubsub";
+}
+function isBigquery(n: DesignNode): n is Node<BigqueryData> {
+  return n.data.kind === "bigquery";
+}
+function isCloudSql(n: DesignNode): n is Node<CloudSqlData> {
+  return n.data.kind === "cloudsql";
+}
+function isRdi(n: DesignNode): n is Node<RdiData> {
+  return n.data.kind === "rdi";
+}
+/** True for the tool-synthesized RDI pipeline-state database node. */
+function isRdiInternalDb(n: DesignNode): boolean {
+  return n.data.kind === "database" && Boolean((n.data as DatabaseData).rdiInternal);
+}
 
 /** Human-facing name for a cluster node, used for edge connect references. */
 export function clusterName(node: Node<ClusterData>, index: number): string {
   return clusterSlug(node.data.name) || `cluster${index + 1}`;
+}
+
+/** Slugged operator name; falls back to a stable per-index name when blank. */
+export function operatorName(node: Node<OperatorData>, index: number): string {
+  return clusterSlug(node.data.name) || (index <= 0 ? "operator" : `operator-${index + 1}`);
 }
 
 /**
@@ -261,6 +363,156 @@ export function predictedDatabaseEndpoint(
   return { endpoint: `${fqdn}:${p}`, resolved: true };
 }
 
+/** DatabaseData for the tool-synthesized RDI pipeline-state database (visual only). */
+export function rdiStateNodeData(rdiName: string): DatabaseData {
+  return {
+    kind: "database",
+    name: `${(rdiName || "rdi").trim()}-state`,
+    memory_gb: 1,
+    replication: false,
+    sharding: false,
+    shards_count: 1,
+    eviction_policy: "noeviction",
+    port: 13000,
+    password: "",
+    modules: [],
+    proxy_policy: "single",
+    shards_placement: "dense",
+    oss_cluster: false,
+    flex: false,
+    rdiInternal: true,
+  };
+}
+
+/**
+ * Reconcile the RDI pipeline-state database on the live canvas: for the RDI node
+ * (one per deployment) that has a target-database edge, ensure exactly one
+ * internal state database (`rdi-internal-<rdiId>`) exists in the target's
+ * cluster, linked to RDI by a distinct `design-edge-rdi` edge. Removes any stale
+ * internal database when the target edge, the RDI node, or the cluster is gone.
+ * Returns null when nothing needs to change (so callers avoid render loops).
+ */
+export function reconcileRdiInternalNodes(
+  nodes: DesignNode[],
+  edges: DesignEdge[],
+): { nodes: DesignNode[]; edges: DesignEdge[] } | null {
+  const dbById = new Map(nodes.filter(isDatabase).map((n) => [n.id, n] as const));
+  // Desired internal DBs keyed by node id -> its cluster + owning RDI.
+  const desired = new Map<string, { rdiId: string; clusterId: string; rdiName: string }>();
+  for (const rdi of nodes.filter(isRdi)) {
+    const targetEdge = edges.find((e) => {
+      if (e.source !== rdi.id) return false;
+      const t = dbById.get(e.target);
+      return Boolean(t && !isRdiInternalDb(t));
+    });
+    if (!targetEdge) continue;
+    const clusterId = dbById.get(targetEdge.target)?.parentId;
+    if (!clusterId) continue;
+    desired.set(`rdi-internal-${rdi.id}`, { rdiId: rdi.id, clusterId, rdiName: rdi.data.name });
+  }
+
+  const existing = nodes.filter(isRdiInternalDb);
+  const wantEdgeIds = new Set([...desired.keys()].map((id) => `edge-rdiint-${id.replace("rdi-internal-", "")}`));
+  const haveInternalEdges = edges.filter((e) => e.id.startsWith("edge-rdiint-"));
+
+  // Does the current graph already match the desired set (nodes + cluster + edges)?
+  const nodesMatch =
+    existing.length === desired.size &&
+    existing.every((n) => {
+      const d = desired.get(n.id);
+      return d && n.parentId === d.clusterId;
+    });
+  const edgesMatch =
+    haveInternalEdges.length === wantEdgeIds.size && haveInternalEdges.every((e) => wantEdgeIds.has(e.id));
+  if (nodesMatch && edgesMatch) return null;
+
+  // Rebuild: drop all internal DBs + their edges, then add the desired set.
+  let nextNodes = nodes.filter((n) => !isRdiInternalDb(n));
+  let nextEdges = edges.filter((e) => !e.id.startsWith("edge-rdiint-"));
+  for (const [id, d] of desired) {
+    nextNodes.push({
+      id,
+      type: "database",
+      parentId: d.clusterId,
+      extent: "parent",
+      deletable: false,
+      position: { x: 16, y: 0 },
+      style: { width: NODE_SIZE.database.width, height: NODE_SIZE.database.height },
+      data: rdiStateNodeData(d.rdiName),
+    });
+    nextEdges.push({
+      id: `edge-rdiint-${d.rdiId}`,
+      source: d.rdiId,
+      target: id,
+      animated: true,
+      className: "design-edge-rdi",
+    });
+  }
+  nextNodes = layoutDiagram(nextNodes, nextEdges);
+  return { nodes: nextNodes, edges: nextEdges };
+}
+
+/** Env-var slug from a component name (mirrors the API's envSlug). */
+export function envVarSlug(name: string): string {
+  return String(name || "").toUpperCase().replace(/[^A-Z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+}
+
+/**
+ * The environment variables a provider component injects into any consumer wired
+ * to it. Used to show an "Exposes" hint on nodes, dialogs, and wizard editors.
+ * `connectName` is the reference name a consumer uses (cluster/db/lb/app name;
+ * the Set-of-VMs group is "app").
+ */
+export function exposedVariables(
+  kind: NodeKind,
+  connectName: string,
+): { name: string; description: string }[] {
+  const s = envVarSlug(connectName) || "<NAME>";
+  switch (kind) {
+    case "cluster":
+      return [
+        { name: `REDIS_${s}_HOST`, description: "Cluster endpoint host" },
+        { name: `REDIS_${s}_ADMIN_USER`, description: "Cluster admin username" },
+        { name: `REDIS_${s}_ADMIN_PASSWORD`, description: "Cluster admin password (auto-generated)" },
+      ];
+    case "database":
+      return [{ name: `REDIS_${s}_ENDPOINT`, description: "Database endpoint (host:port)" }];
+    case "loadbalancer":
+      return [{ name: `LB_${s}_ENDPOINT`, description: "Internal load-balancer VIP (host:port)" }];
+    case "storage":
+      return [
+        { name: `GCS_${s}_BUCKET`, description: "Bucket name" },
+        { name: `GCS_${s}_URL`, description: "Bucket URL (gs://…)" },
+      ];
+    case "pubsub":
+      return [
+        { name: `PUBSUB_${s}_TOPIC`, description: "Topic resource name" },
+        { name: `PUBSUB_${s}_SUBSCRIPTION`, description: "Subscription resource name (if created)" },
+        { name: `PUBSUB_${s}_PROJECT`, description: "GCP project id" },
+      ];
+    case "bigquery":
+      return [
+        { name: `BIGQUERY_${s}_DATASET`, description: "Dataset id" },
+        { name: `BIGQUERY_${s}_PROJECT`, description: "GCP project id" },
+        { name: `BIGQUERY_${s}_LOCATION`, description: "Dataset location" },
+      ];
+    case "cloudsql":
+      return [
+        { name: `SQL_${s}_HOST`, description: "Instance IP" },
+        { name: `SQL_${s}_PORT`, description: "Database port" },
+        { name: `SQL_${s}_DB`, description: "Database name" },
+        { name: `SQL_${s}_USER`, description: "Database user" },
+        { name: `SQL_${s}_PASSWORD`, description: "Database password (auto-generated)" },
+        { name: `SQL_${s}_CONNECTION_NAME`, description: "Cloud SQL connection name" },
+      ];
+    case "application":
+    case "vms":
+      return [{ name: `${s}_HOST`, description: "Component hostname" }];
+    default:
+      return [];
+  }
+}
+
 /**
  * Convert the diagram into the create payload consumed by POST /instances.
  * Mirrors the wizard's `payload()` shape and layers on the new fields.
@@ -271,13 +523,61 @@ export function diagramToCreateInput(
   settings: DesignSettings,
 ): Record<string, unknown> {
   const clusters = nodes.filter(isCluster);
-  const databases = nodes.filter(isDatabase);
+  // The RDI pipeline-state database is synthesized by the API from the RDI→target
+  // relationship, so it is excluded here — it is neither a user database nor a
+  // connectable target on the canvas.
+  const databases = nodes.filter(isDatabase).filter((d) => !isRdiInternalDb(d));
   const vmsNodes = nodes.filter(isVms);
   const apps = nodes.filter(isApplication);
+  const rdiNodes = nodes.filter(isRdi);
   const lbs = nodes.filter(isLoadBalancer);
+  const storageNodes = nodes.filter(isStorage);
+  const pubsubNodes = nodes.filter(isPubsub);
+  const bigqueryNodes = nodes.filter(isBigquery);
+  const cloudsqlNodes = nodes.filter(isCloudSql);
 
   const clusterNameById = new Map<string, string>();
   clusters.forEach((c, i) => clusterNameById.set(c.id, clusterName(c, i)));
+
+  // Provider registries for connection edges. Databases inject their endpoint;
+  // apps and the single Set-of-VMs group ("app") inject a host; buckets a name.
+  const dbNameById = new Map<string, string>();
+  databases.forEach((d) => dbNameById.set(d.id, d.data.name.trim() || "db"));
+  const storageNameById = new Map<string, string>();
+  storageNodes.forEach((s) => storageNameById.set(s.id, s.data.name.trim() || "bucket"));
+  const pubsubNameById = new Map<string, string>();
+  pubsubNodes.forEach((p) => pubsubNameById.set(p.id, p.data.name.trim() || "topic"));
+  const bigqueryNameById = new Map<string, string>();
+  bigqueryNodes.forEach((b) => bigqueryNameById.set(b.id, b.data.name.trim() || "dataset"));
+  const cloudsqlNameById = new Map<string, string>();
+  cloudsqlNodes.forEach((s) => cloudsqlNameById.set(s.id, s.data.name.trim() || "sql"));
+  const hostNameById = new Map<string, string>();
+  apps.forEach((a) => hostNameById.set(a.id, a.data.name.trim() || "app"));
+  vmsNodes.forEach((v) => hostNameById.set(v.id, "app"));
+
+  // A load balancer FRONTS a target when the LB is the edge source (or the
+  // target is its parent). An edge INTO the LB is a consumer reading its VIP.
+  const hostIds = [...apps.map((a) => a.id), ...vmsNodes.map((v) => v.id)];
+  const frontingTargetId = (lb: Node<LoadBalancerData>): string | undefined => {
+    if (lb.parentId && hostIds.includes(lb.parentId)) return lb.parentId;
+    for (const e of edges) if (e.source === lb.id && hostIds.includes(e.target)) return e.target;
+    return undefined;
+  };
+  // Final LB names must match load_balancers[].name so the Terraform VIP merge
+  // (google_compute_address.lb[name]) resolves; derive them once here.
+  const lbFinalNameById = new Map<string, string>();
+  lbs.forEach((lb) => {
+    const nm = lb.data.name.trim();
+    const tId = frontingTargetId(lb);
+    if (tId && apps.some((a) => a.id === tId)) {
+      lbFinalNameById.set(lb.id, nm || `${hostNameById.get(tId)}-lb`);
+    } else if (tId) {
+      lbFinalNameById.set(lb.id, nm || "app-lb");
+    } else {
+      lbFinalNameById.set(lb.id, nm || "lb");
+    }
+  });
+  const uniq = (xs: string[]) => [...new Set(xs)];
 
   const databasesFor = (clusterId: string) => {
     const cluster = clusters.find((c) => c.id === clusterId);
@@ -302,9 +602,33 @@ export function diagramToCreateInput(
   };
 
   const applications = apps.map((a) => {
-    const connectClusters = edges
-      .filter((e) => e.source === a.id && clusterNameById.has(e.target))
-      .map((e) => clusterNameById.get(e.target) as string);
+    const outgoing = edges.filter((e) => e.source === a.id);
+    const connectClusters = uniq(
+      outgoing.filter((e) => clusterNameById.has(e.target)).map((e) => clusterNameById.get(e.target) as string),
+    );
+    const connectDatabases = uniq(
+      outgoing.filter((e) => dbNameById.has(e.target)).map((e) => dbNameById.get(e.target) as string),
+    );
+    const connectLoadBalancers = uniq(
+      outgoing.filter((e) => lbFinalNameById.has(e.target)).map((e) => lbFinalNameById.get(e.target) as string),
+    );
+    const connectApps = uniq(
+      outgoing
+        .filter((e) => hostNameById.has(e.target) && e.target !== a.id)
+        .map((e) => hostNameById.get(e.target) as string),
+    );
+    const connectStorage = uniq(
+      outgoing.filter((e) => storageNameById.has(e.target)).map((e) => storageNameById.get(e.target) as string),
+    );
+    const connectPubsub = uniq(
+      outgoing.filter((e) => pubsubNameById.has(e.target)).map((e) => pubsubNameById.get(e.target) as string),
+    );
+    const connectBigquery = uniq(
+      outgoing.filter((e) => bigqueryNameById.has(e.target)).map((e) => bigqueryNameById.get(e.target) as string),
+    );
+    const connectSql = uniq(
+      outgoing.filter((e) => cloudsqlNameById.has(e.target)).map((e) => cloudsqlNameById.get(e.target) as string),
+    );
     const common: Record<string, unknown> = {
       name: a.data.name.trim() || "app",
     };
@@ -314,6 +638,13 @@ export function diagramToCreateInput(
     const env = envToRecord(a.data.env);
     if (Object.keys(env).length) common.env = env;
     if (connectClusters.length) common.connectClusters = connectClusters;
+    if (connectDatabases.length) common.connectDatabases = connectDatabases;
+    if (connectLoadBalancers.length) common.connectLoadBalancers = connectLoadBalancers;
+    if (connectApps.length) common.connectApps = connectApps;
+    if (connectStorage.length) common.connectStorage = connectStorage;
+    if (connectPubsub.length) common.connectPubsub = connectPubsub;
+    if (connectBigquery.length) common.connectBigquery = connectBigquery;
+    if (connectSql.length) common.connectSql = connectSql;
     if (settings.mode === "vm") {
       Object.assign(common, {
         artifact: {
@@ -345,7 +676,8 @@ export function diagramToCreateInput(
     mode: settings.mode,
     youremail: settings.youremail,
     skip_deletion: settings.skip_deletion,
-    redis_enabled: settings.mode === "vm" ? settings.redis_enabled !== false : true,
+    // Redis intent is derived from the canvas: a cluster node present ⇒ deploy Redis.
+    redis_enabled: settings.mode === "vm" ? clusters.length > 0 : true,
     project: settings.project,
     credentialsFile: settings.credentialsFile,
     region_name: settings.region_name,
@@ -355,9 +687,73 @@ export function diagramToCreateInput(
     applications,
   };
 
+  // Storage buckets are available in both VM and GKE.
+  const storageBuckets = storageNodes.map((s) => ({
+    name: s.data.name.trim() || "bucket",
+    location: s.data.location.trim() || undefined,
+    storage_class: s.data.storage_class,
+    versioning: Boolean(s.data.versioning),
+    force_destroy: Boolean(s.data.force_destroy),
+    access: s.data.access,
+  }));
+  if (storageBuckets.length) base.storage_buckets = storageBuckets;
+
+  const pubsubTopics = pubsubNodes.map((p) => ({
+    name: p.data.name.trim() || "topic",
+    create_subscription: Boolean(p.data.create_subscription),
+    role: p.data.role,
+  }));
+  if (pubsubTopics.length) base.pubsub_topics = pubsubTopics;
+
+  const bigqueryDatasets = bigqueryNodes.map((b) => ({
+    name: b.data.name.trim() || "dataset",
+    location: b.data.location.trim() || undefined,
+    access: b.data.access,
+  }));
+  if (bigqueryDatasets.length) base.bigquery_datasets = bigqueryDatasets;
+
+  const cloudSqlInstances = cloudsqlNodes.map((s) => ({
+    name: s.data.name.trim() || "sql",
+    engine: s.data.engine,
+    tier: s.data.tier.trim() || undefined,
+    db_name: s.data.db_name.trim() || undefined,
+    db_user: s.data.db_user.trim() || undefined,
+    connectivity: s.data.connectivity,
+  }));
+  if (cloudSqlInstances.length) base.cloud_sql_instances = cloudSqlInstances;
+
+  // RDI (one per deployment). Its target and pipeline sources come from edges:
+  // RDI→database (non-internal) is the target; each RDI→Cloud SQL is a pipeline.
+  const rdiNode = rdiNodes[0];
+  if (rdiNode) {
+    const outgoing = edges.filter((e) => e.source === rdiNode.id);
+    const target = outgoing
+      .map((e) => dbNameById.get(e.target))
+      .find((n): n is string => Boolean(n));
+    const sources = uniq(
+      outgoing.filter((e) => cloudsqlNameById.has(e.target)).map((e) => cloudsqlNameById.get(e.target) as string),
+    );
+    // Merge per-source table config authored in the pipeline editor.
+    const tablesBySource = new Map<string, RdiTableConfig[]>();
+    for (const p of rdiNode.data.pipelines || []) {
+      if (p.tables && p.tables.length) tablesBySource.set(p.source, p.tables);
+    }
+    const rdi: Record<string, unknown> = {
+      name: rdiNode.data.name.trim() || "rdi",
+      machine_type: rdiNode.data.machine_type,
+    };
+    if (target) rdi.target = target;
+    if (sources.length) {
+      rdi.pipelines = sources.map((source) => {
+        const tables = tablesBySource.get(source);
+        return tables && tables.length ? { source, tables } : { source };
+      });
+    }
+    base.rdi = rdi;
+  }
+
   if (settings.mode === "vm") {
-    const redisOn = settings.redis_enabled !== false;
-    const clusterNodes = redisOn ? clusters : [];
+    const clusterNodes = clusters;
     const first = clusterNodes[0];
     // App VMs come from Set-of-VMs nodes; a load balancer on a VMs node opens ports.
     const appCount = vmsNodes.reduce((n, v) => n + Number(v.data.count), 0);
@@ -369,22 +765,15 @@ export function diagramToCreateInput(
         appDiskGib.push(Number(v.data.disk_gib));
       }
     }
-    // A load balancer nested on (or edged to) a Set-of-VMs node opens its ports.
+    // A load balancer fronting the Set-of-VMs node opens its ports.
     const vmsLb = lbs.find((lb) => {
-      if (lb.parentId && vmsNodes.some((v) => v.id === lb.parentId)) return true;
-      return edges.some(
-        (e) =>
-          (e.source === lb.id && vmsNodes.some((v) => v.id === e.target)) ||
-          (e.target === lb.id && vmsNodes.some((v) => v.id === e.source)),
-      );
+      const t = frontingTargetId(lb);
+      return t !== undefined && vmsNodes.some((v) => v.id === t);
     });
 
-    // Internal LB spec: each load balancer node fronts either an application
-    // node or a Set-of-VMs node, detected by parentId or a connecting edge
-    // (mirrors the vmsLb detection). Ports come from the target application when
-    // known, otherwise from the load balancer node's own exposure settings.
-    const appNameById = new Map<string, string>();
-    apps.forEach((a) => appNameById.set(a.id, a.data.name.trim() || "app"));
+    // Internal LB spec: each load balancer node fronts either an application or
+    // the Set-of-VMs group (LB is the edge source or the target is its parent).
+    // Ports come from the target application when known, else the LB's own settings.
     const appPortsById = new Map<string, number[]>();
     apps.forEach((a) => appPortsById.set(a.id, parsePorts(a.data.ports)));
     const lbNodePorts = (lb: Node<LoadBalancerData>): number[] => {
@@ -393,16 +782,6 @@ export function diagramToCreateInput(
       if (lb.data.expose_https) ports.push(443);
       return [...ports, ...parsePorts(String(lb.data.extra_ports))];
     };
-    const attachedNodeId = (lb: Node<LoadBalancerData>, ids: string[]): string | undefined => {
-      if (lb.parentId && ids.includes(lb.parentId)) return lb.parentId;
-      for (const e of edges) {
-        if (e.source === lb.id && ids.includes(e.target)) return e.target;
-        if (e.target === lb.id && ids.includes(e.source)) return e.source;
-      }
-      return undefined;
-    };
-    const appIds = apps.map((a) => a.id);
-    const vmsIds = vmsNodes.map((v) => v.id);
     const loadBalancers: {
       name: string;
       target: string;
@@ -410,29 +789,46 @@ export function diagramToCreateInput(
       ports: number[];
     }[] = [];
     for (const lb of lbs) {
-      const lbName = lb.data.name.trim();
-      const appId = attachedNodeId(lb, appIds);
-      if (appId) {
-        const appName = appNameById.get(appId) as string;
-        const appPorts = appPortsById.get(appId) as number[];
+      const tId = frontingTargetId(lb);
+      if (!tId) continue;
+      const name = lbFinalNameById.get(lb.id) as string;
+      if (apps.some((a) => a.id === tId)) {
+        const appPorts = appPortsById.get(tId) || [];
         loadBalancers.push({
-          name: lbName || `${appName}-lb`,
-          target: appName,
+          name,
+          target: hostNameById.get(tId) as string,
           target_kind: "application",
           ports: appPorts.length ? appPorts : lbNodePorts(lb),
         });
-        continue;
-      }
-      const vmsId = attachedNodeId(lb, vmsIds);
-      if (vmsId) {
-        loadBalancers.push({
-          name: lbName || "app-lb",
-          target: "app",
-          target_kind: "vms",
-          ports: lbNodePorts(lb),
-        });
+      } else {
+        loadBalancers.push({ name, target: "app", target_kind: "vms", ports: lbNodePorts(lb) });
       }
     }
+
+    // Connections from the Set-of-VMs group to providers (vms_connect).
+    const vmsOutgoing = edges.filter((e) => vmsNodes.some((v) => v.id === e.source));
+    const vmsConnect = {
+      clusters: uniq(vmsOutgoing.filter((e) => clusterNameById.has(e.target)).map((e) => clusterNameById.get(e.target) as string)),
+      databases: uniq(vmsOutgoing.filter((e) => dbNameById.has(e.target)).map((e) => dbNameById.get(e.target) as string)),
+      load_balancers: uniq(vmsOutgoing.filter((e) => lbFinalNameById.has(e.target)).map((e) => lbFinalNameById.get(e.target) as string)),
+      apps: uniq(
+        vmsOutgoing
+          .filter((e) => hostNameById.has(e.target) && !vmsNodes.some((v) => v.id === e.target))
+          .map((e) => hostNameById.get(e.target) as string),
+      ),
+      storage: uniq(
+        vmsOutgoing.filter((e) => storageNameById.has(e.target)).map((e) => storageNameById.get(e.target) as string),
+      ),
+      pubsub: uniq(
+        vmsOutgoing.filter((e) => pubsubNameById.has(e.target)).map((e) => pubsubNameById.get(e.target) as string),
+      ),
+      bigquery: uniq(
+        vmsOutgoing.filter((e) => bigqueryNameById.has(e.target)).map((e) => bigqueryNameById.get(e.target) as string),
+      ),
+      sql: uniq(
+        vmsOutgoing.filter((e) => cloudsqlNameById.has(e.target)).map((e) => cloudsqlNameById.get(e.target) as string),
+      ),
+    };
 
     Object.assign(base, {
       clustersize: first ? Number(first.data.nodes) : 0,
@@ -445,10 +841,10 @@ export function diagramToCreateInput(
         machine_type: c.data.machine_type,
         rof_nvme_disks: Number(c.data.rof_nvme_disks),
         rs_version: c.data.rs_version,
+        RS_admin: (c.data.RS_admin as string)?.trim() || "admin@redis.io",
         license: c.data.license?.trim() || undefined,
         databases: databasesFor(c.id),
       })),
-      RS_admin: settings.RS_admin,
       app: appCount,
       app_machine_types: appCount > 0 ? appMachineTypes : undefined,
       app_disk_gib: appCount > 0 ? appDiskGib : undefined,
@@ -476,19 +872,40 @@ export function diagramToCreateInput(
       dns_zone_dns_name: settings.dns_zone_dns_name,
     });
     if (loadBalancers.length) base.load_balancers = loadBalancers;
+    if (
+      vmsConnect.clusters.length ||
+      vmsConnect.databases.length ||
+      vmsConnect.load_balancers.length ||
+      vmsConnect.apps.length ||
+      vmsConnect.storage.length ||
+      vmsConnect.pubsub.length ||
+      vmsConnect.bigquery.length ||
+      vmsConnect.sql.length
+    ) {
+      base.vms_connect = vmsConnect;
+    }
   } else {
     const root = nodes.find((n) => n.data.kind === "gke");
     const rootData = (root?.data as RootData | undefined) || undefined;
     const recSum = clusters.reduce((n, c) => n + Number(c.data.rec_nodes), 0);
+    // Operators own clusters via containment (cluster.parentId === operator.id).
+    const operators = nodes.filter(isOperator);
+    const operatorNameById = new Map<string, string>();
+    operators.forEach((o, i) => operatorNameById.set(o.id, operatorName(o, i)));
     Object.assign(base, {
       gke_clustersize: Math.max(Number(rootData?.gke_clustersize) || 0, recSum, 1),
       gke_machine_type: rootData?.gke_machine_type || "",
-      rec_nodes: clusters[0] ? Number(clusters[0].data.rec_nodes) : 3,
-      operator_chart_version: settings.operator_chart_version,
+      // Deployment-wide version kept as a back-compat fallback (first operator).
+      operator_chart_version: operators[0]?.data.operator_chart_version || settings.operator_chart_version,
+      operators: operators.map((o, i) => ({
+        name: operatorName(o, i),
+        operator_chart_version: o.data.operator_chart_version || "latest",
+      })),
       clusters: clusters.map((c) => ({
         name: c.data.name.trim() || undefined,
         rec_nodes: Number(c.data.rec_nodes),
         nodes: Number(c.data.rec_nodes),
+        operator: c.parentId ? operatorNameById.get(c.parentId) : undefined,
         license: c.data.license?.trim() || undefined,
         databases: databasesFor(c.id),
       })),
@@ -513,16 +930,23 @@ export const LAYOUT = {
   PAD: 32,
   GAP: 24,
   CLUSTER_HEADER: 120,
+  OPERATOR_HEADER: 96,
   ROOT_HEADER: 64,
 } as const;
 
 /** Deterministic sizes for each node kind. Containers may grow past these. */
 export const NODE_SIZE: Record<string, { width: number; height: number }> = {
   database: { width: 248, height: 192 },
-  loadbalancer: { width: 200, height: 72 },
+  loadbalancer: { width: 224, height: 120 },
+  operator: { width: 376, height: 160 },
   cluster: { width: 312, height: 128 },
   vms: { width: 232, height: 120 },
   application: { width: 232, height: 120 },
+  storage: { width: 232, height: 120 },
+  pubsub: { width: 232, height: 120 },
+  bigquery: { width: 232, height: 120 },
+  cloudsql: { width: 232, height: 120 },
+  rdi: { width: 232, height: 120 },
 };
 
 /** Initial style for a freshly dropped node, if the kind has a preset size. */
@@ -536,14 +960,18 @@ function styleNum(v: unknown, fallback: number): number {
 }
 
 /**
- * Pure layout pass: returns a new nodes array with every node's `position`
- * (relative to its parent) and container `style` size recomputed so nested
- * nodes sit fully inside their parents with no overlap, and every container
- * grows to hold its children. Deterministic and idempotent: children keep
- * their insertion order, so re-running it never shuffles the diagram.
+ * Layout pass: sizes nodes, stacks databases inside their cluster, then arranges
+ * the top-level components with dagre (edge-aware, left→right) so connected
+ * components flow across the canvas instead of a fixed grid. Databases stay
+ * nested in their cluster; the root grows to contain everything. Deterministic
+ * and idempotent for a given (nodes, edges) input.
  */
-export function layoutDiagram(nodes: DesignNode[]): DesignNode[] {
-  const { PAD, GAP, CLUSTER_HEADER, ROOT_HEADER } = LAYOUT;
+export function layoutDiagram(
+  nodes: DesignNode[],
+  edges: DesignEdge[] = [],
+  rootMin?: { width: number; height: number },
+): DesignNode[] {
+  const { PAD, GAP, CLUSTER_HEADER, OPERATOR_HEADER, ROOT_HEADER } = LAYOUT;
   const DB = NODE_SIZE.database;
   const CLUSTER_WIDTH = Math.max(NODE_SIZE.cluster.width, DB.width + 2 * PAD);
 
@@ -554,10 +982,13 @@ export function layoutDiagram(nodes: DesignNode[]): DesignNode[] {
     style: { ...(n.style ?? {}) },
   })) as DesignNode[];
 
+  const byId = new Map(out.map((n) => [n.id, n]));
+
   // 1) Fixed sizes for leaf and peer nodes (vms, application, loadbalancer, database).
+  //    Containers (operator, cluster) grow to fit their children below.
   for (const n of out) {
     const kind = n.data.kind as string;
-    if (kind === "cluster") continue; // clusters grow, handled below
+    if (kind === "cluster" || kind === "operator") continue;
     const preset = NODE_SIZE[kind];
     if (preset) n.style = { ...n.style, width: preset.width, height: preset.height };
   }
@@ -577,36 +1008,80 @@ export function layoutDiagram(nodes: DesignNode[]): DesignNode[] {
     cluster.style = { ...cluster.style, width: CLUSTER_WIDTH, height };
   }
 
-  // 3) Arrange every root child in a wrapping grid inside the root.
+  // 3) Stack clusters vertically inside each operator and grow the operator to fit
+  //    (GKE only — operators contain clusters, which are themselves containers).
+  for (const operator of out) {
+    if (operator.data.kind !== "operator") continue;
+    const kids = out.filter((n) => n.parentId === operator.id && n.data.kind === "cluster");
+    let y: number = OPERATOR_HEADER;
+    let maxChildW = 0;
+    for (const c of kids) {
+      c.position = { x: PAD, y };
+      const w = styleNum(c.style?.width, CLUSTER_WIDTH);
+      const h = styleNum(c.style?.height, NODE_SIZE.cluster.height);
+      maxChildW = Math.max(maxChildW, w);
+      y += h + GAP;
+    }
+    const width = Math.max(NODE_SIZE.operator.width, maxChildW + 2 * PAD);
+    const height = kids.length > 0 ? y - GAP + PAD : NODE_SIZE.operator.height;
+    operator.style = { ...operator.style, width, height };
+  }
+
+  // 4) Arrange every root child with dagre, using the edges between components.
   const root = out.find((n) => n.id === ROOT_ID);
   if (root) {
     const children = out.filter((n) => n.parentId === ROOT_ID);
-    const MAX_COLS = 3;
-    let x: number = PAD;
-    let y: number = ROOT_HEADER;
-    let rowHeight = 0;
-    let col = 0;
-    let maxRight: number = PAD;
-    for (const child of children) {
-      const width = styleNum(child.style?.width, NODE_SIZE.cluster.width);
-      const height = styleNum(child.style?.height, NODE_SIZE.cluster.height);
-      const wouldOverflow = x + width > ROOT_SIZE.width - PAD;
-      if (col > 0 && (col >= MAX_COLS || wouldOverflow)) {
-        x = PAD;
-        y += rowHeight + GAP;
-        rowHeight = 0;
-        col = 0;
+    // Map any node id to the top-level component it belongs to by climbing the
+    // parent chain up to the node whose parent is the root (a database → its
+    // cluster → its operator) so edges to nested nodes rank their container.
+    const topLevelOf = new Map<string, string>();
+    for (const n of out) {
+      if (n.id === ROOT_ID) continue;
+      let cur: DesignNode | undefined = n;
+      while (cur && cur.parentId && cur.parentId !== ROOT_ID) {
+        cur = byId.get(cur.parentId);
       }
-      child.position = { x, y };
-      x += width + GAP;
-      rowHeight = Math.max(rowHeight, height);
-      maxRight = Math.max(maxRight, child.position.x + width);
-      col += 1;
+      topLevelOf.set(n.id, cur ? cur.id : n.id);
     }
+
+    const g = new dagre.graphlib.Graph();
+    g.setGraph({ rankdir: "LR", nodesep: GAP, ranksep: GAP * 2.5, marginx: PAD, marginy: PAD });
+    g.setDefaultEdgeLabel(() => ({}));
+
+    const sizeOf = (child: DesignNode) => ({
+      width: styleNum(child.style?.width, NODE_SIZE.cluster.width),
+      height: styleNum(child.style?.height, NODE_SIZE.cluster.height),
+    });
+    for (const child of children) g.setNode(child.id, sizeOf(child));
+    for (const e of edges) {
+      const s = topLevelOf.get(e.source);
+      const t = topLevelOf.get(e.target);
+      if (!s || !t || s === t || !g.hasNode(s) || !g.hasNode(t)) continue;
+      g.setEdge(s, t);
+    }
+
+    dagre.layout(g);
+
+    let maxRight: number = PAD;
+    let maxBottom: number = ROOT_HEADER;
+    for (const child of children) {
+      const pos = g.node(child.id);
+      const { width, height } = sizeOf(child);
+      if (!pos) continue;
+      // dagre positions are node centres; convert to top-left and reserve the
+      // root's title chrome (dagre's own margins keep components off the edges).
+      const x = pos.x - width / 2 + PAD;
+      const y = pos.y - height / 2 + ROOT_HEADER;
+      child.position = { x, y };
+      maxRight = Math.max(maxRight, x + width);
+      maxBottom = Math.max(maxBottom, y + height);
+    }
+    // Size the root to its content, but grow it to fill the available canvas
+    // (rootMin, the pane size) so the VPC/GKE frame occupies the whole view.
     root.style = {
       ...root.style,
-      width: Math.max(ROOT_SIZE.width, maxRight + PAD),
-      height: Math.max(ROOT_SIZE.height, y + rowHeight + PAD),
+      width: Math.max(maxRight + PAD, rootMin?.width ?? 0),
+      height: Math.max(maxBottom + PAD, rootMin?.height ?? 0),
     };
   }
 
@@ -659,6 +1134,7 @@ function databaseDataFromConfig(d: Record<string, unknown>): DatabaseData {
     shards_placement: d.shards_placement === "sparse" ? "sparse" : "dense",
     oss_cluster: Boolean(d.oss_cluster),
     flex: Boolean(d.flex),
+    ...(d.rdi_internal ? { rdiInternal: true } : {}),
   };
 }
 
@@ -669,8 +1145,15 @@ type StoredClusterCfg = {
   rof_nvme_disks?: number;
   rs_version?: string;
   rec_nodes?: number;
+  RS_admin?: string;
+  operator?: string;
   license?: string;
   databases?: Record<string, unknown>[];
+};
+
+type StoredOperatorCfg = {
+  name?: string;
+  operator_chart_version?: string;
 };
 
 type StoredAppCfg = {
@@ -679,6 +1162,13 @@ type StoredAppCfg = {
   ports?: unknown[];
   env?: Record<string, unknown>;
   connectClusters?: unknown[];
+  connectDatabases?: unknown[];
+  connectLoadBalancers?: unknown[];
+  connectApps?: unknown[];
+  connectStorage?: unknown[];
+  connectPubsub?: unknown[];
+  connectBigquery?: unknown[];
+  connectSql?: unknown[];
   requirements?: unknown[];
   artifact?: { kind?: string; ref?: string; type?: string; branch?: string; runInDocker?: boolean };
   vm_count?: number;
@@ -729,6 +1219,43 @@ export function createInputToDiagram(
           },
         ];
 
+  // GKE: rebuild the Redis Operators (containers) and remember each by slug so
+  // clusters can nest under the operator they reference. A pre-operator config
+  // (no `operators`) synthesizes a single default operator from the legacy
+  // deployment-wide operator_chart_version.
+  const operatorIdBySlug = new Map<string, string>();
+  const operatorIds: string[] = [];
+  if (mode === "gke" && !redisOff) {
+    const rawOps = Array.isArray(cfg.operators) ? (cfg.operators as StoredOperatorCfg[]) : [];
+    const opCfgs: StoredOperatorCfg[] = rawOps.length
+      ? rawOps
+      : [{ name: "operator", operator_chart_version: dstr(cfg.operator_chart_version) || "latest" }];
+    opCfgs.forEach((op, i) => {
+      const operatorId = nextId("operator");
+      operatorIds.push(operatorId);
+      const slug = clusterSlug(op.name || "") || (i <= 0 ? "operator" : `operator-${i + 1}`);
+      operatorIdBySlug.set(slug, operatorId);
+      nodes.push({
+        id: operatorId,
+        type: "operator",
+        parentId: ROOT_ID,
+        extent: "parent",
+        position: { x: 24 + i * 420, y: 48 },
+        style: { width: NODE_SIZE.operator.width, height: NODE_SIZE.operator.height },
+        data: {
+          kind: "operator",
+          name: op.name || (i <= 0 ? "operator" : `operator-${i + 1}`),
+          operator_chart_version: dstr(op.operator_chart_version) || "latest",
+        },
+      });
+    });
+  }
+  const clusterOperatorId = (c: StoredClusterCfg): string | undefined => {
+    if (mode !== "gke" || !operatorIds.length) return undefined;
+    const want = clusterSlug(c.operator || "");
+    return (want && operatorIdBySlug.get(want)) || operatorIds[0];
+  };
+
   const clusterIds: string[] = [];
   clusterCfgs.forEach((c, i) => {
     const clusterId = nextId("cluster");
@@ -736,8 +1263,10 @@ export function createInputToDiagram(
     nodes.push({
       id: clusterId,
       type: "cluster",
-      parentId: ROOT_ID,
-      extent: "parent",
+      parentId: clusterOperatorId(c) ?? ROOT_ID,
+      // GKE clusters must stay draggable onto another operator, so they are not
+      // confined to their parent's extent (VM clusters sit under the root).
+      ...(mode === "gke" ? {} : { extent: "parent" as const }),
       position: { x: 24 + i * 290, y: 56 },
       style: { width: NODE_SIZE.cluster.width, height: NODE_SIZE.cluster.height },
       data: {
@@ -748,19 +1277,23 @@ export function createInputToDiagram(
         rof_nvme_disks: dnum(c.rof_nvme_disks, 0),
         rs_version: dstr(c.rs_version) || DIAGRAM_DEFAULT_RS_VERSION,
         rec_nodes: dnum(c.rec_nodes ?? c.nodes, 3),
+        RS_admin: dstr(c.RS_admin) || dstr(cfg.RS_admin) || "admin@redis.io",
         license: c.license || "",
       },
     });
     const dbs = Array.isArray(c.databases) ? c.databases : [];
     dbs.forEach((d, j) => {
+      const data = databaseDataFromConfig(d || {});
       nodes.push({
         id: nextId("database"),
         type: "database",
         parentId: clusterId,
         extent: "parent",
+        // The RDI state database is tool-managed, not user-deletable.
+        ...(data.rdiInternal ? { deletable: false } : {}),
         position: { x: 16, y: 40 + j * 44 },
         style: { width: NODE_SIZE.database.width, height: NODE_SIZE.database.height },
-        data: databaseDataFromConfig(d || {}),
+        data,
       });
     });
   });
@@ -797,11 +1330,136 @@ export function createInputToDiagram(
     });
   }
 
+  // Storage buckets (both modes) — full array rebuild so reopened instances show them.
+  const storageCfgs = Array.isArray(cfg.storage_buckets)
+    ? (cfg.storage_buckets as Record<string, unknown>[])
+    : [];
+  const storageNameToId = new Map<string, string>();
+  storageCfgs.forEach((s, i) => {
+    const id = nextId("storage");
+    const name = dstr(s.name);
+    const cls = dstr(s.storage_class);
+    nodes.push({
+      id,
+      type: "storage",
+      parentId: ROOT_ID,
+      extent: "parent",
+      position: { x: 520 + i * 220, y: 300 },
+      style: { width: NODE_SIZE.storage.width, height: NODE_SIZE.storage.height },
+      data: {
+        kind: "storage",
+        name,
+        location: dstr(s.location),
+        storage_class: (["STANDARD", "NEARLINE", "COLDLINE", "ARCHIVE"].includes(cls)
+          ? cls
+          : "STANDARD") as StorageData["storage_class"],
+        versioning: Boolean(s.versioning),
+        force_destroy: s.force_destroy === undefined ? true : Boolean(s.force_destroy),
+        access: s.access === "read" ? "read" : "readwrite",
+      },
+    });
+    if (name) storageNameToId.set(name, id);
+  });
+
+  // Pub/Sub topics (both modes).
+  const pubsubCfgs = Array.isArray(cfg.pubsub_topics)
+    ? (cfg.pubsub_topics as Record<string, unknown>[])
+    : [];
+  const pubsubNameToId = new Map<string, string>();
+  pubsubCfgs.forEach((p, i) => {
+    const id = nextId("pubsub");
+    const name = dstr(p.name);
+    nodes.push({
+      id,
+      type: "pubsub",
+      parentId: ROOT_ID,
+      extent: "parent",
+      position: { x: 520 + i * 220, y: 460 },
+      style: { width: NODE_SIZE.pubsub.width, height: NODE_SIZE.pubsub.height },
+      data: {
+        kind: "pubsub",
+        name,
+        create_subscription: Boolean(p.create_subscription),
+        role: p.role === "publish" || p.role === "subscribe" ? p.role : "both",
+      },
+    });
+    if (name) pubsubNameToId.set(name, id);
+  });
+
+  // BigQuery datasets (both modes).
+  const bigqueryCfgs = Array.isArray(cfg.bigquery_datasets)
+    ? (cfg.bigquery_datasets as Record<string, unknown>[])
+    : [];
+  const bigqueryNameToId = new Map<string, string>();
+  bigqueryCfgs.forEach((b, i) => {
+    const id = nextId("bigquery");
+    const name = dstr(b.name);
+    nodes.push({
+      id,
+      type: "bigquery",
+      parentId: ROOT_ID,
+      extent: "parent",
+      position: { x: 760 + i * 220, y: 300 },
+      style: { width: NODE_SIZE.bigquery.width, height: NODE_SIZE.bigquery.height },
+      data: {
+        kind: "bigquery",
+        name,
+        location: dstr(b.location),
+        access: b.access === "read" ? "read" : "readwrite",
+      },
+    });
+    if (name) bigqueryNameToId.set(name, id);
+  });
+
+  // Cloud SQL instances (both modes).
+  const cloudsqlCfgs = Array.isArray(cfg.cloud_sql_instances)
+    ? (cfg.cloud_sql_instances as Record<string, unknown>[])
+    : [];
+  const cloudsqlNameToId = new Map<string, string>();
+  cloudsqlCfgs.forEach((s, i) => {
+    const id = nextId("cloudsql");
+    const name = dstr(s.name);
+    const conn = dstr(s.connectivity);
+    nodes.push({
+      id,
+      type: "cloudsql",
+      parentId: ROOT_ID,
+      extent: "parent",
+      position: { x: 760 + i * 220, y: 460 },
+      style: { width: NODE_SIZE.cloudsql.width, height: NODE_SIZE.cloudsql.height },
+      data: {
+        kind: "cloudsql",
+        name,
+        engine: s.engine === "mysql" ? "mysql" : "postgres",
+        tier: dstr(s.tier) || "db-f1-micro",
+        db_name: dstr(s.db_name) || "appdb",
+        db_user: dstr(s.db_user) || "appuser",
+        connectivity: conn === "proxy" || conn === "public" ? conn : "private",
+      },
+    });
+    if (name) cloudsqlNameToId.set(name, id);
+  });
+
   // Custom application workloads.
   const apps = Array.isArray(cfg.applications) ? (cfg.applications as StoredAppCfg[]) : [];
-  const appConnects: { appId: string; connect: string[] }[] = [];
+  const arr = (x: unknown): string[] => (Array.isArray(x) ? x.map(String) : []);
+  const appIdByName = new Map<string, string>();
+  const appConnects: {
+    sourceId: string;
+    sel: {
+      clusters: string[];
+      databases: string[];
+      load_balancers: string[];
+      apps: string[];
+      storage: string[];
+      pubsub: string[];
+      bigquery: string[];
+      sql: string[];
+    };
+  }[] = [];
   apps.forEach((a, k) => {
     const appId = nextId("application");
+    appIdByName.set(dstr(a.name), appId);
     const env =
       a.env && typeof a.env === "object"
         ? Object.entries(a.env).map(([key, value]) => ({ key, value: String(value) }))
@@ -835,26 +1493,34 @@ export function createInputToDiagram(
         expose: a.expose === "lb" ? "lb" : "none",
       },
     });
-    if (Array.isArray(a.connectClusters) && a.connectClusters.length) {
-      appConnects.push({ appId, connect: a.connectClusters.map(String) });
-    }
+    appConnects.push({
+      sourceId: appId,
+      sel: {
+        clusters: arr(a.connectClusters),
+        databases: arr(a.connectDatabases),
+        load_balancers: arr(a.connectLoadBalancers),
+        apps: arr(a.connectApps),
+        storage: arr(a.connectStorage),
+        pubsub: arr(a.connectPubsub),
+        bigquery: arr(a.connectBigquery),
+        sql: arr(a.connectSql),
+      },
+    });
   });
 
-  // Edges: application -> cluster, matched by the cluster's slug name.
+  // Name -> id maps for rebuilding consumer edges.
   const clusterNameToId = new Map<string, string>();
   clusterCfgs.forEach((c, i) => {
     clusterNameToId.set(clusterSlug(c.name || "") || `cluster${i + 1}`, clusterIds[i]);
   });
+  const dbNameToId = new Map<string, string>();
+  nodes.forEach((n) => {
+    if (n.data.kind === "database") dbNameToId.set((n.data as DatabaseData).name, n.id);
+  });
+  const hostNameToId = new Map<string, string>();
+  appIdByName.forEach((id, name) => hostNameToId.set(name, id));
+  if (vmsId) hostNameToId.set("app", vmsId);
   let edgeCounter = 0;
-  for (const { appId, connect } of appConnects) {
-    for (const cn of connect) {
-      const targetId = clusterNameToId.get(cn);
-      if (targetId) {
-        edgeCounter += 1;
-        edges.push({ id: `edge-${edgeCounter}`, source: appId, target: targetId, animated: true });
-      }
-    }
-  }
 
   // Load balancer on the Set of VMs when VM app exposure is configured.
   const exposeHttp = Boolean(cfg.app_expose_http);
@@ -865,9 +1531,57 @@ export function createInputToDiagram(
       : Array.isArray(cfg.app_extra_ports)
         ? (cfg.app_extra_ports as unknown[]).join(", ")
         : "";
-  if (vmsId && (exposeHttp || exposeHttps || extraPortsStr.trim())) {
+  const lbNameToId = new Map<string, string>();
+
+  // Rebuild explicit load balancers from config.load_balancers[]. Each fronts an
+  // application VM group or the Set-of-VMs group; the ports map back to the
+  // expose_http/https/extra_ports the LB node carries (inverse of lbNodePorts).
+  const lbCfgs = Array.isArray(cfg.load_balancers)
+    ? (cfg.load_balancers as Record<string, unknown>[])
+    : [];
+  lbCfgs.forEach((lb, i) => {
+    const name = dstr(lb.name);
+    const targetKind = dstr(lb.target_kind);
+    // diagramToCreateInput names the Set-of-VMs target "app"; app LBs use the app name.
+    const targetName = targetKind === "vms" ? "app" : dstr(lb.target);
+    const targetId = hostNameToId.get(targetName);
+    const ports = Array.isArray(lb.ports) ? (lb.ports as unknown[]).map((p) => Number(p)) : [];
     const lbId = nextId("loadbalancer");
-    // The load balancer is a root peer, linked to its target by an edge.
+    nodes.push({
+      id: lbId,
+      type: "loadbalancer",
+      parentId: ROOT_ID,
+      extent: "parent",
+      position: { x: 24 + i * 200, y: 460 },
+      style: { width: NODE_SIZE.loadbalancer.width, height: NODE_SIZE.loadbalancer.height },
+      data: {
+        kind: "loadbalancer",
+        name,
+        expose_http: ports.includes(80),
+        expose_https: ports.includes(443),
+        extra_ports: ports.filter((p) => p !== 80 && p !== 443).join(", "),
+      },
+    });
+    if (name) lbNameToId.set(name, lbId);
+    // A Set-of-VMs LB is referenced as "app-lb" by consumers; keep that alias.
+    if (targetKind === "vms") lbNameToId.set("app-lb", lbId);
+    if (targetId) {
+      edgeCounter += 1;
+      edges.push({
+        id: `edge-${edgeCounter}`,
+        source: lbId,
+        target: targetId,
+        animated: true,
+        className: "design-edge-lb",
+      });
+    }
+  });
+
+  // Legacy fallback: derive a Set-of-VMs LB from exposure flags only when no
+  // explicit load_balancers[] were listed (older configs).
+  if (!lbCfgs.length && vmsId && (exposeHttp || exposeHttps || extraPortsStr.trim())) {
+    const lbId = nextId("loadbalancer");
+    // The load balancer is a root peer, linked to its target by a fronting edge.
     nodes.push({
       id: lbId,
       type: "loadbalancer",
@@ -883,6 +1597,9 @@ export function createInputToDiagram(
         extra_ports: extraPortsStr,
       },
     });
+    // The Set-of-VMs LB is named "app-lb" by diagramToCreateInput; map both so
+    // consumer references (connectLoadBalancers) reconnect.
+    lbNameToId.set("app-lb", lbId);
     edgeCounter += 1;
     edges.push({
       id: `edge-${edgeCounter}`,
@@ -893,5 +1610,126 @@ export function createInputToDiagram(
     });
   }
 
-  return { nodes: layoutDiagram(nodes), edges };
+  // Rebuild consumer edges (consumer source -> provider target) for every
+  // connection reference recorded on apps and the Set-of-VMs group.
+  const addConsumerEdges = (
+    sourceId: string,
+    sel: {
+      clusters: string[];
+      databases: string[];
+      load_balancers: string[];
+      apps: string[];
+      storage: string[];
+      pubsub: string[];
+      bigquery: string[];
+      sql: string[];
+    },
+  ) => {
+    const push = (targetId: string | undefined, isLb = false) => {
+      if (!targetId || targetId === sourceId) return;
+      edgeCounter += 1;
+      edges.push({
+        id: `edge-${edgeCounter}`,
+        source: sourceId,
+        target: targetId,
+        animated: true,
+        ...(isLb ? { className: "design-edge-lb" } : {}),
+      });
+    };
+    sel.clusters.forEach((n) => push(clusterNameToId.get(n)));
+    sel.databases.forEach((n) => push(dbNameToId.get(n)));
+    sel.load_balancers.forEach((n) => push(lbNameToId.get(n), true));
+    sel.apps.forEach((n) => push(hostNameToId.get(n)));
+    sel.storage.forEach((n) => push(storageNameToId.get(n)));
+    sel.pubsub.forEach((n) => push(pubsubNameToId.get(n)));
+    sel.bigquery.forEach((n) => push(bigqueryNameToId.get(n)));
+    sel.sql.forEach((n) => push(cloudsqlNameToId.get(n)));
+  };
+  for (const { sourceId, sel } of appConnects) addConsumerEdges(sourceId, sel);
+  const vc = cfg.vms_connect as
+    | {
+        clusters?: unknown;
+        databases?: unknown;
+        load_balancers?: unknown;
+        apps?: unknown;
+        storage?: unknown;
+        pubsub?: unknown;
+        bigquery?: unknown;
+        sql?: unknown;
+      }
+    | undefined;
+  if (vmsId && vc) {
+    addConsumerEdges(vmsId, {
+      clusters: arr(vc.clusters),
+      databases: arr(vc.databases),
+      load_balancers: arr(vc.load_balancers),
+      apps: arr(vc.apps),
+      storage: arr(vc.storage),
+      pubsub: arr(vc.pubsub),
+      bigquery: arr(vc.bigquery),
+      sql: arr(vc.sql),
+    });
+  }
+
+  // RDI (one per deployment): rebuild the node, its source/target edges, and the
+  // distinct link to the already-recreated pipeline-state database.
+  const rdiCfg = cfg.rdi as
+    | { name?: unknown; machine_type?: unknown; target?: unknown; pipelines?: unknown }
+    | undefined;
+  if (rdiCfg && dstr(rdiCfg.name)) {
+    const rdiId = nextId("rdi");
+    const pipelines = Array.isArray(rdiCfg.pipelines)
+      ? (rdiCfg.pipelines as Record<string, unknown>[]).map((p) => ({
+          source: dstr(p.source),
+          tables: Array.isArray(p.tables)
+            ? (p.tables as Record<string, unknown>[]).map((t) => ({
+                table: dstr(t.table),
+                key_prefix: dstr(t.key_prefix) || undefined,
+              }))
+            : undefined,
+        }))
+      : undefined;
+    nodes.push({
+      id: rdiId,
+      type: "rdi",
+      parentId: ROOT_ID,
+      extent: "parent",
+      position: { x: 520, y: 460 },
+      style: { width: NODE_SIZE.rdi.width, height: NODE_SIZE.rdi.height },
+      data: {
+        kind: "rdi",
+        name: dstr(rdiCfg.name),
+        machine_type: dstr(rdiCfg.machine_type) || "n2-standard-4",
+        ...(pipelines && pipelines.length ? { pipelines } : {}),
+      },
+    });
+    for (const p of pipelines || []) {
+      const sid = cloudsqlNameToId.get(p.source);
+      if (sid) {
+        edgeCounter += 1;
+        edges.push({ id: `edge-${edgeCounter}`, source: rdiId, target: sid, animated: true });
+      }
+    }
+    const target = dstr(rdiCfg.target);
+    const targetDbId = target ? dbNameToId.get(target) : undefined;
+    if (targetDbId) {
+      edgeCounter += 1;
+      edges.push({ id: `edge-${edgeCounter}`, source: rdiId, target: targetDbId, animated: true });
+      const targetNode = nodes.find((n) => n.id === targetDbId);
+      const stateNode = nodes.find(
+        (n) => n.parentId === targetNode?.parentId && n.data.kind === "database" && (n.data as DatabaseData).rdiInternal,
+      );
+      if (stateNode) {
+        edges.push({
+          id: `edge-rdiint-${rdiId}`,
+          source: rdiId,
+          target: stateNode.id,
+          animated: true,
+          className: "design-edge-rdi",
+        });
+      }
+    }
+  }
+
+  return { nodes: layoutDiagram(nodes, edges), edges };
 }

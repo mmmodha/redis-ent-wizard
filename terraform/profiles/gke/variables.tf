@@ -46,11 +46,6 @@ variable "gke_machine_type" {
   default = "e2-standard-8"
 }
 
-variable "rec_nodes" {
-  type    = number
-  default = 3
-}
-
 variable "dns_managed_zone" {
   type    = string
   default = "demo-clusters"
@@ -75,15 +70,15 @@ variable "outputs_dir" {
   type = string
 }
 
-variable "operator_chart_version" {
-  type    = string
-  default = ""
-}
-
-variable "rec_specs" {
+variable "operators" {
   type = list(object({
-    name  = string
-    nodes = number
+    name          = string
+    namespace     = string
+    chart_version = string
+    recs = list(object({
+      name  = string
+      nodes = number
+    }))
   }))
   default = []
 }
@@ -96,8 +91,89 @@ variable "applications" {
     replicas = number
     ports    = list(number)
     env      = map(string)
-    expose   = string
+    env_secret_refs = list(object({
+      name        = string
+      secret_name = string
+      secret_key  = string
+    }))
+    expose = string
   }))
   description = "Custom application workloads deployed as containers on GKE."
   default     = []
+}
+
+variable "storage_buckets" {
+  type = list(object({
+    name          = string
+    location      = string
+    storage_class = string
+    versioning    = bool
+    force_destroy = bool
+    grant_role    = string
+  }))
+  description = "Cloud Storage buckets provisioned for this deployment."
+  default     = []
+}
+
+variable "pubsub_topics" {
+  type = list(object({
+    name                = string
+    create_subscription = bool
+    grant_publisher     = bool
+    grant_subscriber    = bool
+  }))
+  description = "Pub/Sub topics provisioned for this deployment."
+  default     = []
+}
+
+variable "bigquery_datasets" {
+  type = list(object({
+    name          = string
+    location      = string
+    grant_role    = string
+    grant_jobuser = bool
+  }))
+  description = "BigQuery datasets provisioned for this deployment."
+  default     = []
+}
+
+variable "cloud_sql_instances" {
+  type = list(object({
+    name             = string
+    database_version = string
+    tier             = string
+    db_name          = string
+    db_user          = string
+    connectivity     = string
+    grant_client     = bool
+    cdc_enabled      = bool
+  }))
+  description = "Cloud SQL instances provisioned for this deployment."
+  default     = []
+}
+
+variable "rdi_enabled" {
+  type        = bool
+  description = "Deploy the Redis Data Integration runtime (Helm)."
+  default     = false
+}
+
+variable "rdi" {
+  type = object({
+    name            = string
+    machine_type    = string
+    version         = string
+    chart_version   = string
+    env             = map(string)
+    pipeline_config = string
+  })
+  description = "RDI runtime + rendered pipeline config."
+  default = {
+    name            = ""
+    machine_type    = ""
+    version         = ""
+    chart_version   = ""
+    env             = {}
+    pipeline_config = ""
+  }
 }

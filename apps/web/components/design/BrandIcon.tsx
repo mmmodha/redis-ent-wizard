@@ -9,7 +9,13 @@ export type IconName =
   | "application"
   | "load-balancer"
   | "network"
-  | "gke";
+  | "gke"
+  | "operator"
+  | "storage"
+  | "pubsub"
+  | "bigquery"
+  | "cloudsql"
+  | "rdi";
 
 export function BrandIcon({ name, size = 18 }: { name: IconName; size?: number }) {
   return (

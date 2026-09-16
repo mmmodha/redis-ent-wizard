@@ -5,14 +5,21 @@ import { Handle, Position, type NodeProps, type NodeTypes } from "@xyflow/react"
 import { BrandIcon, type IconName } from "@/components/design/BrandIcon";
 import { clusterCapacityMB, useDesignContext } from "@/components/design/DesignContext";
 import { clusterCapacityCaption, clusterCapacityClass } from "@/lib/cluster-capacity";
-import { predictedDatabaseEndpoint } from "@/lib/diagram";
+import { exposedVariables, predictedDatabaseEndpoint } from "@/lib/diagram";
 import { clusterRedisNodeCount, effectiveDbReplication } from "@/lib/db-replication";
 import type {
   ApplicationData,
+  BigqueryData,
+  CloudSqlData,
   ClusterData,
   DatabaseData,
   LoadBalancerData,
+  NodeKind,
+  OperatorData,
+  PubsubData,
+  RdiData,
   RootData,
+  StorageData,
   VmsData,
 } from "@/lib/diagram";
 
@@ -22,6 +29,20 @@ function NodeHeader({ icon, title, tag }: { icon: IconName; title: string; tag?:
       <BrandIcon name={icon} size={16} />
       <span className="design-node-title">{title}</span>
       {tag ? <span className="design-node-tag mono">{tag}</span> : null}
+    </div>
+  );
+}
+
+/** Compact list of the env vars this provider injects into wired consumers. */
+function ExposesLine({ kind, name }: { kind: NodeKind; name: string }) {
+  const vars = exposedVariables(kind, name);
+  if (!vars.length) return null;
+  return (
+    <div
+      className="design-exposes mono"
+      title={vars.map((v) => `${v.name} — ${v.description}`).join("\n")}
+    >
+      <span className="design-exposes-label">exposes</span> {vars.map((v) => v.name).join(" · ")}
     </div>
   );
 }
@@ -44,11 +65,30 @@ export function RootNode({ data }: NodeProps) {
   );
 }
 
+export function OperatorNode({ data }: NodeProps) {
+  const d = data as OperatorData;
+  const version = d.operator_chart_version?.trim();
+  return (
+    <div className="design-operator">
+      <div className="design-operator-head">
+        <BrandIcon name="operator" size={16} />
+        <span className="design-node-title">{d.name.trim() || "Redis Operator"}</span>
+        <span className="design-node-tag mono">{version && version !== "latest" ? version : "latest"}</span>
+      </div>
+      <div className="design-operator-hint">Drag Redis clusters here to run them on this operator.</div>
+    </div>
+  );
+}
+
 export function ClusterNode({ id, data }: NodeProps) {
   const d = data as ClusterData;
   const { machineTypes, nodes, capacityIfUnavailable = "pending" } = useDesignContext();
   const parentId = nodes.find((x) => x.id === id)?.parentId;
-  const gke = nodes.some((n) => n.id === parentId && n.data.kind === "gke");
+  // On GKE a cluster nests inside an operator (whose parent is the gke root);
+  // on VM it sits directly under the network root.
+  const gke = nodes.some(
+    (n) => n.id === parentId && (n.data.kind === "gke" || n.data.kind === "operator"),
+  );
   const count = gke ? d.rec_nodes : d.nodes;
   const cap = clusterCapacityMB(id, count, d.machine_type, machineTypes, nodes);
   const catalogReady = Boolean(machineTypes.find((m) => m.name === d.machine_type)?.memoryMb);
@@ -61,10 +101,11 @@ export function ClusterNode({ id, data }: NodeProps) {
   const capClass = clusterCapacityClass(capInput);
   return (
     <div className="design-cluster">
-      <Handle type="target" position={Position.Left} className="design-handle" />
+      <Handle type="target" position={Position.Left} className="design-hit" />
       <NodeHeader icon="cluster" title={d.name.trim() || "Redis cluster"} tag={`${count} nodes`} />
       <div className="design-node-meta mono">{d.machine_type || "machine type"}</div>
       {caption ? <div className={`design-cap ${capClass}`.trim()}>{caption}</div> : null}
+      <ExposesLine kind="cluster" name={d.name.trim()} />
     </div>
   );
 }
@@ -86,10 +127,16 @@ export function DatabaseNode({ id, data }: NodeProps) {
     ? predictedDatabaseEndpoint(settings, clusterNameRaw, clusterIndex < 0 ? 0 : clusterIndex, d.port)
     : null;
   return (
-    <div className="design-db">
-      <NodeHeader icon="database" title={d.name.trim() || "database"} />
+    <div className={`design-db${d.rdiInternal ? " design-db-rdi" : ""}`}>
+      <Handle type="target" position={Position.Left} className="design-hit" />
+      <NodeHeader
+        icon="database"
+        title={d.name.trim() || "database"}
+        tag={d.rdiInternal ? "RDI state" : undefined}
+      />
       <div className="design-node-meta mono">{d.memory_gb} GB</div>
       <div className="design-badges">
+        {d.rdiInternal ? <span className="design-badge design-badge-rdi">managed by RDI</span> : null}
         {ha ? <span className="design-badge">HA</span> : null}
         {d.liveStatus ? (
           <span className={`design-badge design-badge-live design-badge-${d.liveStatus}`}>{String(d.liveStatus)}</span>
@@ -124,6 +171,7 @@ export function DatabaseNode({ id, data }: NodeProps) {
           ) : null}
         </div>
       ) : null}
+      <ExposesLine kind="database" name={d.name.trim()} />
     </div>
   );
 }
@@ -138,10 +186,12 @@ export function VmsNode({ data }: NodeProps) {
   ].filter(Boolean);
   return (
     <div className="design-vms">
-      <Handle type="target" position={Position.Left} className="design-handle" />
+      <Handle type="target" position={Position.Left} className="design-hit" />
       <NodeHeader icon="vm" title={d.name.trim() || "Set of VMs"} tag={`${d.count} VMs`} />
       <div className="design-node-meta mono">{d.machine_type || "machine type"}</div>
       {extras.length ? <div className="design-node-meta mono">{extras.join(" · ")}</div> : null}
+      <ExposesLine kind="vms" name="app" />
+      <Handle type="source" position={Position.Right} className="design-handle" />
     </div>
   );
 }
@@ -158,7 +208,7 @@ export function ApplicationNode({ data }: NodeProps) {
         : "no source yet";
   return (
     <div className="design-app">
-      <Handle type="target" position={Position.Left} className="design-handle" />
+      <Handle type="target" position={Position.Left} className="design-hit" />
       <NodeHeader icon="application" title={d.name.trim() || "Application"} />
       <div className="design-node-meta mono">{summary}</div>
       {d.liveStatus ? (
@@ -166,6 +216,7 @@ export function ApplicationNode({ data }: NodeProps) {
           <span className={`design-badge design-badge-live design-badge-${d.liveStatus}`}>{String(d.liveStatus)}</span>
         </div>
       ) : null}
+      <ExposesLine kind="application" name={d.name.trim()} />
       <Handle type="source" position={Position.Right} className="design-handle" />
     </div>
   );
@@ -173,16 +224,90 @@ export function ApplicationNode({ data }: NodeProps) {
 
 export function LoadBalancerNode({ data }: NodeProps) {
   const d = data as LoadBalancerData;
+  // Ports the LB actually serves, annotated with the protocol for the well-known ones.
   const ports = [
-    d.expose_http ? "80" : null,
-    d.expose_https ? "443" : null,
+    d.expose_http ? "80 (HTTP)" : null,
+    d.expose_https ? "443 (HTTPS)" : null,
     d.extra_ports.trim() ? d.extra_ports.trim() : null,
   ].filter(Boolean);
   return (
     <div className="design-lb">
-      <Handle type="target" position={Position.Left} className="design-handle" />
+      <Handle type="target" position={Position.Left} className="design-hit" />
       <NodeHeader icon="load-balancer" title={d.name.trim() || "Load balancer"} />
-      <div className="design-node-meta mono">{ports.length ? ports.join(" · ") : "closed"}</div>
+      <div className="design-node-meta mono">
+        {ports.length ? `serves ${ports.join(" · ")}` : "no ports exposed"}
+      </div>
+      <ExposesLine kind="loadbalancer" name={d.name.trim()} />
+      <Handle type="source" position={Position.Right} className="design-handle" />
+    </div>
+  );
+}
+
+export function StorageNode({ data }: NodeProps) {
+  const d = data as StorageData;
+  const meta = [d.location.trim() || "region", d.storage_class, d.access === "read" ? "read-only" : "read+write"]
+    .filter(Boolean)
+    .join(" · ");
+  return (
+    <div className="design-storage">
+      <Handle type="target" position={Position.Left} className="design-hit" />
+      <NodeHeader icon="storage" title={d.name.trim() || "Cloud Storage"} />
+      <div className="design-node-meta mono">{meta}</div>
+      <ExposesLine kind="storage" name={d.name.trim()} />
+    </div>
+  );
+}
+
+export function PubsubNode({ data }: NodeProps) {
+  const d = data as PubsubData;
+  const meta = [d.create_subscription ? "topic + subscription" : "topic", d.role].join(" · ");
+  return (
+    <div className="design-pubsub">
+      <Handle type="target" position={Position.Left} className="design-hit" />
+      <NodeHeader icon="pubsub" title={d.name.trim() || "Pub/Sub"} />
+      <div className="design-node-meta mono">{meta}</div>
+      <ExposesLine kind="pubsub" name={d.name.trim()} />
+    </div>
+  );
+}
+
+export function BigqueryNode({ data }: NodeProps) {
+  const d = data as BigqueryData;
+  const meta = [d.location.trim() || "region", d.access === "read" ? "read-only" : "read+write"].join(" · ");
+  return (
+    <div className="design-bigquery">
+      <Handle type="target" position={Position.Left} className="design-hit" />
+      <NodeHeader icon="bigquery" title={d.name.trim() || "BigQuery"} />
+      <div className="design-node-meta mono">{meta}</div>
+      <ExposesLine kind="bigquery" name={d.name.trim()} />
+    </div>
+  );
+}
+
+export function CloudSqlNode({ data }: NodeProps) {
+  const d = data as CloudSqlData;
+  const meta = [d.engine === "mysql" ? "MySQL" : "Postgres", d.connectivity].join(" · ");
+  return (
+    <div className="design-cloudsql">
+      <Handle type="target" position={Position.Left} className="design-hit" />
+      <NodeHeader icon="cloudsql" title={d.name.trim() || "Cloud SQL"} />
+      <div className="design-node-meta mono">{meta}</div>
+      <ExposesLine kind="cloudsql" name={d.name.trim()} />
+    </div>
+  );
+}
+
+export function RdiNode({ data }: NodeProps) {
+  const d = data as RdiData;
+  const pipelines = Array.isArray(d.pipelines) ? d.pipelines.length : 0;
+  return (
+    <div className="design-rdi">
+      <Handle type="target" position={Position.Left} className="design-hit" />
+      <NodeHeader icon="rdi" title={d.name.trim() || "RDI"} />
+      <div className="design-node-meta mono">{d.machine_type || "machine type"}</div>
+      <div className="design-node-meta mono">
+        {pipelines ? `${pipelines} pipeline${pipelines === 1 ? "" : "s"}` : "wire a Cloud SQL source + a target DB"}
+      </div>
       <Handle type="source" position={Position.Right} className="design-handle" />
     </div>
   );
@@ -191,9 +316,15 @@ export function LoadBalancerNode({ data }: NodeProps) {
 export const nodeTypes: NodeTypes = {
   network: RootNode,
   gke: RootNode,
+  operator: OperatorNode,
   cluster: ClusterNode,
   database: DatabaseNode,
   vms: VmsNode,
   application: ApplicationNode,
   loadbalancer: LoadBalancerNode,
+  storage: StorageNode,
+  pubsub: PubsubNode,
+  bigquery: BigqueryNode,
+  cloudsql: CloudSqlNode,
+  rdi: RdiNode,
 };

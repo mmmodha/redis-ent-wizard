@@ -1,7 +1,18 @@
 import type { FastifyReply, FastifyRequest } from "fastify";
 import { createRemoteJWKSet, jwtVerify, type JWTPayload } from "jose";
+import { lookupApiToken } from "./api-tokens.js";
+import { assertScopeAllows } from "./authz.js";
 
 export type Role = "user" | "admin";
+
+/**
+ * What a principal is permitted to do.
+ * - `full`   — human/OIDC users and admin tokens: the whole API.
+ * - `define` — machine tokens (e.g. an AI tool via MCP): may validate, render,
+ *   and save *drafts*, plus read, but is refused every cloud-mutating route.
+ * Undefined means `full` (OIDC and dev users are never scope-restricted).
+ */
+export type TokenScope = "define" | "full";
 
 export interface AuthUser {
   sub: string;
@@ -9,6 +20,8 @@ export interface AuthUser {
   name: string;
   groups: string[];
   role: Role;
+  /** Set only for API-token principals; undefined for OIDC/dev = full access. */
+  scope?: TokenScope;
 }
 
 declare module "fastify" {
@@ -93,9 +106,17 @@ function fromPayload(payload: JWTPayload): AuthUser {
 }
 
 export async function authenticateRequest(req: FastifyRequest): Promise<AuthUser> {
+  // A configured API token always wins if presented, so scoped machine
+  // callers work even in AUTH_DISABLED dev mode (they stay scope-restricted).
+  const header = req.headers.authorization;
+  if (header?.startsWith("Bearer ")) {
+    const bearer = header.slice("Bearer ".length).trim();
+    const apiUser = lookupApiToken(bearer);
+    if (apiUser) return apiUser;
+  }
+
   if (AUTH_DISABLED()) return devUser();
 
-  const header = req.headers.authorization;
   if (!header?.startsWith("Bearer ")) {
     throw Object.assign(new Error("Authentication required"), { statusCode: 401 });
   }
@@ -135,6 +156,9 @@ export async function authHook(req: FastifyRequest, reply: FastifyReply): Promis
 
   try {
     req.user = await authenticateRequest(req);
+    // Fail-closed scope guard: a define-scoped token may only read and use the
+    // define surface; every provisioning route is refused here, before it runs.
+    assertScopeAllows(req.user, req.method, path);
   } catch (err) {
     const status = (err as { statusCode?: number }).statusCode || 401;
     reply.code(status).send({ error: err instanceof Error ? err.message : "Unauthorized" });
