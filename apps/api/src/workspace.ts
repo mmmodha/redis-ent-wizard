@@ -23,8 +23,22 @@ const terraformDir =
 
 const dataDir = process.env.DATA_DIR || path.resolve(process.cwd(), "../../data");
 
+/**
+ * Escape a value for a quoted HCL string. Besides `\` and `"`, `${` and `%{`
+ * start template interpolations/directives in HCL, so literal text containing
+ * them (e.g. a shell `${VAR:-}` in an app command) must be written as `$${` /
+ * `%%{`. Raw newlines/tabs are invalid inside a quoted string.
+ */
 function escapeTfString(value: string): string {
-  return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+  return value
+    .replace(/\\/g, "\\\\")
+    .replace(/"/g, '\\"')
+    // Replacer functions: in a replacement *string*, `$$` collapses to `$`.
+    .replace(/\$\{/g, () => "$${")
+    .replace(/%\{/g, () => "%%{")
+    .replace(/\r/g, "\\r")
+    .replace(/\n/g, "\\n")
+    .replace(/\t/g, "\\t");
 }
 
 function tfValue(value: unknown): string {

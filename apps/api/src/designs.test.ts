@@ -85,6 +85,33 @@ describe("renderTerraform (define render, no apply)", () => {
     assert.match(tfvars, /cache_admin@redis\.io/);
   });
 
+  it("escapes ${ and %{ so shell expansions in an app command are literal in tfvars", () => {
+    const cfg = {
+      name: "demo",
+      mode: "vm",
+      youremail: "jane_doe",
+      project: "proj",
+      credentialsFile: "key.json",
+      clusters: [{ name: "cache", nodes: 3 }],
+      applications: [
+        {
+          name: "gatling",
+          command: 'printf "%q" "${LB_ENGINE_LB_ENDPOINT:-}"; echo $(pwd) %{x}\nexec tail -f /dev/null',
+          artifact: { kind: "url", ref: "https://example.com/g.tar.gz", type: "binary" },
+        },
+      ],
+    } as unknown as CreateInstanceInput;
+    const { tfvars } = renderTerraform("vm", cfg);
+    // `${` -> `$${` and `%{` -> `%%{` (HCL literal escapes); `$(` is not special.
+    assert.match(tfvars, /\$\$\{LB_ENGINE_LB_ENDPOINT:-\}/);
+    assert.match(tfvars, /%%\{x\}/);
+    assert.match(tfvars, /\$\(pwd\)/);
+    // No unescaped interpolation opener remains, and the newline is escaped.
+    assert.doesNotMatch(tfvars, /(^|[^$])\$\{/);
+    assert.doesNotMatch(tfvars, /(^|[^%])%\{/);
+    assert.match(tfvars, /\\nexec tail/);
+  });
+
   it("renders GKE operators, each with its version + namespace and its RECs", () => {
     const gke = {
       name: "demo",
