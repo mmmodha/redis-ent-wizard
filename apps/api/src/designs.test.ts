@@ -85,6 +85,28 @@ describe("renderTerraform (define render, no apply)", () => {
     assert.match(tfvars, /cache_admin@redis\.io/);
   });
 
+  it("passes the configured DB ports to Terraform (distinct, sorted, default 12000)", () => {
+    const cfg = {
+      name: "demo",
+      mode: "vm",
+      youremail: "jane_doe",
+      project: "proj",
+      credentialsFile: "key.json",
+      clusters: [
+        {
+          name: "a",
+          nodes: 3,
+          databases: [{ name: "x", memory_gb: 1, port: 6379 }, { name: "y", memory_gb: 1 }],
+        },
+        { name: "b", nodes: 3, databases: [{ name: "z", memory_gb: 1, port: 6379 }] },
+      ],
+    } as unknown as CreateInstanceInput;
+    const { tfvars, variablesTf, mainTf } = renderTerraform("vm", cfg);
+    assert.match(tfvars, /db_ports = \[6379, 12000\]/);
+    assert.match(variablesTf, /variable "db_ports"/);
+    assert.match(mainTf, /db_ports\s*=\s*var\.db_ports/);
+  });
+
   it("escapes ${ and %{ so shell expansions in an app command are literal in tfvars", () => {
     const cfg = {
       name: "demo",

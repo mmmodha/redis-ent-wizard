@@ -271,6 +271,35 @@ resource "google_compute_firewall" "app_workload_extra" {
   source_ranges = ["0.0.0.0/0"]
 }
 
+# Database endpoints resolve to the Redis nodes' EXTERNAL IPs (nodes join with
+# external_addr = public IP), so client VMs reach them as external-source traffic
+# that `allow_internal` (subnet CIDRs) does not match. The `http` rule only opens
+# Redis Enterprise's default 10000-19999 range, so a database on any other port
+# (e.g. 6379) would be silently dropped. Open the configured DB ports on the
+# Redis nodes to this deployment's app and RDI VMs only (their /32 external IPs).
+locals {
+  db_client_ips = concat(
+    module.app_vm.app_ips,
+    flatten([for m in module.app_workload : [for a in m.apps : a.ip]]),
+    var.rdi_enabled ? [module.rdi_vm[0].rdi_ip] : [],
+  )
+}
+
+resource "google_compute_firewall" "db_from_apps" {
+  # Gate on config-known values so `count` is known at plan time.
+  count   = length(var.db_ports) > 0 && (var.app > 0 || length(var.applications) > 0 || var.rdi_enabled) ? 1 : 0
+  name    = "${local.name_prefix}-fw-db-apps"
+  network = module.network.vpc_name
+
+  allow {
+    protocol = "tcp"
+    ports    = [for p in var.db_ports : tostring(p)]
+  }
+
+  target_tags   = ["http"]
+  source_ranges = [for ip in local.db_client_ips : "${ip}/32"]
+}
+
 # Expose the RDI runtime's management/UI ports on the dedicated RDI VM.
 resource "google_compute_firewall" "rdi" {
   count   = var.rdi_enabled ? 1 : 0
