@@ -271,6 +271,12 @@ variable "cloud_sql_instances" {
   default     = []
 }
 
+variable "db_ports" {
+  type        = list(number)
+  description = "Database ports (from the config) opened on the Redis nodes to this deployment's app/RDI VMs. The node 'http' rule only covers Redis Enterprise's default 10000-19999 range."
+  default     = []
+}
+
 variable "rdi_enabled" {
   type        = bool
   description = "Deploy the Redis Data Integration runtime."

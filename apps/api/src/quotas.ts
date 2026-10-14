@@ -12,7 +12,7 @@ export type QuotaLimits = {
 
 const DEFAULTS: QuotaLimits = {
   maxLiveClusters: Number(process.env.QUOTA_MAX_LIVE_CLUSTERS || 5),
-  maxNodesPerCluster: Number(process.env.QUOTA_MAX_NODES || 7),
+  maxNodesPerCluster: Number(process.env.QUOTA_MAX_NODES || 9),
   maxNvmePerNode: Number(process.env.QUOTA_MAX_NVME || 8),
   maxConcurrentJobs: Number(process.env.QUOTA_MAX_CONCURRENT_JOBS || 2),
 };

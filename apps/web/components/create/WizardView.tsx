@@ -927,7 +927,8 @@ export function WizardView({
                     <option value={1}>1 — single node (testing)</option>
                     <option value={3}>3 — HA, rack aware</option>
                     <option value={5}>5 — HA, larger</option>
-                    <option value={7}>7 — HA, largest</option>
+                    <option value={7}>7 — HA, larger still</option>
+                    <option value={9}>9 — HA, largest</option>
                   </select>
                 </label>
                 <MachineTypePicker
@@ -1558,6 +1559,7 @@ export function WizardView({
                     <option value={1}>1 — testing only</option>
                     <option value={3}>3 — HA</option>
                     <option value={5}>5 — HA, larger</option>
+                    <option value={9}>9 — HA, largest</option>
                   </select>
                 </label>
                 <label>

@@ -23,8 +23,22 @@ const terraformDir =
 
 const dataDir = process.env.DATA_DIR || path.resolve(process.cwd(), "../../data");
 
+/**
+ * Escape a value for a quoted HCL string. Besides `\` and `"`, `${` and `%{`
+ * start template interpolations/directives in HCL, so literal text containing
+ * them (e.g. a shell `${VAR:-}` in an app command) must be written as `$${` /
+ * `%%{`. Raw newlines/tabs are invalid inside a quoted string.
+ */
 function escapeTfString(value: string): string {
-  return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+  return value
+    .replace(/\\/g, "\\\\")
+    .replace(/"/g, '\\"')
+    // Replacer functions: in a replacement *string*, `$$` collapses to `$`.
+    .replace(/\$\{/g, () => "$${")
+    .replace(/%\{/g, () => "%%{")
+    .replace(/\r/g, "\\r")
+    .replace(/\n/g, "\\n")
+    .replace(/\t/g, "\\t");
 }
 
 function tfValue(value: unknown): string {
@@ -718,6 +732,20 @@ export function resolveGkeConnections(
 }
 
 /**
+ * Distinct database ports across all clusters (sorted). Databases are created
+ * over the REST API after bootstrap, so Terraform doesn't know their ports; the
+ * VM profile uses this to open them on the Redis nodes to the app/RDI VMs.
+ * Mirrors the default used when creating a database (`db.port ?? 12000`).
+ */
+export function buildDbPorts(clusters: ReturnType<typeof normalizeClusters>): number[] {
+  const ports = new Set<number>();
+  for (const c of clusters) {
+    for (const db of c.databases || []) ports.add(Number(db.port ?? 12000));
+  }
+  return [...ports].filter((p) => Number.isInteger(p) && p > 0 && p < 65536).sort((a, b) => a - b);
+}
+
+/**
  * Group the normalized GKE clusters under their operators and produce the
  * per-operator tfvars: each operator carries its resolved Helm chart version,
  * its namespace, and the RECs (name + node count) it owns. Clusters whose
@@ -810,6 +838,7 @@ export function vmStackModuleArguments(): string {
   rdi              = var.rdi
   rdi_connect_cluster_admin = var.rdi_connect_cluster_admin
   rdi_connect_sql  = var.rdi_connect_sql
+  db_ports         = var.db_ports
 `;
 }
 
@@ -1101,6 +1130,10 @@ variable "rdi_connect_sql" {
   type    = map(string)
   default = {}
 }
+variable "db_ports" {
+  type    = list(number)
+  default = []
+}
 `
       : `
 variable "yourname" { type = string }
@@ -1269,6 +1302,7 @@ variable "rdi" {
     const dnsSuffix = String(tfvars.dns_zone_dns_name);
     const registry = buildVmRegistry(input, clusters, vmPrefix, dnsSuffix);
     tfvars.applications = buildVmApplications(input, registry);
+    tfvars.db_ports = buildDbPorts(clusters);
     tfvars.load_balancers = buildLoadBalancers(input);
     // Connections for the Set-of-VMs group (app_vm); TF fills in admin pw + LB VIP.
     const vmsConn = buildVmSetConnections(input, registry);
