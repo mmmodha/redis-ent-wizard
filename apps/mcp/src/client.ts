@@ -40,8 +40,9 @@ export class RewClient {
     this.baseUrl = baseUrl.replace(/\/$/, "");
   }
 
-  private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
-    const headers: Record<string, string> = { accept: "application/json" };
+  /** Send a request and return the raw response text; map failures to ApiError. */
+  private async send(method: string, path: string, body?: unknown, accept = "application/json"): Promise<string> {
+    const headers: Record<string, string> = { accept };
     if (body !== undefined) headers["content-type"] = "application/json";
     if (this.token) headers.authorization = `Bearer ${this.token}`;
 
@@ -61,15 +62,20 @@ export class RewClient {
     }
 
     const text = await res.text();
-    const parsed = text ? safeJson(text) : undefined;
     if (!res.ok) {
+      const parsed = text ? safeJson(text) : undefined;
       const detail =
         (parsed && typeof parsed === "object" && "error" in parsed
           ? JSON.stringify((parsed as { error: unknown }).error)
           : text) || res.statusText;
       throw new ApiError(`API ${method} ${path} failed (${res.status}): ${detail}`, res.status, parsed);
     }
-    return parsed as T;
+    return text;
+  }
+
+  private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
+    const text = await this.send(method, path, body);
+    return (text ? safeJson(text) : undefined) as T;
   }
 
   getCapabilities(): Promise<CapabilitiesResponse> {
@@ -111,6 +117,51 @@ export class RewClient {
 
   getDesign(id: string): Promise<DesignRecord> {
     return this.request("GET", `/designs/${encodeURIComponent(id)}`);
+  }
+
+  /**
+   * A deployed instance's endpoints, credentials and details as `.properties`
+   * text. Contains the cluster admin password, so callers should write it to a
+   * file rather than hand it to the model.
+   */
+  getInstanceProperties(id: string): Promise<string> {
+    return this.send("GET", `/instances/${encodeURIComponent(id)}/properties`, undefined, "text/plain");
+  }
+
+  /**
+   * Download a deployed instance's properties straight to a LOCAL file (mode
+   * 0600) and return only a summary — the contents (which include the cluster
+   * admin password) never pass through the model. Refuses to overwrite an
+   * existing file unless `overwrite` is set; never creates parent directories.
+   */
+  async saveInstanceProperties(
+    id: string,
+    filePath: string,
+    overwrite = false,
+  ): Promise<{ instance: string; path: string; bytes: number; entries: number; permissions: string }> {
+    const { isAbsolute } = await import("node:path");
+    const { chmod, writeFile } = await import("node:fs/promises");
+    if (!isAbsolute(filePath)) {
+      throw new ApiError(`path must be an absolute path (got "${filePath}")`, 0, undefined);
+    }
+    // Fetch first so a failed request never leaves an empty credentials file behind.
+    const text = await this.getInstanceProperties(id);
+    try {
+      await writeFile(filePath, text, { mode: 0o600, flag: overwrite ? "w" : "wx" });
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === "EEXIST") {
+        throw new ApiError(`${filePath} already exists; pass overwrite: true to replace it`, 0, undefined);
+      }
+      throw new ApiError(
+        `Cannot write ${filePath} (${err instanceof Error ? err.message : String(err)})`,
+        0,
+        undefined,
+      );
+    }
+    await chmod(filePath, 0o600).catch(() => undefined); // tighten an overwritten file too
+    const entries = text.split("\n").filter((l) => l && !l.startsWith("#")).length;
+    return { instance: id, path: filePath, bytes: Buffer.byteLength(text), entries, permissions: "0600" };
   }
 
   /**

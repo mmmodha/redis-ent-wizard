@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createServer as createHttpServer, type Server } from "node:http";
 import { AddressInfo } from "node:net";
-import { writeFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
@@ -41,6 +41,11 @@ function fakeApi(): Promise<{ server: Server; url: string; calls: Array<{ method
       if (req.url === "/designs" && req.method === "POST") return reply(201, { id: "demo-default", name: "demo", mode: "vm", status: "draft", reviewUrl: "http://web/edit?from=demo-default" });
       if (req.url?.startsWith("/designs/") && req.method === "PATCH") return reply(200, { id: "demo-default", status: "draft", reviewUrl: "http://web/edit?from=demo-default" });
       if (req.url === "/designs" && req.method === "GET") return reply(200, [{ id: "demo-default", status: "draft", reviewUrl: "http://web/edit?from=demo-default" }]);
+      if (req.url === "/instances/demo-default/properties" && req.method === "GET") {
+        res.writeHead(200, { "content-type": "text/plain; charset=utf-8" });
+        return res.end("# header\ninstance.id=demo-default\ncluster.cluster-1.admin.password=SECRET-PW\n");
+      }
+      if (req.url === "/instances/gone/properties") return reply(409, { error: "Instance is destroyed; its endpoints are no longer reachable." });
       if (req.url?.startsWith("/artifacts") && req.method === "POST") return reply(201, { id: "art_123", filename: "app.jar", type: "jar" });
       if (req.url?.startsWith("/designs/")) return reply(200, { id: "demo-default", status: "draft" });
       return reply(404, { error: "not found" });
@@ -54,7 +59,7 @@ function fakeApi(): Promise<{ server: Server; url: string; calls: Array<{ method
   });
 }
 
-async function connectedClient(apiUrl: string, opts?: { allowLocalUpload?: boolean }, token = "tok") {
+async function connectedClient(apiUrl: string, opts?: { allowLocalFiles?: boolean }, token = "tok") {
   const client = new Client({ name: "test", version: "1.0.0" });
   const mcp = createServer(new RewClient(apiUrl, token), opts);
   const [a, b] = InMemoryTransport.createLinkedPair();
@@ -109,20 +114,24 @@ describe("MCP server tools", () => {
     await client.close();
   });
 
-  it("omits upload_artifact by default and registers it with allowLocalUpload", async () => {
+  it("omits the local-file tools by default and registers them with allowLocalFiles", async () => {
     const off = await connectedClient(api.url);
-    assert.ok(!(await off.listTools()).tools.some((t) => t.name === "upload_artifact"));
+    const offNames = (await off.listTools()).tools.map((t) => t.name);
+    assert.ok(!offNames.includes("upload_artifact"));
+    assert.ok(!offNames.includes("download_instance_properties"));
     await off.close();
 
-    const on = await connectedClient(api.url, { allowLocalUpload: true });
-    assert.ok((await on.listTools()).tools.some((t) => t.name === "upload_artifact"));
+    const on = await connectedClient(api.url, { allowLocalFiles: true });
+    const onNames = (await on.listTools()).tools.map((t) => t.name);
+    assert.ok(onNames.includes("upload_artifact"));
+    assert.ok(onNames.includes("download_instance_properties"));
     await on.close();
   });
 
   it("upload_artifact reads a local file and returns the artifact id", async () => {
     const file = join(tmpdir(), `rew-mcp-test-${Date.now()}.jar`);
     writeFileSync(file, "PK fake jar bytes");
-    const client = await connectedClient(api.url, { allowLocalUpload: true });
+    const client = await connectedClient(api.url, { allowLocalFiles: true });
     const res = await client.callTool({ name: "upload_artifact", arguments: { path: file, type: "jar" } });
     const text = (res.content as Array<{ text: string }>)[0].text;
     assert.match(text, /art_123/);
@@ -156,6 +165,70 @@ describe("MCP server tools", () => {
     const patched = api.calls.find((c) => c.path.startsWith("/designs/") && c.method === "PATCH");
     assert.ok(patched, "expected a PATCH /designs/:id");
     await client.close();
+  });
+
+  describe("download_instance_properties", () => {
+    const text = (r: { content: unknown }) => (r.content as Array<{ text: string }>)[0].text;
+    const target = () => join(tmpdir(), `rew-props-${Date.now()}-${Math.random().toString(16).slice(2)}.properties`);
+
+    it("writes the file (mode 0600) and returns a summary WITHOUT the credentials", async () => {
+      const file = target();
+      const client = await connectedClient(api.url, { allowLocalFiles: true });
+      const res = await client.callTool({
+        name: "download_instance_properties",
+        arguments: { id: "demo-default", path: file },
+      });
+      assert.notEqual(res.isError, true);
+      assert.match(text(res), /entries/);
+      assert.ok(!text(res).includes("SECRET-PW"), "the model-facing result must not contain the password");
+      assert.match(readFileSync(file, "utf8"), /cluster\.cluster-1\.admin\.password=SECRET-PW/);
+      if (process.platform !== "win32") assert.equal(statSync(file).mode & 0o777, 0o600);
+      await client.close();
+    });
+
+    it("refuses to overwrite unless overwrite is true", async () => {
+      const file = target();
+      writeFileSync(file, "old");
+      const client = await connectedClient(api.url, { allowLocalFiles: true });
+      const blocked = await client.callTool({
+        name: "download_instance_properties",
+        arguments: { id: "demo-default", path: file },
+      });
+      assert.equal(blocked.isError, true);
+      assert.match(text(blocked), /already exists/);
+      assert.equal(readFileSync(file, "utf8"), "old");
+      const ok = await client.callTool({
+        name: "download_instance_properties",
+        arguments: { id: "demo-default", path: file, overwrite: true },
+      });
+      assert.notEqual(ok.isError, true);
+      assert.match(readFileSync(file, "utf8"), /instance\.id=demo-default/);
+      await client.close();
+    });
+
+    it("rejects a relative path", async () => {
+      const client = await connectedClient(api.url, { allowLocalFiles: true });
+      const res = await client.callTool({
+        name: "download_instance_properties",
+        arguments: { id: "demo-default", path: "relative.properties" },
+      });
+      assert.equal(res.isError, true);
+      assert.match(text(res), /absolute/);
+      await client.close();
+    });
+
+    it("surfaces an API error and creates no file", async () => {
+      const file = target();
+      const client = await connectedClient(api.url, { allowLocalFiles: true });
+      const res = await client.callTool({
+        name: "download_instance_properties",
+        arguments: { id: "gone", path: file },
+      });
+      assert.equal(res.isError, true);
+      assert.match(text(res), /destroyed/);
+      assert.ok(!existsSync(file));
+      await client.close();
+    });
   });
 
   it("list_capabilities returns the JSON schema and guide", async () => {
