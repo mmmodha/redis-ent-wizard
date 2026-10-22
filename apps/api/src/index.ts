@@ -58,6 +58,7 @@ import { verifyCredentialFile, verifyCredentialJson } from "./credential-verify.
 import { normalizeAppDiskGib, normalizeAppMachineTypes, parseAppExtraPorts } from "./app-web.js";
 import { hasAppCompute, normalizeClusters, normalizeOperators } from "./clusters.js";
 import { buildAccessView } from "./access.js";
+import { buildInstanceProperties } from "./instance-properties.js";
 import { GKE_OPERATOR_RELEASES, VM_RS_RELEASES, resolveGkeOperatorChart } from "./rs-releases.js";
 import { audit, listAudit } from "./audit.js";
 import { checkCreateQuota, getQuotaLimits, iamHint } from "./quotas.js";
@@ -364,6 +365,34 @@ app.get<{ Params: { id: string } }>("/instances/:id", async (req, reply) => {
     return httpError(reply, err);
   }
   return decorate(inst);
+});
+
+// The instance's endpoints, credentials and details as a .properties file (the
+// same data as the web "Endpoints & credentials" panel). It includes the cluster
+// admin password, so it is audited; user-chosen DB passwords are never included.
+app.get<{ Params: { id: string } }>("/instances/:id/properties", async (req, reply) => {
+  const user = requireUser(req);
+  const inst = await getInstance(req.params.id);
+  if (!inst) return reply.code(404).send({ error: "not found" });
+  try {
+    assertCanView(user, inst);
+  } catch (err) {
+    return httpError(reply, err);
+  }
+  if (inst.status === "destroyed") {
+    return reply.code(409).send({ error: "Instance is destroyed; its endpoints are no longer reachable." });
+  }
+  const view = await decorate(inst);
+  if (!Object.keys(view.endpoints || {}).length) {
+    return reply.code(409).send({ error: "No endpoints yet; wait for provisioning to finish." });
+  }
+  await audit(user, "instance.properties_download", "instance", inst.id);
+  const filename = `${inst.id.replace(/[^A-Za-z0-9_.-]/g, "_")}.properties`;
+  return reply
+    .header("content-type", "text/plain; charset=utf-8")
+    .header("content-disposition", `attachment; filename="${filename}"`)
+    .header("cache-control", "no-store")
+    .send(buildInstanceProperties(view));
 });
 
 app.get<{ Params: { id: string } }>("/instances/:id/outputs", async (req, reply) => {

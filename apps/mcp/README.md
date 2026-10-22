@@ -25,6 +25,7 @@ applies.
 | `render_design` | Return the Terraform (`main.tf`, `variables.tf`, `terraform.tfvars`) a config would generate — no apply. |
 | `save_design` | Persist a config as a draft; returns the record and a `reviewUrl`. |
 | `list_designs` / `get_design` | List/fetch draft designs visible to the token. |
+| `download_instance_properties` | Local (stdio) only. Save a **deployed** instance's endpoints, credentials and details as a `.properties` file (`name=value`) at an absolute path on your machine — the same data as the web "Download .properties" button. The file is written with mode `0600` and the tool returns only the path and a count, never the contents, so the cluster admin password stays out of the model's context. Refuses to overwrite unless `overwrite: true`; fails for destroyed or not-yet-provisioned instances. |
 
 ## Prerequisites
 
@@ -132,6 +133,35 @@ A client points at it with the Streamable HTTP transport, e.g.:
 }
 ```
 
+## Known limitations: local-only tools (TODO)
+
+Two tools read or write a file path, which only makes sense when the MCP server
+runs on the same machine as the caller. They are registered by the local stdio
+server (`allowLocalFiles: true` in `src/stdio.ts`) and **are not available over
+the hosted HTTP transport** (`createServer(client)` in `src/http.ts` omits them),
+because a path there would resolve on the server, not on the user's machine.
+Every other tool works on both transports.
+
+| Tool | Local (stdio) | Hosted (HTTP) | Workaround on HTTP today |
+| --- | --- | --- | --- |
+| `upload_artifact` | reads a local jar/binary and stages it | missing | use a hosted artifact (`url`, `gcs`, or `git`), or have a human attach the file in the wizard |
+| `download_instance_properties` | writes a `0600` `.properties` file | missing | the web "Download .properties" button, or `GET /instances/:id/properties` with a bearer token |
+
+To address later (options, nothing decided):
+
+- **Upload over HTTP:** a tool that returns a short-lived upload URL (or a ready
+  `curl` command) the user runs on their own machine, so file bytes still never go
+  through the model. Sending the file as base64 in the tool call would work for
+  small files but puts it in the model's context and hits size limits.
+- **Download over HTTP:** a tool that returns a short-lived, single-use download
+  URL for the `.properties` file instead of the contents, so the admin password is
+  never placed in the model's context.
+- Both need a new API route (signed, expiring, audited) and a decision on token
+  lifetime. Until then, over HTTP the model's instructions (`src/server.ts`) tell
+  it to use `url`/`gcs`/`git` for a hosted artifact and to leave a local file for
+  the human to attach; there is no equivalent fallback text for
+  `download_instance_properties`, so it simply isn't offered.
+
 ## Safety summary
 
 - No tool can apply, create, destroy, retry, or recreate — the surface is
@@ -141,3 +171,9 @@ A client points at it with the Streamable HTTP transport, e.g.:
   credential/artifact writes all return `403` for a define token.
 - Saving only creates a `draft` record; provisioning happens exclusively through
   a human's Apply in the web app.
+- `download_instance_properties` is read-only for the deployment (it calls
+  `GET /instances/:id/properties`, which a define token may read) but its output
+  contains the cluster admin password. It is therefore only registered on the
+  local stdio server, writes straight to a `0600` file, and is audited as
+  `instance.properties_download`. User-chosen database passwords are never
+  included.

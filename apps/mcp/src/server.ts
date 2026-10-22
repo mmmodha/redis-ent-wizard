@@ -37,13 +37,14 @@ async function guard(fn: () => Promise<unknown>) {
  */
 export interface ServerOptions {
   /**
-   * Register upload_artifact, which reads a LOCAL file path and uploads it.
-   * Only meaningful when the server shares a filesystem with the caller — i.e.
-   * the local stdio transport. The hosted HTTP server leaves it off (a path
-   * would resolve on the server, not the caller), so those callers use
-   * url/gcs/git artifacts instead.
+   * Register the tools that read or write LOCAL file paths: upload_artifact
+   * (reads a file and uploads it) and download_instance_properties (writes a
+   * credentials file). Only meaningful when the server shares a filesystem with
+   * the caller — i.e. the local stdio transport. The hosted HTTP server leaves
+   * them off (a path would resolve on the server, not the caller), so those
+   * callers use url/gcs/git artifacts instead.
    */
-  allowLocalUpload?: boolean;
+  allowLocalFiles?: boolean;
 }
 
 export function createServer(client: RewClient, opts: ServerOptions = {}): McpServer {
@@ -60,6 +61,9 @@ export function createServer(client: RewClient, opts: ServerOptions = {}): McpSe
         "invent placeholder values. For application artifacts: use kind 'url', 'gcs', or 'git' for a " +
         "hosted file; for a LOCAL file call upload_artifact(path, type) when available and reference " +
         "the returned id as { kind: 'upload', ref: <id>, type }; otherwise leave it for the human. " +
+        "To save a DEPLOYED instance's endpoints and credentials as a .properties file, call " +
+        "download_instance_properties(id, path) when available; it writes the file locally and does not " +
+        "return the credentials to you. " +
         "Use validate_design / render_design to check a design, then save_design to persist a " +
         "draft and get a reviewUrl. This tool cannot provision or destroy anything.",
     },
@@ -143,7 +147,7 @@ export function createServer(client: RewClient, opts: ServerOptions = {}): McpSe
     async ({ config }) => guard(() => client.saveDesign(config)),
   );
 
-  if (opts.allowLocalUpload) {
+  if (opts.allowLocalFiles) {
     server.registerTool(
       "upload_artifact",
       {
@@ -156,6 +160,23 @@ export function createServer(client: RewClient, opts: ServerOptions = {}): McpSe
         },
       },
       async ({ path, type }) => guard(() => client.uploadArtifact(path, type)),
+    );
+
+    server.registerTool(
+      "download_instance_properties",
+      {
+        title: "Download a deployed instance's connection details",
+        description:
+          "Save a DEPLOYED instance's endpoints, credentials and details (the same as the web 'Endpoints & credentials' panel) as a .properties file (name=value) on this machine. The file contains the cluster admin password, so it is written straight to disk with mode 0600 and its contents are NOT returned to you — only the path and a count. Does not include user-chosen database passwords. Refuses to overwrite an existing file unless overwrite is true, and does not create directories. Fails for destroyed instances or before provisioning has produced endpoints. Read-only: it changes nothing in the deployment.",
+        inputSchema: {
+          id: z.string().describe("The instance id, e.g. fraud-fbloop-default."),
+          path: z
+            .string()
+            .describe("Absolute path of the file to write, e.g. /Users/me/fraud-fbloop-default.properties."),
+          overwrite: z.boolean().optional().describe("Replace the file if it already exists. Default false."),
+        },
+      },
+      async ({ id, path, overwrite }) => guard(() => client.saveInstanceProperties(id, path, overwrite ?? false)),
     );
   }
 

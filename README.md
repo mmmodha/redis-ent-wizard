@@ -312,6 +312,17 @@ saving a design creates a `draft` instance on the board with a review link
 scope. Set up (stdio for Claude Desktop/Code, or a hosted HTTP endpoint) is in
 [apps/mcp/README.md](apps/mcp/README.md).
 
+## Download an instance's connection details
+
+A deployed instance's page has a **Download .properties** button that saves its
+endpoints, credentials and details (cluster DNS/UI/admin login, nodes, databases,
+workloads, load balancers, buckets, …) as a `name=value` file named
+`<instance-id>.properties`. The API builds it (`GET /instances/:id/properties`,
+audited), so the web button and the MCP `download_instance_properties` tool
+produce identical files. It includes the generated cluster admin password, so
+treat it like a secret; user-chosen database passwords are never written. It is
+unavailable for destroyed instances.
+
 ## When is an instance really ready?
 
 `terraform apply` finishing only means the infrastructure exists. On VMs, Redis Enterprise is

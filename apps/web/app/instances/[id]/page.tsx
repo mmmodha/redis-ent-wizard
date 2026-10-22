@@ -11,6 +11,7 @@ import { StatusBadge } from "@/components/StatusBadge";
 import {
   apiBase,
   destroyInstance,
+  downloadInstanceProperties,
   forgetInstance,
   getInstance,
   moveInstance,
@@ -587,7 +588,19 @@ export default function InstanceDetailPage() {
         </div>
 
         <div className="panel">
-          <h2 style={{ marginTop: 0 }}>Endpoints & credentials</h2>
+          <div className="panel-head">
+            <h2 style={{ margin: 0 }}>Endpoints & credentials</h2>
+            {inst && inst.status !== "destroyed" && Object.keys(inst.endpoints || {}).length > 0 ? (
+              <button
+                type="button"
+                className="btn"
+                onClick={() => downloadInstanceProperties(inst.id).catch((e) => setError(e instanceof Error ? e.message : String(e)))}
+                title="Download these endpoints, credentials and details as a .properties file (name=value). Contains the cluster admin password."
+              >
+                Download .properties
+              </button>
+            ) : null}
+          </div>
           {inst?.status === "destroyed" ? (
             <div className="empty">Resources destroyed. Endpoints are no longer reachable.</div>
           ) : inProgress && !Object.keys(inst?.endpoints || {}).length ? (

@@ -302,6 +302,20 @@ code,
   margin-bottom: calc(var(--space) * 3);
 }
 
+/* Panel title row with an action button on the right. */
+.panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: calc(var(--space) * 2);
+  margin-bottom: calc(var(--space) * 2);
+}
+
+.panel-head .btn {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
 .page-eyebrow {
   margin: 0 0 8px;
   font-family: var(--redis-font-mono);

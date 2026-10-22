@@ -184,6 +184,27 @@ export async function listInstances(): Promise<Instance[]> {
   return jsonOrThrow(await fetch(`${apiBase()}/instances`, { cache: "no-store", headers: authHeaders() }));
 }
 
+/**
+ * Download an instance's endpoints, credentials and details as a `.properties`
+ * file. The API builds the file (single source of truth, shared with the MCP
+ * tool); this just fetches it and hands it to the browser to save.
+ */
+export async function downloadInstanceProperties(id: string): Promise<void> {
+  const res = await fetch(`${apiBase()}/instances/${encodeURIComponent(id)}/properties`, {
+    cache: "no-store",
+    headers: authHeaders(),
+  });
+  if (!res.ok) await jsonOrThrow(res); // throws with the API's error message
+  const url = URL.createObjectURL(new Blob([await res.text()], { type: "text/plain;charset=utf-8" }));
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `${id}.properties`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
 export async function getInstance(id: string): Promise<Instance> {
   return jsonOrThrow(
     await fetch(`${apiBase()}/instances/${encodeURIComponent(id)}`, {
